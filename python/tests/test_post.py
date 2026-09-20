@@ -244,6 +244,78 @@ def test_a_grouped_split_repeats_on_a_seed():
         assert rows.tolist() == again[name].tolist()
 
 
+def rotors(ids):
+    """Section 31's worked example: five rotors, the table in its own
+    order, one row per id given."""
+    ds = mestra.Dataset(writer="t")
+    ds.add_category_table("rotor", ["rotor_b", "rotor_a", "rotor_d",
+                                    "rotor_c", "rotor_e"])
+    ds.add_key("rotor", ids, role="group", category="rotor",
+               generalisation=True)
+    ds.add_scalar("cl", np.arange(float(len(ids))), units="1")
+    return ds
+
+
+def test_the_worked_example_of_section_31():
+    """The table of section 31, draw by draw and part by part.
+
+    An implementation that reproduces it reproduces every split, so
+    this is the test the other three languages have to pass too. The
+    rows are given out of unit order on purpose: a part's rows are
+    the rows whose unit is in it, ascending.
+    """
+    ds = rotors([3, 1, 4, 0, 2])          # c, a, e, b, d
+    labels = np.asarray(ds.keys["rotor"].values)
+    units = post._units_in_order(ds, ds.keys["rotor"], labels)
+    assert units == [(b"rotor_a", 1), (b"rotor_b", 0), (b"rotor_c", 3),
+                     (b"rotor_d", 2), (b"rotor_e", 4)]
+    assert post._splitmix64(0, 5) == [0xe220a8397b1dcdaf,
+                                      0x6e789e6aa1b965f4,
+                                      0x06c45d188009454f,
+                                      0xf88bb8a8724c81ec,
+                                      0x1b39896a51a8749b]
+    parts = post.grouped_split(ds, {"train": 0.8, "test": 0.2}, seed=0)
+    assert list(parts) == ["test", "train"]     # name order, as filled
+    assert parts["test"].tolist() == [0]                     # rotor_c
+    assert parts["train"].tolist() == [1, 2, 3, 4]
+
+
+def test_a_grouped_split_ignores_the_order_of_the_category_table():
+    """Section 31: two files holding the same units in tables written
+    in two orders split the same way."""
+    first = post.grouped_split(rotors([3, 1, 4, 0, 2]), seed=7)
+    other = mestra.Dataset(writer="t")
+    other.add_category_table("rotor", ["rotor_a", "rotor_b", "rotor_c",
+                                       "rotor_d", "rotor_e"])
+    other.add_key("rotor", [2, 0, 4, 1, 3], role="group",
+                  category="rotor", generalisation=True)
+    other.add_scalar("cl", np.arange(5.0), units="1")
+    second = post.grouped_split(other, seed=7)
+    for name, rows in first.items():
+        assert rows.tolist() == second[name].tolist()
+
+
+def test_the_groups_and_splits_example_still_assigns_what_it_prints():
+    """docs/examples/groups-and-splits prints these rows, and the
+    other three languages port their example from that README."""
+    ds = mestra.Dataset(writer="t")
+    ds.add_category_table("member", ["wing_a", "wing_b", "wing_c"])
+    ds.add_key("member", [0, 0, 1, 1, 2, 2], role="group",
+               category="member", generalisation=True)
+    ds.add_scalar("cl", [0.21, 0.25, 0.30, 0.36, 0.41, 0.48], units="1")
+    parts = post.grouped_split(ds, {"train": 0.67, "test": 0.33},
+                               seed=0)
+    assert parts["train"].tolist() == [0, 1, 2, 3]
+    assert parts["test"].tolist() == [4, 5]
+
+
+def test_a_grouped_split_refuses_a_negative_fraction():
+    with pytest.raises(MestraError) as caught:
+        post.grouped_split(rotors([0, 1, 2, 3, 4]),
+                           {"train": 1.2, "test": -0.2})
+    assert "negative" in str(caught.value)
+
+
 def test_a_leaking_split_is_named():
     with mestra.read(corpus.case_path("warn_w01")) as ds:
         leaks = post.split_leaks(ds)

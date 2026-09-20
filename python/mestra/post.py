@@ -17,6 +17,7 @@ file.
 
 from __future__ import annotations
 
+import math
 import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -25,7 +26,7 @@ from typing import Any
 import numpy as np
 
 from .errors import MestraError
-from .model import ArraySlot, Dataset, ScalarSlot, Support
+from .model import ArraySlot, Dataset, Key, ScalarSlot, Support
 from .weights import compute_weights, measures
 
 __all__ = [
@@ -484,18 +485,28 @@ def split_leaks(dataset: Dataset,
 def grouped_split(dataset: Dataset,
                   fractions: Mapping[str, float] | None = None,
                   seed: int = 0) -> dict[str, np.ndarray]:
-    """Split the rows by the unit of generalisation.
+    """Split the rows by the unit of generalisation (section 31).
 
     Whole units move together, so no unit lands on both sides. The
-    result maps each part's name to the file rows in it. `fractions`
-    defaults to 80 per cent training and 20 per cent test, and `seed`
-    to 0, so that two people who write down the call get the same
-    split.
+    result maps each part's name to the file rows in it, in the order
+    of the part names as UTF-8 bytes. `fractions` names each part and
+    gives it a fraction, normalised by their sum, so 8 and 2 mean
+    what 0.8 and 0.2 mean; it defaults to 80 per cent training and 20
+    per cent test. `seed` defaults to 0.
+
+    Section 31 is the algorithm, not this implementation: the units
+    are ordered by their category names as bytes, one draw per unit
+    comes from splitmix64 seeded with `seed`, the units are sorted by
+    their draw, and the parts take consecutive blocks of them, sized
+    by largest remainder. So one seed names one split in all four
+    languages, which a language shuffling with its own generator
+    cannot promise.
 
     Every named part gets at least one unit whenever there are at
     least as many units as parts; fewer units than that cannot be
     divided into the parts asked for, and the call is refused rather
-    than returning an empty part to score a model on.
+    than returning an empty part to score a model on. So is a
+    negative fraction, and a set of fractions that sums to zero.
 
     A file that names no unit of generalisation cannot be split this
     way and the call is refused: a split by row would score the model
@@ -509,50 +520,94 @@ def grouped_split(dataset: Dataset,
             "of one case on both sides. Declare one with "
             "set_generalisation_group(name)")
     parts = dict(fractions or {"train": 0.8, "test": 0.2})
-    total = sum(parts.values())
-    if not parts or total <= 0:
+    if not parts or sum(parts.values()) <= 0 or \
+            any(f < 0 for f in parts.values()):
         raise MestraError(
-            "", "the fractions must name at least one part and add to "
-            "more than zero")
-    labels = np.asarray(dataset.keys[unit].read().values)
-    units = np.unique(labels)
+            "", "the fractions must name at least one part, none of "
+            "them negative, and add to more than zero")
+    key = dataset.keys[unit]
+    labels = np.asarray(key.read().values).reshape(-1)
+    units = _units_in_order(dataset, key, labels)
     if len(units) < len(parts):
         raise MestraError(
             "", "%r has %d unit(s) of generalisation and this asks for "
             "%d parts (%s); a part with no unit in it is not a test. "
             "Ask for fewer parts, or split a file with more units"
             % (unit, len(units), len(parts), ", ".join(parts)), unit)
-    shuffled = units[np.random.default_rng(seed).permutation(len(units))]
+    draws = _splitmix64(seed, len(units))
+    shuffled = [units[at][1] for at in
+                sorted(range(len(units)),
+                       key=lambda at: (draws[at], units[at][0]))]
+    names = sorted(parts, key=lambda name: name.encode("utf-8"))
+    sizes = _part_sizes(len(units), [parts[name] for name in names])
     out: dict[str, np.ndarray] = {}
     at = 0
-    for name, take in zip(parts, _shares(len(units),
-                                         [parts[n] / total
-                                          for n in parts])):
+    for name, take in zip(names, sizes):
         mine = shuffled[at:at + take]
         at += take
         out[name] = np.flatnonzero(np.isin(labels, mine))
     return out
 
 
-def _shares(total: int, fractions: list[float]) -> list[int]:
-    """Whole units per part: largest remainder, and nothing empty.
+def _units_in_order(dataset: Dataset, key: Key,
+                    labels: np.ndarray) -> list[tuple[bytes, int]]:
+    """The distinct ids a group key holds, with their names, in order.
 
-    The remainder rule keeps the shares as close to the fractions as
-    whole units allow; the pass after it takes one unit from the
-    largest part for any part the rule left empty, which is the
-    difference between a test set and a promise of one. With at
-    least as many units as parts some part always has two to give.
+    The order is the category names as UTF-8 byte strings, and not
+    the table's: two files that hold the same units in tables written
+    in two orders must split the same way (section 31). An id no
+    table names sorts under its own digits.
     """
-    parts = len(fractions)
-    wanted = [f * total for f in fractions]
-    take = [int(w) for w in wanted]
-    order = sorted(range(parts), key=lambda at: wanted[at] - take[at],
-                   reverse=True)
-    for at in order[:total - sum(take)]:
+    table = dataset.categories.get(key.category or "")
+    named = []
+    for one in {int(value) for value in labels}:
+        name = (table[one] if table is not None and 0 <= one < len(table)
+                else str(one))
+        named.append((str(name).encode("utf-8"), one))
+    return sorted(named)
+
+
+def _splitmix64(seed: int, count: int) -> list[int]:
+    """`count` draws of section 31's generator, seeded with `seed`.
+
+    Sixty-four bits of state, every operation on unsigned 64-bit
+    integers and every shift logical. The state starts at the seed
+    and the first draw is what the first update returns, so the seed
+    itself is never a draw.
+    """
+    mask = (1 << 64) - 1
+    state = seed & mask
+    draws = []
+    for _ in range(count):
+        state = (state + 0x9E3779B97F4A7C15) & mask
+        z = state
+        z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & mask
+        z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & mask
+        draws.append(z ^ (z >> 31))
+    return draws
+
+
+def _part_sizes(units: int, fractions: list[float]) -> list[int]:
+    """Whole units per part, the parts already in name order.
+
+    Largest remainder first: the base size is the floor of the part's
+    exact share and what is left over goes one each to the largest
+    remainders, ties by name. Then the floor of one: while some part
+    has no unit, the part with the fewest takes one from the part
+    with the most, ties by name again. A part with no unit in it is
+    not a test set, and with at least as many units as parts some
+    part always has one to give (section 31).
+    """
+    total = sum(fractions)
+    exact = [units * (f / total) for f in fractions]
+    take = [math.floor(one) for one in exact]
+    order = sorted(range(len(take)),
+                   key=lambda at: (-(exact[at] - take[at]), at))
+    for at in order[:units - sum(take)]:
         take[at] += 1
-    for at in range(parts):
-        if take[at] == 0:
-            biggest = take.index(max(take))
-            take[biggest] -= 1
-            take[at] += 1
+    while min(take) == 0:
+        fewest = min(range(len(take)), key=lambda at: (take[at], at))
+        most = max(range(len(take)), key=lambda at: (take[at], -at))
+        take[most] -= 1
+        take[fewest] += 1
     return take
