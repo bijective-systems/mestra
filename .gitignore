@@ -6,3 +6,7 @@ __pycache__/
 *.h5
 !vectors/**/*.mst
 !vectors/**/*.h5
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
