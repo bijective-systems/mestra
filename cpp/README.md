@@ -56,14 +56,18 @@ Five minutes with the tool
         warnings alone still exit 0.
 
     mestra-cli read FILE
-        read the whole file and say what came back: the row count, how
+        check the file, refuse it with the rule identifiers if the
+        validator rejects it, and otherwise read the whole of it and
+        say what came back: the row count, how
         many keys, scalars, supports and callables, and how many array
         values.
 
     mestra-cli info FILE
         the row count, the keys with their roles and bounds, the
-        supports with their ids, and every slot. Reads attributes and
-        dataspaces only; it opens a large file as fast as a small one.
+        supports with their ids, and every slot. It checks the file
+        first and refuses it the way `read` does; past that it reads
+        attributes and dataspaces only, so it opens a large file as
+        fast as a small one.
 
     mestra-cli probe FILE SLOT ROW NODE COMPONENT [DRAW]
         one stored value. Any index may be `-` when the slot has no
@@ -72,9 +76,10 @@ Five minutes with the tool
             mestra-cli probe f.mes /supports/s0/coordinates \
                 instance=1 node=2 component=0
 
-        The axis names are row, instance, draw, node, cell, component
-        and index. A float64 slot prints "%.17e" and an integer slot
-        plain decimal, which is the form section 30 asks a probe for.
+        The axis names are row, instance, draw, node, cell,
+        cell_plus_one, component and index. A float64 slot prints
+        "%.17e" and an integer slot plain decimal, which is the form
+        section 30 asks a probe for.
 
     mestra-cli support-id FILE SUPPORT
         the digest of section 24, computed from the stored arrays and
@@ -170,9 +175,10 @@ conformance-tested without any proprietary model:
     table.add_column("alpha", {4.0});
     const mestra::Dataset out = mestra::evaluate(d, table);
 
-C++ cannot give a struct member names chosen at run time, so the keys
-table of section 26 is a struct of named vectors: `names` beside
-`numeric` and `text`, looked up by name through `column(name)`.
+The keys table of section 26 is a struct holding the key names beside
+one vector per key, looked up by name through `column(name)`, because
+C++ has no run-time member names. That is the form section 26 now
+gives for this language.
 
 To add your own callable type, derive from `mestra::Callable` and
 register a factory:
@@ -235,39 +241,59 @@ What the reader refuses, and says so:
     go in, which makes a deeper one impossible to hold rather than
     merely unsafe to walk;
   - an element count or a byte length whose product overflows, or
-    passes a stated maximum. A dataset that declares a trillion
-    elements and stores none is refused before anything is allocated;
-  - a soft link, which is not resolved, and an external link, which is
-    never opened. Following one would let a file name another file on
-    the machine and have this reader open it. The link's own type is
+    passes the stated maximum of 2^31 elements for an eager read. A
+    dataset that declares a trillion elements and stores none is
+    refused before anything is allocated. A lazy read and a row-range
+    read are not subject to that maximum, because they never
+    materialise the whole dataset, so the same file can be readable
+    one way and E41 the other (section 29);
+  - a link in the public tree that is not a hard link: a soft link,
+    whether it resolves, dangles or loops, and an external link, which
+    is never opened. Following one would let a file name another file
+    on the machine and have this reader open it. The link's own type is
     read before anything is opened, so nothing under a link of either
-    kind is ever asked about;
-  - a member of a container group that is neither a group nor a
-    dataset.
+    kind is ever asked about. That is **E40**;
+  - a member of a container group that is neither the kind that
+    belongs there, a nesting past the cap, a malformed object, or an
+    eager read of a dataset above the maximum element count. Each is
+    **E41**, reported with its path while the pass goes on, so that
+    one broken object does not hide the rest of the file.
 
-Two things follow from that. The validator reports rather than fails:
-one object it cannot read is recorded against its path and the rest of
-the file is still checked, because a validator that stops at the first
-fault tells a caller almost nothing. And a fault that no rule of
+Three things follow from that. The validator reports rather than
+fails: one object it cannot read is recorded against its path and the
+rest of the file is still checked, because a validator that stops at
+the first fault tells a caller almost nothing. A fault that no rule of
 section 14 covers is still printed, as `! path: why`, so that a file
 is never reported clean because the thing wrong with it has no
-identifier.
+identifier. And `info` and `read` check the file before they read it
+and refuse with the same identifiers `validate` gives, which is what
+the hostile subset of section 30 asks of them; `mestra::read_header`
+itself still reads no dataset, so the library keeps the cheap open and
+the tool keeps the safe one.
 
-`cpp/tests/hostile/` holds one small file for each of these, with
-`make_hostile.py` saying how each was made, and the `hostile` ctest
-case runs `validate`, `info` and `read` over all of them under a
-timeout. Building with `-DMESTRA_SANITIZE=ON` adds the address and
-undefined-behaviour sanitizers to the whole suite.
+There are two hostile suites. `vectors/hostile` is the corpus's own,
+shared by every language, and its contract is section 30's: the
+required identifiers must appear, more are allowed, and `validate`,
+`info` and `read` must each refuse inside the timeout the case states.
+Two of its fifteen files are generated rather than committed, so run
+
+    python vectors/generate.py --hostile-deep
+
+before `ctest`. `cpp/tests/hostile/` is this implementation's own,
+with `make_hostile.py` saying how each file was made. Building with
+`-DMESTRA_SANITIZE=ON` adds the address and undefined-behaviour
+sanitizers to the whole suite.
 
 
 What this build has been checked against
 ----------------------------------------
 
-All 69 corpus cases: the validator outcome, every support id, every
+All 70 corpus cases: the validator outcome, every support id, every
 probe, every codec round trip, every worked evaluation, a lazy row
 read of every row-dimensioned probe, and, for the 30 cases that
 validate without an error, read-write-compare under the structural
-equality rule of section 30. Then every file of the hostile corpus
+equality rule of section 30. Then the fifteen cases of
+`vectors/hostile` and the ten of this implementation's own, each
 through `validate`, `info` and `read`. The whole of it also runs under
 the address and undefined-behaviour sanitizers.
 

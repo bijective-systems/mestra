@@ -108,9 +108,10 @@ class Validator {
     try {
       body();
     } catch (const Error& e) {
-      error(e.rule(), path, e.what());
+      error(e.rule().empty() ? std::string("E41") : e.rule(), path,
+            e.what());
     } catch (const std::exception& e) {
-      error(std::string(), path, e.what());
+      error("E41", path, e.what());
     }
   }
 
@@ -123,15 +124,15 @@ class Validator {
     const std::string path =
         (parent == "/" ? std::string("/") : parent + "/") + m.name;
     if (m.kind != internal::LinkKind::Hard) {
-      error(std::string(), path,
+      error("E40", path,
             std::string("this name is ") + internal::link_kind_name(m.kind) +
-                "; this reader follows a hard link and nothing else, and "
-                "never opens an external one");
+                "; a reader never follows one (section 29)");
       return false;
     }
     if (!m.is_group && !m.is_dataset) {
-      error(std::string(), path,
-            "this name is neither a group nor a dataset");
+      error("E41", path,
+            "this name is neither a group nor a dataset, so there is "
+            "nothing here this reader can read");
       return false;
     }
     return true;
@@ -201,6 +202,8 @@ class Validator {
   void row_support_dataset();
   void supports();
   void callables();
+  void scales();
+  void private_group();
   void check_dict(const std::string& path, bool top_level, int depth);
   void slot(const std::string& path, const std::string& support_kind,
             std::int64_t n_nodes, std::int64_t n_cells,
@@ -371,6 +374,74 @@ void Validator::run() {
   scalars();
   supports();
   callables();
+  scales();
+  private_group();
+}
+
+void Validator::scales() {
+  // Section 21 gives a dimension scale a NAME as well as a CLASS.  A
+  // scale without one is not the layout netCDF-C writes, and nothing
+  // else looks at a scale dataset, so the check lives here.  The walk
+  // is bounded and follows hard links only, like every other walk
+  // over a file this reader did not write.
+  std::vector<std::pair<std::string, int>> todo;
+  todo.emplace_back("/", 0);
+  while (!todo.empty()) {
+    const std::pair<std::string, int> here = todo.back();
+    todo.pop_back();
+    if (here.second > internal::kMaxGroupDepth) continue;
+    // /private is not checked (decision 43) and neither is a group
+    // this version does not know.
+    for (const Member& m : f_.members(here.first)) {
+      if (m.kind != internal::LinkKind::Hard) continue;
+      const std::string child =
+          (here.first == "/" ? std::string("/") : here.first + "/") + m.name;
+      if (here.first == "/" && m.is_group &&
+          !internal::known_root_group(m.name)) {
+        continue;
+      }
+      if (child == "/private") continue;
+      if (m.is_group) {
+        todo.emplace_back(child, here.second + 1);
+        continue;
+      }
+      if (!m.is_dataset) continue;
+      guarded(child, [&] {
+        const DsetInfo info = f_.dataset_info(child);
+        if (!info.is_scale) return;
+        bool has_name = false;
+        for (const RawAttr& a : f_.attributes(child)) {
+          if (a.name == "NAME") has_name = true;
+        }
+        if (!has_name) {
+          error("E25", child,
+                "a dimension scale with no NAME attribute, which section "
+                "21 requires of one");
+        }
+      });
+    }
+  }
+}
+
+void Validator::private_group() {
+  // Decision 32: E18 is reported beside the rule that found the
+  // missing public thing, in a file that also carries /private.  A
+  // writer that moved the public thing into the private part is what
+  // the rule is about; these are the two facts a reader can see, and
+  // it never interprets /private to see them.
+  if (!f_.is_group("/private")) return;
+  static const char* kCovered[] = {"E02", "E11", "E13", "E15",
+                                   "E17", "E31", "E39"};
+  for (const Finding& f : r_->errors) {
+    for (const char* id : kCovered) {
+      if (f.id == id) {
+        error("E18", f.where,
+              std::string("a required public thing is absent (") + id +
+                  ") in a file that also carries a /private group");
+        return;
+      }
+    }
+  }
 }
 
 void Validator::root() {
@@ -461,7 +532,8 @@ void Validator::categories() {
     if (!usable("/categories", m)) continue;
     const std::string p = "/categories/" + m.name;
     if (!m.is_dataset) {
-      error(std::string(), p, "a category table must be a dataset");
+      error("E41", p, "a category table must be a dataset, and this is a "
+                      "group, so there is nothing here to read");
       continue;
     }
     guarded(p, [&] {
@@ -520,7 +592,8 @@ void Validator::keys() {
     if (!usable("/keys", m)) continue;
     const std::string p = "/keys/" + m.name;
     if (!m.is_dataset) {
-      error(std::string(), p, "a key must be a dataset");
+      error("E41", p, "a key must be a dataset, and this is a group, so "
+                      "there is nothing here to read");
       continue;
     }
     bool read_failed = false;
@@ -620,7 +693,7 @@ void Validator::keys() {
       error("E25", p, "the dimension of a key is not `row`");
     }
     if (info.shape.size() != 1) {
-      error("E39", p, "a key must have exactly one dimension, `row`");
+      error("E16", p, "a key must have exactly one dimension, `row`");
     } else if (static_cast<std::int64_t>(info.shape[0]) != n_rows_) {
       error("E16", p,
             "a key of " +
@@ -654,16 +727,8 @@ void Validator::keys() {
   const std::vector<RawAttr> root_attrs = f_.attributes("/");
   const bool has_gen = find(root_attrs, "generalisation_group") != nullptr;
   if (has_group_key_ && !has_gen) {
-    // Section 19 requires the attribute (E39), and section 14 makes
-    // the unit of generalisation public information: a file that
-    // declares a group key and names it nowhere public breaks E18 as
-    // well, which a validator sees from the missing public attribute
-    // alone and never by interpreting /private.
     error("E39", "/",
           "the file declares a group key and no `generalisation_group`");
-    error("E18", "/",
-          "the unit of generalisation is public information and this file "
-          "names it nowhere public");
   }
 
   const KeyInfo* time_key = nullptr;
@@ -732,9 +797,12 @@ void Validator::keys() {
       }
       if (outside) {
         warn("W04", p, "a key value outside its declared bounds");
-      } else if (k.has_lower && k.has_upper && any && n_rows_ > 0) {
+      } else if (k.has_lower && k.has_upper && any && hi > lo) {
         // Decision 20: more than a factor of four in width.  A value
-        // outside the bounds is W04 and not W08.
+        // outside the bounds is W04 and not W08, and decision 36
+        // takes the rule out of a zero observed width altogether,
+        // which covers a file with no rows, a key with one distinct
+        // value and a key with no finite value.
         if ((k.upper - k.lower) > 4.0 * (hi - lo)) {
           warn("W08", p,
                "declared bounds more than four times wider than the "
@@ -889,7 +957,7 @@ void Validator::scalars() {
       error("E25", p, "the dimension of a scalar is not `row`");
     }
     if (info.shape.size() != 1) {
-      error("E39", p, "a scalar must have exactly one dimension, `row`");
+      error("E16", p, "a scalar must have exactly one dimension, `row`");
     } else if (static_cast<std::int64_t>(info.shape[0]) != n_rows_) {
       error("E16", p,
             "a scalar of " +
@@ -972,6 +1040,14 @@ void Validator::row_support_dataset() {
 }
 
 void Validator::supports() {
+  for (const Member& m : f_.members("/supports")) {
+    if (!usable("/supports", m)) continue;
+    if (!m.is_group) {
+      error("E41", "/supports/" + m.name,
+            "a support must be a group, and this is a dataset, so there "
+            "is nothing here to read");
+    }
+  }
   for (std::size_t index = 0; index < support_names_.size(); ++index) {
     const std::string name = support_names_[index];
     const std::string sp = "/supports/" + name;
@@ -1368,6 +1444,11 @@ void Validator::slot(const std::string& path,
     const std::vector<RawAttr> key_attrs =
         f_.is_dataset("/keys/" + key) ? f_.attributes("/keys/" + key)
                                       : std::vector<RawAttr>();
+    if (text_of(key_attrs, "role") != "group") {
+      error("E04", path,
+            "`varies` names \"" + key +
+                "\", which the file does not declare as a group key");
+    }
     const std::string table = text_of(key_attrs, "category");
     const auto it = category_tables_.find(table);
     if (it != category_tables_.end() && axes.extent[0] != it->second.size()) {
@@ -1394,10 +1475,11 @@ void Validator::slot(const std::string& path,
   check_dataset_storage(path, info, row_leading,
                         row_leading ? want_rows : kNoChunkCheck);
 
-  if (role == "field" && dtype_ok && dtype == DType::Float64) {
+  if ((role == "field" || role == "derived") && dtype_ok &&
+      dtype == DType::Float64) {
     for (const double v : reals(path)) {
       if (!std::isfinite(v)) {
-        warn("W03", path, "a non-finite value in a field");
+        warn("W03", path, "a non-finite value in a " + role);
         break;
       }
     }
@@ -1428,7 +1510,8 @@ void Validator::callables() {
     if (!usable("/callables", m)) continue;
     const std::string p = "/callables/" + m.name;
     if (!m.is_group) {
-      error(std::string(), p, "a callable must be a group");
+      error("E41", p, "a callable must be a group, and this is a dataset, "
+                      "so there is nothing here to read");
       continue;
     }
     guarded(p, [&] {
@@ -1451,8 +1534,9 @@ void Validator::callables() {
 void Validator::check_dict(const std::string& path, bool top_level,
                            int depth) {
   if (depth >= kMaxDictDepth) {
-    error("E32", path,
-          "a dictionary nested deeper than this reader will walk");
+    error("E41", path,
+          "nested deeper than this reader walks, which is " +
+              internal::format_i64(kMaxDictDepth) + " groups");
     return;
   }
   // A callable's dictionary is opaque to a reader that does not own its
@@ -1563,12 +1647,9 @@ Report validate(const std::string& path) {
     try {
       f = File::open_read(path);
     } catch (const Error& e) {
-      // A file this reader cannot open as HDF5 at all has no `format`
-      // and no `writer` or `created` either, which is what a reader
-      // would say about any other file missing them.
-      r.errors.push_back({"E01", path, e.what()});
-      r.errors.push_back({"E17", path, "the file carries no root "
-                                       "attributes this reader can read"});
+      // E41: an object this reader cannot read, reported with its
+      // path.  The object here is the file.
+      r.errors.push_back({"E41", path, e.what()});
       return r;
     }
     Validator v(f, &r);

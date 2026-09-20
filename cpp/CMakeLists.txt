@@ -91,6 +91,17 @@ if(MESTRA_BUILD_TESTS)
     # Files that are legal HDF5 and are not this format.  They say
     # nothing about what a conforming file means; they say that a
     # reader answers for a file it did not write.
+    # The corpus's own hostile subset, whose contract section 30
+    # gives: the required identifiers must appear, more are allowed,
+    # and validate, info and read must all refuse inside the timeout.
+    # Two of its files are generated rather than committed; see
+    # tests/run_shared_hostile.py.
+    add_test(NAME shared_hostile COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_shared_hostile.py
+      --cli $<TARGET_FILE:mestra-cli>
+      --vectors ${CMAKE_CURRENT_SOURCE_DIR}/../vectors)
+    set_tests_properties(shared_hostile PROPERTIES TIMEOUT 900)
+
     add_test(NAME hostile COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_hostile.py
       --cli $<TARGET_FILE:mestra-cli>
