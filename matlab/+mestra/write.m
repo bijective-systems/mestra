@@ -1,8 +1,26 @@
-function write(dataset, path)
+function write(dataset, path, varargin)
 %MESTRA.WRITE  Write a mestra.Dataset to a conforming file.
 %
-%   MESTRA.WRITE(DATASET, PATH) writes the file specification sections
-%   13 to 25 define:
+%   MESTRA.WRITE(DATASET, PATH) validates what it is about to write
+%   and refuses to leave an invalid file behind.  The file is built,
+%   checked with MESTRA.VALIDATE, and only then put at PATH; on any
+%   error it is deleted and the error names the rule, with every
+%   finding in its message.  A writer that produces invalid files
+%   silently is the one failure mode an open format cannot afford,
+%   because the file outlives the session that made it
+%   (docs/api-conventions.md, section 2).
+%
+%   Warnings do not stop a write.  They are findings about a file
+%   that is nonetheless conforming, and MESTRA.VALIDATE reports them
+%   whenever the caller asks.
+%
+%   MESTRA.WRITE(DATASET, PATH, 'Check', false) writes without
+%   validating, which is how a deliberately invalid file is made.
+%
+%       mestra.write(d, 'out.mes');
+%       mestra.write(broken, 'e16.mes', 'Check', false);
+%
+%   It writes the file specification sections 13 to 25 define:
 %
 %     * every string, in an attribute or a dataset, fixed length,
 %       UTF-8, padded on the right with NUL bytes, and never variable
@@ -42,5 +60,45 @@ function write(dataset, path)
         error('mestra:write', ...
               'the first argument must be a mestra.Dataset');
     end
-    mestra.internal.Writer.save(dataset, path);
+    p = inputParser();
+    p.addParameter('Check', true);
+    p.parse(varargin{:});
+    if ~p.Results.Check
+        mestra.internal.Writer.save(dataset, path);
+        return
+    end
+
+    % Build it beside the destination and only move it there once its
+    % own validator accepts it, so that a refused write never replaces
+    % what was there and never leaves a half file behind.
+    [folder, base, ext] = fileparts(path);
+    if isempty(folder), folder = '.'; end
+    [~, tag] = fileparts(tempname());
+    tmp = fullfile(folder, ['.' base ext '.mestra-' tag]);
+    cleanup = onCleanup(@() removeIfPresent(tmp));
+    mestra.internal.Writer.save(dataset, tmp);
+    r = mestra.validate(tmp);
+    bad = [r.errors r.unclassified];
+    if ~isempty(bad)
+        error(['mestra:' bad{1}], ...
+              ['%s: mestra.write refused to write %s because its own ' ...
+               'validator rejects it:\n%s\nFix the dataset, or pass ' ...
+               '''Check'', false to write it anyway'], bad{1}, path, ...
+              mestra.report(r, 'String', true));
+    end
+    if exist(path, 'file') == 2
+        delete(path);
+    end
+    [ok, msg] = movefile(tmp, path, 'f');
+    clear cleanup
+    if ~ok
+        error('mestra:write', 'the file could not be put at %s: %s', ...
+              path, msg);
+    end
+end
+
+function removeIfPresent(path)
+    if exist(path, 'file') == 2
+        delete(path);
+    end
 end
