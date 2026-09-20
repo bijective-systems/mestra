@@ -2,9 +2,11 @@ mestra in C++
 =============
 
 A reader, a writer and a validator for the `.mes` format of SPEC.md,
-in plain C++17 over the HDF5 C API and `hdf5_hl`. No other dependency:
-the SHA-256 of section 24 is written out here, and the tests read the
-conformance corpus with a small Python script rather than a framework.
+with the integration weights the format says a writer computes rather
+than imports, in plain C++17 over the HDF5 C API and `hdf5_hl`. No
+other dependency: the SHA-256 of section 24 is written out here, and
+the tests read the conformance corpus with a small Python script
+rather than a framework.
 
 SPEC.md is the normative document and `vectors/` is the conformance
 corpus. Nothing in this directory is the reference; when this code and
