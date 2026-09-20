@@ -27,8 +27,9 @@ from typing import Any
 
 import numpy as np
 
-from .encoding import support_digest
-from .errors import MestraError
+from . import h5safe
+from .encoding import decode_string, support_digest
+from .errors import Finding, MestraError
 from .names import is_legal_name, is_reserved
 
 __all__ = [
@@ -240,13 +241,19 @@ class FileSource(_Source):
         self.reads = 0
 
     def read(self, rows: slice | None = None) -> np.ndarray:
+        """The values, or one row range of them.
+
+        A read that would materialise more elements than
+        `limits.MAX_READ_ELEMENTS` is refused rather than attempted,
+        and so is a dataset the library itself will not convert.
+        """
         self.reads += 1
         if not self._file:
             raise MestraError(
-                "E00", "the file has been closed; read it with "
+                "reader", "the file has been closed; read it with "
                 "lazy=False to keep the values", self.path)
-        dset = self._file[self.path]
-        values = dset[()] if rows is None else dset[rows]
+        values = h5safe.read_values(self._file[self.path], self.path,
+                                    rows)
         if self._decode:
             return _decode_strings(values)
         return values
@@ -270,9 +277,13 @@ def _wrap(values: Any, dtype: str) -> _Source | None:
 
 
 def _decode_strings(values: Any) -> np.ndarray:
-    """Fixed-length bytes as read from HDF5 into text (section 18)."""
-    flat = [v.rstrip(b"\x00").decode("utf-8") if isinstance(v, bytes)
-            else str(v) for v in np.asarray(values).reshape(-1)]
+    """Fixed-length bytes as read from HDF5 into text (section 18).
+
+    Leniently: a string that is not valid UTF-8 comes back with the
+    bad bytes replaced, and the validator reports it (E26).
+    """
+    flat = [decode_string(v) if isinstance(v, bytes) else str(v)
+            for v in np.asarray(values).reshape(-1)]
     return np.array(flat, dtype=np.str_).reshape(np.asarray(values).shape)
 
 
@@ -732,6 +743,15 @@ class Dataset:
         #: Optional groups the file carried, so that an empty one
         #: survives a rewrite.
         self.present: set[str] = set()
+        #: What the reader met and could not classify as a rule of
+        #: section 14: a link it will not follow, a member of the
+        #: wrong kind, something the library would not read. The
+        #: validator reports these too.
+        self.problems: list[Finding] = []
+        #: Paths this reader could not copy into memory, so that a
+        #: rewrite would lose them. `write` refuses while any
+        #: remain.
+        self.lossy: list[str] = []
         #: What the file said, kept so that the validator can check it.
         self.stored_aligned: bool | None = None
         self.stored_row_count: int | None = None

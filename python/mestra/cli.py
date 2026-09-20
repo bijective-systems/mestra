@@ -58,12 +58,13 @@ def _validate(paths: Sequence[str], quiet: bool) -> int:
             status = 1
             continue
         if not quiet:
-            for finding in report.errors + report.warnings:
+            for finding in report.findings:
                 print("  %s" % finding)
-        if report.errors:
+        if report.errors or report.unclassified:
             status = 1
-            print("%s: %d error(s), %d warning(s): %s"
+            print("%s: %d error(s), %d warning(s), %d unclassified: %s"
                   % (path, len(report.errors), len(report.warnings),
+                     len(report.unclassified),
                      " ".join(report.error_ids + report.warning_ids)))
         elif report.warnings:
             print("%s: valid, %d warning(s): %s"
@@ -90,6 +91,8 @@ def _info(paths: Sequence[str]) -> int:
 
 def _print_dataset(path: str, ds: Dataset) -> None:
     print(path)
+    for finding in ds.problems:
+        print("  %s" % finding)
     print("  %s written by %r on %s" % (ds.format, ds.writer,
                                         ds.created))
     line = "  %d row(s), %s" % (

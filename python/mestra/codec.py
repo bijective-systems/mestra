@@ -17,6 +17,7 @@ from typing import Any
 import h5py
 import numpy as np
 
+from . import h5safe, limits
 from .encoding import (
     NULL_SENTINEL,
     decode_string,
@@ -29,8 +30,8 @@ from .encoding import (
     write_attr,
     write_raw_string_attr,
 )
-from .errors import MestraError
-from .names import MACHINERY, RESERVED_PREFIX, is_legal_name
+from .errors import Finding, MestraError
+from .names import RESERVED_PREFIX, is_legal_name
 
 __all__ = ["encode_dict", "decode_dict", "ALLOWED_DTYPES"]
 
@@ -48,8 +49,16 @@ def _sorted_keys(d: Mapping[str, Any]) -> list[str]:
 # ------------------------------------------------------------- writing
 
 def encode_dict(group: h5py.Group, d: Mapping[str, Any],
-                top_level: bool = True) -> None:
-    """Write a dictionary into `group` (sections 17 and 25)."""
+                top_level: bool = True, depth: int = 0) -> None:
+    """Write a dictionary into `group` (sections 17 and 25).
+
+    A dictionary that nests deeper than `limits.MAX_DEPTH` is
+    refused, because a reader of the file would refuse it too.
+    """
+    if depth > limits.MAX_DEPTH:
+        raise MestraError(
+            "E32", "a dictionary that nests more than %d groups deep "
+            "is not representable" % limits.MAX_DEPTH, group.name)
     for key in _sorted_keys(d):
         value = d[key]
         if not is_legal_name(key):
@@ -65,12 +74,14 @@ def encode_dict(group: h5py.Group, d: Mapping[str, Any],
                 "E32", "type and repr are the container's attributes "
                 "on the callable's group, so a dictionary may not use "
                 "them at its top level", key)
-        _encode_value(group, key, value)
+        _encode_value(group, key, value, depth)
 
 
-def _encode_value(group: h5py.Group, key: str, value: Any) -> None:
+def _encode_value(group: h5py.Group, key: str, value: Any,
+                  depth: int = 0) -> None:
     if isinstance(value, Mapping):
-        encode_dict(group.create_group(key), value, top_level=False)
+        encode_dict(group.create_group(key), value, top_level=False,
+                    depth=depth + 1)
         return
     if value is None:
         write_raw_string_attr(group, key, NULL_SENTINEL)
@@ -181,7 +192,9 @@ def _attach_scales(group: h5py.Group, key: str, dset: h5py.Dataset,
 
 # ------------------------------------------------------------- reading
 
-def decode_dict(group: h5py.Group, top_level: bool = True
+def decode_dict(group: h5py.Group, top_level: bool = True,
+                depth: int = 0,
+                problems: list[Finding] | None = None
                 ) -> dict[str, Any]:
     """Read back the dictionary stored in `group`.
 
@@ -189,31 +202,64 @@ def decode_dict(group: h5py.Group, top_level: bool = True
     `mestra_` is skipped, and so are the machinery attributes of
     section 18. At the top level `type` and `repr` are the
     container's and are not entries of the dictionary.
+
+    A dictionary is somebody else's data structure, so this walk
+    follows no link, goes no deeper than `limits.MAX_DEPTH`, and
+    reads no dataset larger than `limits.MAX_READ_ELEMENTS`. With
+    `problems` given, what it could not read is appended there as a
+    finding and the entry is left out; with `problems` left out, the
+    first such thing is raised instead.
     """
     out: dict[str, Any] = {}
-    for name in group.attrs:
-        if name in MACHINERY or name.startswith(RESERVED_PREFIX):
+    if depth > limits.MAX_DEPTH:
+        _trouble(problems, group.name, MestraError(
+            "reader", "this dictionary nests more than %d groups deep, "
+            "which this reader does not follow" % limits.MAX_DEPTH,
+            group.name))
+        return out
+    for name in h5safe.attr_names(group):
+        if name.startswith(RESERVED_PREFIX):
             continue
         if top_level and name in _TOP_LEVEL_RESERVED:
             continue
         out[name] = read_attr(group, name)
-    for name, member in group.items():
+    for member in h5safe.members(group):
+        name = member.name
         if name.startswith(RESERVED_PREFIX):
             continue
-        if isinstance(member, h5py.Group):
-            out[name] = decode_dict(member, top_level=False)
-        else:
-            out[name] = decode_array(member)
+        path = "%s/%s" % (group.name.rstrip("/"), name)
+        if not member.usable:
+            _trouble(problems, path, MestraError(
+                "reader", member.problem or "this member cannot be "
+                                            "read", path))
+            continue
+        if isinstance(member.obj, h5py.Group):
+            out[name] = decode_dict(member.obj, top_level=False,
+                                    depth=depth + 1, problems=problems)
+            continue
+        try:
+            out[name] = decode_array(member.obj, path)
+        except MestraError as exc:
+            _trouble(problems, path, exc)
     return out
 
 
-def decode_array(dset: h5py.Dataset) -> Any:
+def _trouble(problems: list[Finding] | None, where: str,
+             exc: MestraError) -> None:
+    """Collect a problem, or raise it when nobody is collecting."""
+    if problems is None:
+        raise exc
+    problems.append(Finding(exc.rule, where, exc.message))
+
+
+def decode_array(dset: h5py.Dataset, where: str = "") -> Any:
     """One dictionary dataset as the value it holds (section 25)."""
+    where = where or dset.name
     if dset.ndim == 0:
         raise MestraError(
             "E32", "a zero-dimensional dataset must be written as an "
-            "attribute", dset.name)
-    values = dset[()]
+            "attribute", where)
+    values = h5safe.read_values(dset, where)
     if is_fixed_string(dset.dtype):
         flat = [decode_string(v) for v in np.asarray(values).reshape(-1)]
         if dset.ndim == 1:

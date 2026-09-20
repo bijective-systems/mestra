@@ -48,7 +48,17 @@ _SCALAR_ORDER = ("units", "source", "output", "statistic", "of",
 
 
 def write(dataset: Dataset, path: str) -> None:
-    """Write `dataset` to `path` as a mestra/0 file."""
+    """Write `dataset` to `path` as a mestra/0 file.
+
+    A dataset that was read from a file with parts this reader could
+    not copy is refused rather than written short: rewriting it
+    would drop them silently.
+    """
+    if dataset.lossy:
+        raise MestraError(
+            "reader", "this dataset was read from a file with parts "
+            "that could not be copied (%s), so writing it would lose "
+            "them" % ", ".join(sorted(dataset.lossy)[:4]), str(path))
     with h5py.File(path, "w") as f:
         _write(dataset, f)
 
