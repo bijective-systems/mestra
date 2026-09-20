@@ -22,7 +22,7 @@ somebody's code.
 What is in it
 -------------
 
-69 cases, one directory each, holding exactly the two files section
+70 cases, one directory each, holding exactly the two files section
 30 requires:
 
     cases/<case>/case.mes        the golden file
@@ -53,6 +53,10 @@ sorted by name. The cases fall into five groups:
 E07 and W09 were retired on 2026-09-20 and have no case. Their
 identifiers are not reused, per section 14: within a major version a
 retired rule's identifier is never given to anything else.
+
+Beside the cases there is a second subset, `vectors/hostile`, of
+fifteen files that are malformed on purpose. It is described at the
+end of this file.
 
 Every file is a few tens of kilobytes. That is almost all HDF5 object
 headers and dimension scales; the data in each file is a few hundred
@@ -184,3 +188,58 @@ should report it:
 `err_e18` is the clearest instance that could be built: a file that
 declares a group key and names its unit of generalisation only under
 `/private`, where section 29 forbids a reader to look.
+
+
+The hostile subset
+------------------
+
+`vectors/hostile` holds fifteen files that are not specimens of the
+format. Each is malformed in a way a reader has to survive rather than
+describe, and nothing may be inferred from one about what a valid file
+looks like. They exist because section 29 requires a reader to treat a
+file as untrusted input, and a requirement no file tests is a
+requirement nobody meets.
+
+    hostile/<case>/case.mes        the file
+    hostile/<case>/expected.json   description, required_errors,
+                                   allow_extra, timeout_seconds
+
+The contract is looser than the corpus's: a validator must report at
+least the required ids, may report more, and must finish cleanly
+inside ten seconds without crashing, hanging or exhausting memory.
+Opening the file for its metadata alone, and any read of a slot, must
+refuse with the same ids.
+
+What they cover: attributes with an array dataspace where section 18
+requires a scalar, on the root, on a key and on a slot; an unknown
+filter id, and one carrying twelve client data values where some
+filter interfaces have room for eight; thirty thousand nested groups
+under `/keys` and under `/callables/c0`; a dangling soft link, a
+cyclic soft link and an external link, each under `/keys`,
+`/scalars`, `/supports` and `/callables`; a `/keys` member that is a
+group and a `/supports` member that is a dataset; a slot declaring
+10^12 rows, chunked and never written; a category table with a
+non-UTF-8 entry and an empty one; a scale attached twice to one axis;
+and a scale with CLASS but no NAME.
+
+Two things worth knowing before you run them.
+
+The two deep files are 31 MB each. That is thirty thousand HDF5
+groups in the default layout, which costs about a kilobyte apiece.
+The newer group layout costs a seventh of that, but it writes four
+timestamps into the root object header, and a file that records when
+it was written is not byte reproducible. The 31 MB is almost entirely
+repetition and git stores each in under 900 kB.
+
+`check.py` compares these files by their bytes and nothing else. It
+does not walk them and does not open them with a netCDF reader, and
+neither should any tool that is not deliberately testing itself
+against them. The reason is worth stating, because it cost a
+segmentation fault to find: asking HDF5 for the path of a dimension
+scale attached to a dataset makes it search the group hierarchy, and
+on a file with thirty thousand nested groups that search runs off the
+stack and takes the process with it. Dereferencing the scale and
+reading its object address is safe; the link name has to come from a
+map built while walking the tree, within the depth cap. A reader that
+resolves scale names the obvious way passes the whole corpus and dies
+on `deep_groups_keys`.
