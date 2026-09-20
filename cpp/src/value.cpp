@@ -1,6 +1,7 @@
 #include "mestra/value.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <stdexcept>
 
 #include "mestra/io.hpp"
@@ -149,7 +150,11 @@ bool AttrValue::operator==(const AttrValue& o) const {
   switch (kind_) {
     case Kind::Bool: return b_ == o.b_;
     case Kind::Int: return i_ == o.i_;
-    case Kind::Float: return d_ == o.d_;
+    case Kind::Float:
+      // Compared as bits, so that NaN equals NaN and -0.0 differs
+      // from 0.0, which is what section 30 asks of every float
+      // comparison and what Value already does.
+      return std::memcmp(&d_, &o.d_, sizeof(double)) == 0;
     case Kind::Str: return s_ == o.s_;
   }
   return false;
@@ -181,9 +186,27 @@ Value::Value(const Value& o)
   if (o.dict_) dict_.reset(new Dict(*o.dict_));
 }
 
-Value::Value(Value&& o) noexcept = default;
+Value::Value(Value&& o) noexcept
+    : kind_(o.kind_),
+      b_(o.b_),
+      i_(o.i_),
+      d_(o.d_),
+      s_(std::move(o.s_)),
+      a_(std::move(o.a_)),
+      dict_(std::move(o.dict_)) {
+  // A moved-from Value is a null, not a dictionary whose dictionary
+  // has gone: the default move leaves `kind_` behind while `dict_` is
+  // taken, and `as_dict` on the result would then throw.
+  o.kind_ = Kind::Null;
+  o.b_ = false;
+  o.i_ = 0;
+  o.d_ = 0.0;
+}
 
 Value& Value::operator=(Value o) {
+  // `o` is the caller's value by copy or by move; taking its members
+  // and leaving it a null keeps the same invariant the move
+  // constructor keeps.
   kind_ = o.kind_;
   b_ = o.b_;
   i_ = o.i_;
@@ -191,6 +214,7 @@ Value& Value::operator=(Value o) {
   s_ = std::move(o.s_);
   a_ = std::move(o.a_);
   dict_ = std::move(o.dict_);
+  o.kind_ = Kind::Null;
   return *this;
 }
 
@@ -253,10 +277,18 @@ Value Value::strings(const Array& a) {
 }
 
 Value Value::dict(Dict d) {
+  if (d.depth() + 1 > kMaxDictDepth) {
+    throw Error("E32",
+                "a dictionary nested deeper than this reader will walk");
+  }
   Value x;
   x.kind_ = Kind::Dict;
   x.dict_.reset(new Dict(std::move(d)));
   return x;
+}
+
+int Value::depth() const {
+  return kind_ == Kind::Dict && dict_ ? dict_->depth() + 1 : 0;
 }
 
 const Dict& Value::as_dict() const {
@@ -277,9 +309,7 @@ bool Value::operator==(const Value& o) const {
     case Kind::Int: return i_ == o.i_;
     case Kind::Float:
       // Compared as bits so that NaN equals NaN (section 30).
-      return std::equal(reinterpret_cast<const unsigned char*>(&d_),
-                        reinterpret_cast<const unsigned char*>(&d_) + 8,
-                        reinterpret_cast<const unsigned char*>(&o.d_));
+      return std::memcmp(&d_, &o.d_, sizeof(double)) == 0;
     case Kind::Str: return s_ == o.s_;
     case Kind::Numbers:
       return a_.dtype == o.a_.dtype && a_.shape == o.a_.shape &&
@@ -305,13 +335,24 @@ const Value& Dict::at(const std::string& key) const {
   return it->second;
 }
 
-Value& Dict::operator[](const std::string& key) { return map_[key]; }
-
 void Dict::set(const std::string& key, Value v) {
+  const int was = v.depth();
   map_[key] = std::move(v);
+  if (was > depth_) depth_ = was;
 }
 
-void Dict::erase(const std::string& key) { map_.erase(key); }
+void Dict::erase(const std::string& key) {
+  map_.erase(key);
+  recount();
+}
+
+void Dict::recount() {
+  depth_ = 0;
+  for (const auto& entry : map_) {
+    const int d = entry.second.depth();
+    if (d > depth_) depth_ = d;
+  }
+}
 
 // --- dump ------------------------------------------------------------
 
@@ -349,7 +390,11 @@ std::string shape_text(const std::vector<std::size_t>& shape) {
 }
 
 void dump_value(const std::string& path, const Value& v,
-                std::vector<std::string>& lines) {
+                std::vector<std::string>& lines, int depth) {
+  if (depth > kMaxDictDepth) {
+    throw Error("E32", "a dictionary nested deeper than this reader will "
+                       "walk at \"" + path + "\"");
+  }
   switch (v.kind()) {
     case Value::Kind::Null:
       lines.push_back("N " + path);
@@ -391,7 +436,7 @@ void dump_value(const std::string& path, const Value& v,
       const Dict& d = v.as_dict();
       lines.push_back("D " + path);
       for (const auto& entry : d) {
-        dump_value(path + "/" + entry.first, entry.second, lines);
+        dump_value(path + "/" + entry.first, entry.second, lines, depth + 1);
       }
       return;
     }
@@ -404,7 +449,7 @@ std::string dump_dict(const Dict& d) {
   std::vector<std::string> lines;
   lines.push_back("D .");
   for (const auto& entry : d) {
-    dump_value("./" + entry.first, entry.second, lines);
+    dump_value("./" + entry.first, entry.second, lines, 1);
   }
   std::string out;
   for (const std::string& line : lines) {

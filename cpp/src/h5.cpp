@@ -38,27 +38,29 @@ Id open_object(hid_t file, const std::string& path) {
 
 struct ScaleVisit {
   std::vector<std::string>* names;
+  const File* file;
 };
 
-// The HDF5 name getters return the full length of the name, not how
-// much of it they wrote, so the length has to be asked for first and
-// the buffer sized to it.  Truncating into a fixed buffer and trusting
-// the return value reads past the end of it.
-std::string object_name(hid_t id) {
-  const ssize_t n = H5Iget_name(id, nullptr, 0);
-  if (n <= 0) return std::string();
-  std::string name(static_cast<std::size_t>(n) + 1, '\0');
-  if (H5Iget_name(id, &name[0], name.size()) < 0) return std::string();
-  name.resize(static_cast<std::size_t>(n));
-  return name;
+// An object's token as a printable key, which is how two identifiers
+// are told to be the same object without asking the library for a
+// path it would have to search for.
+std::string token_key(hid_t where, const H5O_token_t& token) {
+  char* text = nullptr;
+  if (H5Otoken_to_str(where, &token, &text) < 0 || text == nullptr) {
+    return std::string();
+  }
+  std::string out(text);
+  H5free_memory(text);
+  return out;
 }
 
 herr_t collect_scale(hid_t /*did*/, unsigned /*dim*/, hid_t dsid,
                      void* data) {
   ScaleVisit* visit = static_cast<ScaleVisit*>(data);
   // The dimension's name is the scale dataset's HDF5 link name and
-  // never its NAME attribute (section 21).
-  visit->names->push_back(basename(object_name(dsid)));
+  // never its NAME attribute (section 21).  It is looked up by object
+  // token; see File::dataset_link_name for why not by H5Iget_name.
+  visit->names->push_back(visit->file->dataset_link_name(dsid));
   return 0;
 }
 
@@ -185,24 +187,53 @@ File File::create(const std::string& path) {
   return f;
 }
 
-bool File::exists(const std::string& path) const {
-  if (path == "/") return true;
-  // Every component must exist before H5Lexists may be asked about the
-  // next one.
+const char* link_kind_name(LinkKind kind) {
+  switch (kind) {
+    case LinkKind::Missing: return "missing";
+    case LinkKind::Hard: return "a hard link";
+    case LinkKind::Soft: return "a soft link";
+    case LinkKind::External: return "an external link";
+    case LinkKind::Other: return "a link of a kind this reader does not "
+                                 "know";
+  }
+  return "a link";
+}
+
+LinkKind File::link_kind(const std::string& path) const {
+  if (path == "/") return LinkKind::Hard;
+  // Component by component, so that the walk stops at the first link
+  // that is not hard and never asks the library about anything below
+  // it.  Asking about a path under an external link is what would
+  // open another file on the machine.
   std::size_t at = 1;
+  LinkKind last = LinkKind::Hard;
   while (at <= path.size()) {
     const std::size_t next = path.find('/', at);
     const std::string prefix =
         next == std::string::npos ? path : path.substr(0, next);
-    if (H5Lexists(id_.get(), prefix.c_str(), H5P_DEFAULT) <= 0) return false;
+    H5L_info2_t info;
+    if (H5Lget_info2(id_.get(), prefix.c_str(), &info, H5P_DEFAULT) < 0) {
+      return LinkKind::Missing;
+    }
+    switch (info.type) {
+      case H5L_TYPE_HARD: last = LinkKind::Hard; break;
+      case H5L_TYPE_SOFT: last = LinkKind::Soft; break;
+      case H5L_TYPE_EXTERNAL: last = LinkKind::External; break;
+      default: last = LinkKind::Other; break;
+    }
     if (next == std::string::npos) break;
+    if (last != LinkKind::Hard) return last;
     at = next + 1;
   }
-  return true;
+  return last;
+}
+
+bool File::exists(const std::string& path) const {
+  return link_kind(path) != LinkKind::Missing;
 }
 
 bool File::is_group(const std::string& path) const {
-  if (!exists(path)) return false;
+  if (link_kind(path) != LinkKind::Hard) return false;
   H5O_info2_t info;
   if (H5Oget_info_by_name3(id_.get(), path.c_str(), &info, H5O_INFO_BASIC,
                            H5P_DEFAULT) < 0) {
@@ -212,7 +243,7 @@ bool File::is_group(const std::string& path) const {
 }
 
 bool File::is_dataset(const std::string& path) const {
-  if (!exists(path)) return false;
+  if (link_kind(path) != LinkKind::Hard) return false;
   H5O_info2_t info;
   if (H5Oget_info_by_name3(id_.get(), path.c_str(), &info, H5O_INFO_BASIC,
                            H5P_DEFAULT) < 0) {
@@ -241,11 +272,29 @@ std::vector<Member> File::members(const std::string& path) const {
     name.resize(static_cast<std::size_t>(n));
     Member m;
     m.name = name;
-    H5O_info2_t oinfo;
-    if (H5Oget_info_by_name3(group.get(), m.name.c_str(), &oinfo,
-                             H5O_INFO_BASIC, H5P_DEFAULT) >= 0) {
-      m.is_group = oinfo.type == H5O_TYPE_GROUP;
-      m.is_dataset = oinfo.type == H5O_TYPE_DATASET;
+    // The link's own type first: a soft link is not resolved and an
+    // external link is not opened, so neither can make this reader
+    // touch anything the caller did not name.
+    H5L_info2_t linfo;
+    if (H5Lget_info_by_idx2(group.get(), ".", H5_INDEX_NAME, H5_ITER_INC, i,
+                            &linfo, H5P_DEFAULT) < 0) {
+      m.kind = LinkKind::Missing;
+      out.push_back(m);
+      continue;
+    }
+    switch (linfo.type) {
+      case H5L_TYPE_HARD: m.kind = LinkKind::Hard; break;
+      case H5L_TYPE_SOFT: m.kind = LinkKind::Soft; break;
+      case H5L_TYPE_EXTERNAL: m.kind = LinkKind::External; break;
+      default: m.kind = LinkKind::Other; break;
+    }
+    if (m.kind == LinkKind::Hard) {
+      H5O_info2_t oinfo;
+      if (H5Oget_info_by_name3(group.get(), m.name.c_str(), &oinfo,
+                               H5O_INFO_BASIC, H5P_DEFAULT) >= 0) {
+        m.is_group = oinfo.type == H5O_TYPE_GROUP;
+        m.is_dataset = oinfo.type == H5O_TYPE_DATASET;
+      }
     }
     out.push_back(m);
   }
@@ -254,7 +303,7 @@ std::vector<Member> File::members(const std::string& path) const {
 
 std::vector<RawAttr> File::attributes(const std::string& path) const {
   std::vector<RawAttr> out;
-  if (!exists(path)) return out;
+  if (link_kind(path) != LinkKind::Hard) return out;
   Id object = open_object(id_.get(), path);
   H5O_info2_t oinfo;
   if (H5Oget_info3(object.get(), &oinfo, H5O_INFO_NUM_ATTRS) < 0) return out;
@@ -275,40 +324,65 @@ std::vector<RawAttr> File::attributes(const std::string& path) const {
     Id space(H5Aget_space(attr.get()));
     a.type = type_of(type.get(), space.get());
 
-    if (a.type.klass == H5T_STRING) {
+    // H5Aread fills as many elements as the attribute's dataspace
+    // declares, and that count is in the file.  Every buffer below is
+    // sized from it; nothing here reads into a single scalar slot on
+    // the strength of the encoding section 18 asks for, because a
+    // crafted file names an encoding and stores four thousand of them.
+    const std::size_t points = a.type.points;
+    const bool readable = points >= 1 && points <= kMaxAttributeElements;
+    if (points > kMaxAttributeElements) {
+      // Left unread and unvalued.  The validator reports the
+      // dataspace (E19 for an attribute section 18 names) and a
+      // reader carries nothing it could not read.
+      a.too_large = true;
+    }
+
+    if (a.type.klass == H5T_STRING && readable) {
       if (a.type.variable_length) {
-        char* value = nullptr;
+        std::vector<char*> values(points, nullptr);
         Id mem(H5Tcopy(H5T_C_S1));
         H5Tset_size(mem.get(), H5T_VARIABLE);
         H5Tset_cset(mem.get(), a.type.cset);
-        if (H5Aread(attr.get(), mem.get(), &value) >= 0 && value) {
-          a.raw_bytes = value;
-          H5free_memory(value);
+        if (H5Aread(attr.get(), mem.get(), values.data()) >= 0) {
+          if (values[0] != nullptr) a.raw_bytes = values[0];
+        }
+        // Every element the library allocated is freed, not just the
+        // one whose value is kept.
+        for (char* p : values) {
+          if (p != nullptr) H5free_memory(p);
         }
       } else {
-        std::string bytes(a.type.size * (a.type.points ? a.type.points : 1),
-                          '\0');
-        if (H5Aread(attr.get(), type.get(), &bytes[0]) >= 0) {
-          a.raw_bytes = bytes;
+        if (a.type.size > 0 && points > kMaxAttributeBytes / a.type.size) {
+          a.too_large = true;
+        } else {
+          std::string bytes(a.type.size * points, '\0');
+          if (!bytes.empty() &&
+              H5Aread(attr.get(), type.get(), &bytes[0]) >= 0) {
+            // Only the first element is a value this format has a
+            // place for; the rest are read so that the library writes
+            // inside the buffer and are then dropped.
+            a.raw_bytes = bytes.substr(0, a.type.size);
+          }
         }
       }
       a.value = AttrValue::raw_text(strip_nul(a.raw_bytes));
-    } else if (a.type.klass == H5T_INTEGER) {
-      std::int64_t value = 0;
-      if (H5Aread(attr.get(), H5T_NATIVE_INT64, &value) >= 0) {
+    } else if (a.type.klass == H5T_INTEGER && readable) {
+      std::vector<std::int64_t> values(points, 0);
+      if (H5Aread(attr.get(), H5T_NATIVE_INT64, values.data()) >= 0) {
         // Section 25: int8 means a boolean everywhere it appears, and
         // int64 means an integer.
         if (a.type.size == 1 && a.type.is_signed) {
-          a.value = AttrValue::boolean(value != 0);
-          a.raw_bytes = std::string(1, static_cast<char>(value & 0xff));
+          a.value = AttrValue::boolean(values[0] != 0);
+          a.raw_bytes = std::string(1, static_cast<char>(values[0] & 0xff));
         } else {
-          a.value = AttrValue::integer(value);
+          a.value = AttrValue::integer(values[0]);
         }
       }
-    } else if (a.type.klass == H5T_FLOAT) {
-      double value = 0.0;
-      if (H5Aread(attr.get(), H5T_NATIVE_DOUBLE, &value) >= 0) {
-        a.value = AttrValue::real(value);
+    } else if (a.type.klass == H5T_FLOAT && readable) {
+      std::vector<double> values(points, 0.0);
+      if (H5Aread(attr.get(), H5T_NATIVE_DOUBLE, values.data()) >= 0) {
+        a.value = AttrValue::real(values[0]);
       }
     }
     out.push_back(a);
@@ -342,15 +416,25 @@ DsetInfo File::dataset_info(const std::string& path) const {
   }
   const int filters = H5Pget_nfilters(dcpl.get());
   for (int i = 0; i < filters; ++i) {
+    // cd_nelmts is in and out: on return it is the number of values
+    // the filter defines, which may be more than the buffer held.
+    // Asking with no buffer first is what keeps a file-chosen count
+    // from sizing a read out of a fixed array.
     unsigned flags = 0;
-    std::size_t nelmts = 8;
-    unsigned values[8];
-    char name[256];
     unsigned config = 0;
-    const H5Z_filter_t id =
-        H5Pget_filter2(dcpl.get(), static_cast<unsigned>(i), &flags, &nelmts,
-                       values, sizeof(name), name, &config);
-    std::vector<unsigned> params(values, values + nelmts);
+    std::size_t count = 0;
+    if (H5Pget_filter2(dcpl.get(), static_cast<unsigned>(i), &flags, &count,
+                       nullptr, 0, nullptr, &config) < 0) {
+      continue;
+    }
+    if (count > kMaxFilterParameters) count = kMaxFilterParameters;
+    std::vector<unsigned> params(count, 0u);
+    std::size_t given = count;
+    const H5Z_filter_t id = H5Pget_filter2(
+        dcpl.get(), static_cast<unsigned>(i), &flags, &given,
+        params.empty() ? nullptr : params.data(), 0, nullptr, &config);
+    if (id < 0) continue;
+    if (given < params.size()) params.resize(given);
     info.filters.emplace_back(static_cast<int>(id), params);
   }
   H5D_fill_value_t fill = H5D_FILL_VALUE_DEFAULT;
@@ -362,7 +446,7 @@ DsetInfo File::dataset_info(const std::string& path) const {
   info.scales.resize(static_cast<std::size_t>(rank > 0 ? rank : 0));
   if (!info.is_scale) {
     for (int axis = 0; axis < rank; ++axis) {
-      ScaleVisit visit{&info.scales[static_cast<std::size_t>(axis)]};
+      ScaleVisit visit{&info.scales[static_cast<std::size_t>(axis)], this};
       int index = 0;
       H5DSiterate_scales(dset.get(), static_cast<unsigned>(axis), &index,
                          collect_scale, &visit);
@@ -373,17 +457,36 @@ DsetInfo File::dataset_info(const std::string& path) const {
 
 namespace {
 
-std::size_t product(const std::vector<hsize_t>& shape) {
+// The extents come out of the file, so the product is built with an
+// overflow check at every step and refused past a stated maximum.
+// Without it a crafted shape wraps to a small number and the buffer
+// that follows is far too small for the read.
+std::size_t checked_product(const std::string& path,
+                            const std::vector<hsize_t>& shape,
+                            std::size_t limit) {
+  if (shape.empty()) return 1;
   std::size_t n = 1;
-  for (const hsize_t e : shape) n *= static_cast<std::size_t>(e);
-  return shape.empty() ? 1 : n;
+  for (const hsize_t raw : shape) {
+    const std::size_t e = static_cast<std::size_t>(raw);
+    if (e != 0 && n > limit / e) {
+      throw Error("", "\"" + path + "\" declares more elements than this "
+                                     "reader will read");
+    }
+    n *= e;
+  }
+  if (n > limit) {
+    throw Error("", "\"" + path + "\" declares more elements than this "
+                                   "reader will read");
+  }
+  return n;
 }
 
 }  // namespace
 
 std::vector<double> File::read_f64(const std::string& path) const {
   const DsetInfo info = dataset_info(path);
-  std::vector<double> out(product(info.shape));
+  std::vector<double> out(
+      checked_product(path, info.shape, kMaxDatasetElements));
   if (out.empty()) return out;
   Id dset(H5Dopen2(id_.get(), path.c_str(), H5P_DEFAULT));
   need(dset.valid(), "cannot open \"" + path + "\"");
@@ -395,7 +498,8 @@ std::vector<double> File::read_f64(const std::string& path) const {
 
 std::vector<std::int64_t> File::read_i64(const std::string& path) const {
   const DsetInfo info = dataset_info(path);
-  std::vector<std::int64_t> out(product(info.shape));
+  std::vector<std::int64_t> out(
+      checked_product(path, info.shape, kMaxDatasetElements));
   if (out.empty()) return out;
   Id dset(H5Dopen2(id_.get(), path.c_str(), H5P_DEFAULT));
   need(dset.valid(), "cannot open \"" + path + "\"");
@@ -408,7 +512,8 @@ std::vector<std::int64_t> File::read_i64(const std::string& path) const {
 std::vector<std::string> File::read_strings_raw(
     const std::string& path) const {
   const DsetInfo info = dataset_info(path);
-  const std::size_t count = product(info.shape);
+  const std::size_t count =
+      checked_product(path, info.shape, kMaxDatasetElements);
   std::vector<std::string> out;
   if (count == 0) return out;
   Id dset(H5Dopen2(id_.get(), path.c_str(), H5P_DEFAULT));
@@ -429,6 +534,12 @@ std::vector<std::string> File::read_strings_raw(
     return out;
   }
   const std::size_t item = info.type.size;
+  // Both factors come out of the file, so the product is checked
+  // before it sizes the buffer the library then writes into.
+  if (item != 0 && count > kMaxDatasetBytes / item) {
+    throw Error("", "\"" + path + "\" declares more bytes than this reader "
+                                   "will read");
+  }
   std::string buffer(item * count, '\0');
   need(H5Dread(dset.get(), type.get(), H5S_ALL, H5S_ALL, H5P_DEFAULT,
                &buffer[0]) >= 0,
@@ -476,7 +587,8 @@ std::vector<double> File::read_f64_rows(const std::string& path,
   select_rows(space.get(), info.shape, begin, end, &count);
   Id mem(H5Screate_simple(static_cast<int>(count.size()), count.data(),
                           nullptr));
-  std::vector<double> out(product(count));
+  std::vector<double> out(
+      checked_product(path, count, kMaxDatasetElements));
   need(H5Dread(dset.get(), H5T_NATIVE_DOUBLE, mem.get(), space.get(),
                H5P_DEFAULT, out.data()) >= 0,
        "cannot read rows of \"" + path + "\"");
@@ -499,7 +611,8 @@ std::vector<std::int64_t> File::read_i64_rows(const std::string& path,
   select_rows(space.get(), info.shape, begin, end, &count);
   Id mem(H5Screate_simple(static_cast<int>(count.size()), count.data(),
                           nullptr));
-  std::vector<std::int64_t> out(product(count));
+  std::vector<std::int64_t> out(
+      checked_product(path, count, kMaxDatasetElements));
   need(H5Dread(dset.get(), H5T_NATIVE_INT64, mem.get(), space.get(),
                H5P_DEFAULT, out.data()) >= 0,
        "cannot read rows of \"" + path + "\"");
@@ -596,9 +709,8 @@ Id make_dcpl(const std::vector<hsize_t>& chunk) {
 // past the end of the vector.  Every write goes through here first.
 void need_elements(const std::string& path,
                    const std::vector<hsize_t>& shape, std::size_t given) {
-  std::size_t want = 1;
-  for (const hsize_t e : shape) want *= static_cast<std::size_t>(e);
-  if (shape.empty()) want = 1;
+  const std::size_t want =
+      checked_product(path, shape, kMaxDatasetElements);
   if (given != want) {
     throw Error("", "\"" + path + "\" declares " + std::to_string(want) +
                         " elements and was given " + std::to_string(given));
@@ -684,6 +796,49 @@ void File::write_strings(const std::string& path, std::size_t item_size,
                   buffer.data()) >= 0,
          "cannot write \"" + path + "\"");
   }
+}
+
+void File::build_object_index() const {
+  object_index_built_ = true;
+  // One walk, bounded in depth and in count, recording every dataset's
+  // token against its link name.  Iterative, so a file that nests
+  // groups deeply costs stack here as well as inside the library.
+  std::vector<std::pair<std::string, int>> todo;
+  todo.emplace_back("/", 0);
+  while (!todo.empty()) {
+    const std::pair<std::string, int> here = todo.back();
+    todo.pop_back();
+    if (here.second > kMaxGroupDepth) continue;
+    if (object_names_.size() >= kMaxIndexedObjects) return;
+    for (const Member& m : members(here.first)) {
+      if (m.kind != LinkKind::Hard) continue;
+      const std::string child =
+          (here.first == "/" ? std::string("/") : here.first + "/") + m.name;
+      if (m.is_group) {
+        todo.emplace_back(child, here.second + 1);
+        continue;
+      }
+      if (!m.is_dataset) continue;
+      H5O_info2_t info;
+      if (H5Oget_info_by_name3(id_.get(), child.c_str(), &info,
+                               H5O_INFO_BASIC, H5P_DEFAULT) < 0) {
+        continue;
+      }
+      const std::string key = token_key(id_.get(), info.token);
+      if (!key.empty()) object_names_[key] = m.name;
+      if (object_names_.size() >= kMaxIndexedObjects) return;
+    }
+  }
+}
+
+std::string File::dataset_link_name(hid_t object) const {
+  if (!object_index_built_) build_object_index();
+  H5O_info2_t info;
+  if (H5Oget_info3(object, &info, H5O_INFO_BASIC) < 0) return std::string();
+  const std::string key = token_key(id_.get(), info.token);
+  if (key.empty()) return std::string();
+  const auto it = object_names_.find(key);
+  return it == object_names_.end() ? std::string() : it->second;
 }
 
 void File::make_scale(const std::string& path, hsize_t length,

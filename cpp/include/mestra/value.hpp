@@ -43,6 +43,15 @@ enum class DType {
 
 const char* dtype_name(DType t);   // "bool", "int32", ... , "string"
 
+// How deep a callable's dictionary may nest.  A dictionary is a tree
+// and every walk of it -- reading, writing, dumping, copying and
+// destroying -- is recursive, so a file that nests one far enough
+// would overflow the stack, and a stack overflow cannot be caught.
+// The limit is therefore enforced where a dictionary is built, which
+// makes a deeper one impossible to hold rather than merely unsafe to
+// walk.
+const int kMaxDictDepth = 64;
+
 // One array with its dimension names.  `shape` is in C order and
 // `dims` holds the logical dimension name of each axis (section 4:
 // "row", "group:<k>", "draw", "node", "cell", "component", "index",
@@ -143,6 +152,8 @@ class Value {
   // it to be written as the number it holds.
   static Value numbers(const Array& a);
   static Value strings(const Array& a);
+  // Throws mestra::Error("E32", ...) when nesting `d` would take the
+  // result past kMaxDictDepth.
   static Value dict(Dict d);
 
   Kind kind() const { return kind_; }
@@ -154,6 +165,9 @@ class Value {
   const Array& as_array() const { return a_; }
   const Dict& as_dict() const;
   Dict& as_dict();
+  // 0 for a leaf; for a dictionary, one more than the deepest
+  // dictionary below it.
+  int depth() const;
 
   bool operator==(const Value& o) const;
 
@@ -176,11 +190,16 @@ class Dict {
 
   bool has(const std::string& key) const;
   const Value& at(const std::string& key) const;   // throws when absent
-  Value& operator[](const std::string& key);
+  // The only way to put a value in.  There is no mutable accessor,
+  // because the nesting depth is accounted here and a caller that
+  // could reach in and replace a value would walk past the accounting.
   void set(const std::string& key, Value v);
   void erase(const std::string& key);
   std::size_t size() const { return map_.size(); }
   bool empty() const { return map_.empty(); }
+  // The deepest nesting below this dictionary: 0 when every value is
+  // a leaf.  Kept as values go in rather than walked for.
+  int depth() const { return depth_; }
 
   Map::const_iterator begin() const { return map_.begin(); }
   Map::const_iterator end() const { return map_.end(); }
@@ -188,7 +207,10 @@ class Dict {
   bool operator==(const Dict& o) const { return map_ == o.map_; }
 
  private:
+  void recount();
+
   Map map_;
+  int depth_ = 0;
 };
 
 // The dictionary written out as one line per leaf, for tests and for

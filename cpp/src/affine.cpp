@@ -9,8 +9,27 @@
 #include "mestra/affine.hpp"
 
 #include <algorithm>
+#include <string>
 
 #include "mestra/io.hpp"
+
+// Decision 25 fixes the summation order, and the corpus compares
+// float64 results bit for bit, so no multiply and add here may be
+// contracted into one rounding step.  The CMake build passes
+// -ffp-contract=off, but a translation unit that says so itself is
+// right however it is compiled: these two pragmas say it to clang and
+// to any compiler that implements the C standard pragma, and the
+// accumulation below is written through a named temporary so that
+// there is no multiply-add expression left for a compiler that
+// honours neither.
+#if defined(__clang__)
+#pragma clang fp contract(off)
+#elif defined(__GNUC__)
+#pragma GCC optimize("fp-contract=off")
+#endif
+#if defined(__STDC_VERSION__) || defined(FP_CONTRACT)
+#pragma STDC FP_CONTRACT OFF
+#endif
 
 namespace mestra {
 
@@ -58,9 +77,15 @@ Outputs Affine::call(const KeysTable& table) const {
     a.f64.resize(rows * flat);
     for (std::size_t r = 0; r < rows; ++r) {
       for (std::size_t i = 0; i < flat; ++i) {
+        // Accumulated over the keys in the declared key order, with b
+        // added last.  Each product lands in its own named value
+        // before it is added, so the multiply and the add are two
+        // statements and cannot be fused whatever the compiler is
+        // told on the command line.
         double acc = 0.0;
         for (std::size_t k = 0; k < keys_.size(); ++k) {
-          acc += o.A[i * keys_.size() + k] * columns[k][r];
+          const double term = o.A[i * keys_.size() + k] * columns[k][r];
+          acc += term;
         }
         acc += o.b[i];   // b is added last
         a.f64[r * flat + i] = acc;

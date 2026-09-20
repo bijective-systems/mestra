@@ -6,7 +6,9 @@
 
 #include <hdf5.h>
 
+#include <cstddef>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -46,6 +48,22 @@ class Id {
   hid_t id_;
 };
 
+// Every count and length below comes out of the file, so each one is
+// checked against a limit before it sizes a buffer.  These are far
+// past anything this format needs and far short of anything that
+// would exhaust memory on a machine that can open the file at all.
+const std::size_t kMaxAttributeElements = 1u << 20;     // 1,048,576
+const std::size_t kMaxAttributeBytes = std::size_t(1) << 30;   // 1 GiB
+const std::size_t kMaxDatasetElements = std::size_t(1) << 32;
+const std::size_t kMaxFilterParameters = 1024;
+// How many objects the dimension-scale index below will hold.
+const std::size_t kMaxIndexedObjects = 1u << 20;
+const std::size_t kMaxDatasetBytes = std::size_t(1) << 33;     // 8 GiB
+// How deep any walk of the file's own group tree goes before it stops
+// and says so.  A stack overflow cannot be caught, so every recursive
+// walk over file-controlled structure is bounded first.
+const int kMaxGroupDepth = 64;
+
 // What the file says an attribute's HDF5 type is, before this format
 // decides whether that is the encoding section 18 requires.
 struct AttrType {
@@ -66,6 +84,10 @@ struct RawAttr {
   AttrType type;
   AttrValue value;        // the decoded value, best effort
   std::string raw_bytes;  // a string attribute's stored bytes
+  // True when the attribute declares more elements than this build
+  // will read.  Nothing was read and `value` is meaningless; the
+  // validator reports it and a reader carries nothing.
+  bool too_large = false;
 };
 
 // The stored shape of a dataset, without reading any element.
@@ -86,9 +108,21 @@ struct DsetInfo {
   bool has_fill_value_set = false;
 };
 
-// A member of a group.
+// How a name is linked to what it names.  The format says nothing
+// about links, and a file is untrusted input, so this library follows
+// a hard link and nothing else: a soft link is not resolved and an
+// external link is never opened, because opening one would make a
+// crafted file read another file on the machine.
+enum class LinkKind { Missing, Hard, Soft, External, Other };
+
+const char* link_kind_name(LinkKind kind);
+
+// A member of a group.  `kind` is read from the link itself, without
+// resolving it; `is_group` and `is_dataset` are false for anything
+// but a hard link.
 struct Member {
   std::string name;
+  LinkKind kind = LinkKind::Missing;
   bool is_group = false;
   bool is_dataset = false;
 };
@@ -100,6 +134,12 @@ class File {
   static File create(const std::string& path);
 
   hid_t get() const { return id_.get(); }
+
+  // The link kind of the last component of `path`, without following
+  // anything: the walk stops at the first component that is not a
+  // hard link and returns that kind, so nothing below a soft or
+  // external link is ever asked about.
+  LinkKind link_kind(const std::string& path) const;
 
   bool exists(const std::string& path) const;
   bool is_group(const std::string& path) const;
@@ -160,11 +200,29 @@ class File {
   // trip reproduces the file.
   void make_scale(const std::string& path, hsize_t length, bool unlimited,
                   const std::vector<hsize_t>& chunk = {});
+
+  // The link name of the dataset an open identifier refers to, from an
+  // index this file builds once.
+  //
+  // H5Iget_name would answer the same question, but an object the
+  // library opened by dereferencing a reference -- which is how the
+  // dimension-scale machinery hands a scale to a visitor -- has no
+  // path recorded, so H5Iget_name makes HDF5 search the group tree for
+  // it, recursively and over the whole file.  On a file that nests
+  // groups deeply that search overflows the stack inside the library,
+  // where nothing this code does can catch it.  The index is built by
+  // one walk, bounded in depth and in count, and answers by object
+  // token instead.
+  std::string dataset_link_name(hid_t object) const;
   void attach_scale(const std::string& dataset, const std::string& scale,
                     unsigned axis);
 
  private:
+  void build_object_index() const;
+
   Id id_;
+  mutable std::map<std::string, std::string> object_names_;
+  mutable bool object_index_built_ = false;
 };
 
 // The 53-character sentence of section 21, followed by the length in

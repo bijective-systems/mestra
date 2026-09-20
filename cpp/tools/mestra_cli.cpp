@@ -17,7 +17,11 @@ int usage() {
   std::cout <<
       "mestra-cli COMMAND ARGUMENTS\n"
       "\n"
-      "  validate FILE                    rule ids, one per line\n"
+      "  read FILE                        read the whole file and say what\n"
+      "                                   came back\n"
+      "  validate FILE                    rule ids, one per line;\n"
+      "                                   \"! path: why\" for a fault no\n"
+      "                                   rule of section 14 covers\n"
       "  info FILE                        what the file holds\n"
       "  probe FILE SLOT ROW NODE COMPONENT [DRAW]\n"
       "                                   one stored value\n"
@@ -77,14 +81,46 @@ int cmd_validate(const std::string& path) {
     std::cout << "W " << id << "\n";
   }
   // A failure no rule of section 14 covers still has to be said out
-  // loud rather than leaving the file looking clean.
+  // loud rather than leaving the file looking clean.  It is printed
+  // as "! " so that a caller reading rule identifiers off the "E "
+  // and "W " lines is not confused by one.
   for (const mestra::Finding& f : r.errors) {
     if (f.id.empty()) {
-      std::cerr << "mestra-cli: " << f.where << ": " << f.message << "\n";
+      std::cout << "! " << f.where << ": " << f.message << "\n";
     }
   }
   // Exit 1 when the file is rejected, so that a shell can tell.
   return r.ok() ? 0 : 1;
+}
+
+// Reads everything, which is what `info` deliberately does not do.
+int cmd_read(const std::string& path) {
+  const mestra::Dataset d = mestra::read(path);
+  std::size_t arrays = 0;
+  std::size_t values = 0;
+  for (const mestra::Support& s : d.supports) {
+    if (s.coordinates.has_value()) {
+      ++arrays;
+      values += s.coordinates->data.f64.size();
+    }
+    for (const mestra::ArraySlot& a : s.node_arrays) {
+      ++arrays;
+      values += a.data.f64.size() + a.data.i64.size();
+    }
+    for (const mestra::ArraySlot& a : s.cell_arrays) {
+      ++arrays;
+      values += a.data.f64.size() + a.data.i64.size();
+    }
+  }
+  std::cout << "rows " << d.n_rows << "\n"
+            << "keys " << d.keys.size() << "\n"
+            << "scalars " << d.scalars.size() << "\n"
+            << "categories " << d.categories.size() << "\n"
+            << "supports " << d.supports.size() << "\n"
+            << "callables " << d.callables.size() << "\n"
+            << "arrays " << arrays << "\n"
+            << "values " << values << "\n";
+  return 0;
 }
 
 int cmd_info(const std::string& path) {
@@ -251,6 +287,7 @@ int main(int argc, char** argv) {
   try {
     if (command == "validate" && argc == 3) return cmd_validate(argv[2]);
     if (command == "info" && argc == 3) return cmd_info(argv[2]);
+    if (command == "read" && argc == 3) return cmd_read(argv[2]);
     if (command == "probe") return cmd_probe(argc, argv);
     if (command == "support-id" && argc == 4) {
       std::cout << mestra::support_id_of(argv[2], argv[3]) << "\n";

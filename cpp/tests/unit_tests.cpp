@@ -4,6 +4,8 @@
 // example.
 #include <cstdio>
 #include <iostream>
+#include <limits>
+#include <utility>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -345,6 +347,65 @@ void build_from_vectors() {
   std::remove(path.c_str());
 }
 
+// The value types and the hash, at the edges a corpus file never
+// reaches.
+void hardened_value_types() {
+  // A moved-from Value is a null, not a dictionary whose dictionary
+  // has been taken.
+  mestra::Dict inner;
+  inner.set("x", mestra::Value::integer(1));
+  mestra::Value from = mestra::Value::dict(inner);
+  const mestra::Value to = std::move(from);
+  check::is_true("a moved-from Value is null",
+                 from.kind() == mestra::Value::Kind::Null);
+  check::is_true("a moved-from Value says it is null", from.is_null());
+  check::is_true("the moved-to Value has the dictionary",
+                 to.as_dict().has("x"));
+
+  // Floats compare as bits everywhere, so NaN equals NaN and -0.0 is
+  // not 0.0 (section 30).
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  check::is_true("AttrValue NaN equals NaN",
+                 mestra::AttrValue::real(nan) ==
+                     mestra::AttrValue::real(nan));
+  check::is_true("AttrValue -0.0 is not 0.0",
+                 !(mestra::AttrValue::real(-0.0) ==
+                   mestra::AttrValue::real(0.0)));
+  check::is_true("Value NaN equals NaN",
+                 mestra::Value::real(nan) == mestra::Value::real(nan));
+
+  // A dictionary cannot be nested deeper than any walk of it will go,
+  // so no copy or destructor can recurse past the limit either.
+  mestra::Dict deep;
+  bool refused = false;
+  try {
+    for (int i = 0; i < mestra::kMaxDictDepth + 4; ++i) {
+      mestra::Dict next;
+      next.set("g", mestra::Value::dict(deep));
+      deep = next;
+    }
+  } catch (const mestra::Error& e) {
+    refused = e.rule() == "E32";
+  }
+  check::is_true("a dictionary deeper than the limit is refused", refused);
+  check::is_true("the depth stops at the limit",
+                 deep.depth() <= mestra::kMaxDictDepth);
+
+  // The digest is idempotent and the state is final once taken.
+  mestra::Sha256 h;
+  h.update("abc", 3);
+  const std::string first = h.hex();
+  const std::string again = h.hex();
+  check::equal("a second hex() is the same digest", again, first);
+  bool closed = false;
+  try {
+    h.update("d", 1);
+  } catch (const mestra::Error&) {
+    closed = true;
+  }
+  check::is_true("update after hex() is refused", closed);
+}
+
 void bytes_order() {
   // Names are ordered by their UTF-8 bytes, not by signed char.
   check::is_true("\"a\" before \"b\"", mestra::bytes_less("a", "b"));
@@ -362,6 +423,7 @@ int main() {
   codec_values();
   affine_worked_example();
   build_from_vectors();
+  hardened_value_types();
   bytes_order();
   return check::finish("mestra unit tests");
 }
