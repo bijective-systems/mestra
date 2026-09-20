@@ -166,6 +166,19 @@ int cmd_read(const std::string& path) {
   return 0;
 }
 
+// A bound or a quantile as a reader would write it: the shortest
+// decimal that reads back as the same float64, so that 0.1 prints as
+// 0.1 and a bound a reader is checking W08 against is not quietly
+// rounded to six digits.
+std::string number_text(double v) {
+  char buffer[64];
+  for (int precision = 15; precision <= 17; ++precision) {
+    std::snprintf(buffer, sizeof(buffer), "%.*g", precision, v);
+    if (std::strtod(buffer, nullptr) == v) break;
+  }
+  return std::string(buffer);
+}
+
 // A slot's shape with its axes named: "(row, node, component) 6x8x1".
 // A first-time reader of a file they did not write wants to know how
 // big it is, and the dimension names are what makes the extents mean
@@ -205,6 +218,9 @@ void print_slot(const char* kind, const mestra::ArraySlot& a) {
   }
   if (a.statistic.has_value()) std::cout << " statistic=" << *a.statistic;
   if (a.of.has_value()) std::cout << " of=" << *a.of;
+  if (a.quantile.has_value()) {
+    std::cout << " quantile=" << number_text(*a.quantile);
+  }
   if (a.derived_from.has_value()) {
     std::cout << " derived_from=" << *a.derived_from;
   }
@@ -226,8 +242,12 @@ int cmd_info(const std::string& path) {
   for (const mestra::Key& k : d.keys) {
     std::cout << "key " << k.name << " role=" << k.role;
     if (k.units.has_value()) std::cout << " units=" << *k.units;
-    if (k.lower.has_value()) std::cout << " lower=" << *k.lower;
-    if (k.upper.has_value()) std::cout << " upper=" << *k.upper;
+    if (k.lower.has_value()) {
+      std::cout << " lower=" << number_text(*k.lower);
+    }
+    if (k.upper.has_value()) {
+      std::cout << " upper=" << number_text(*k.upper);
+    }
     if (k.category.has_value()) std::cout << " category=" << *k.category;
     // The attribute that makes a file a set of trajectories rather
     // than a pile of rows, and the one that says a group nests.
@@ -247,6 +267,9 @@ int cmd_info(const std::string& path) {
     }
     if (s.statistic.has_value()) std::cout << " statistic=" << *s.statistic;
     if (s.of.has_value()) std::cout << " of=" << *s.of;
+    if (s.quantile.has_value()) {
+      std::cout << " quantile=" << number_text(*s.quantile);
+    }
     std::cout << "\n";
   }
   for (const mestra::CategoryTable& t : d.categories) {
