@@ -1,9 +1,10 @@
 mestra: specification, draft version 0
 ======================================
 
-Date: 2026-09-19. Status: draft for discussion. Normative language
-("must", "may") is used so that the rules are unambiguous, but nothing in
-this draft is frozen. The spec text is CC-BY-4.0.
+Date: 2026-09-19, revised 2026-09-20. Status: draft for discussion.
+Normative language ("must", "may") is used so that the rules are
+unambiguous, but nothing in this draft is frozen. The spec text is
+CC-BY-4.0.
 
 This document defines a data model and its serialisation. It does not
 define a mesh format for solvers, a model format for fitted surrogate
@@ -171,9 +172,11 @@ has coordinates with
 moving mesh in a transient has `varies = row`. Coordinates are always
 absolute positions; a support has exactly one coordinates array and
 displacements are never stored as coordinates. A persisted
-displacement is a `derived` array with recipe "minus reference", where
-`reference` names a row or a group category on the coordinates array,
-never the previous row, so nothing accumulates or drifts. Connectivity
+displacement is a `derived` array with recipe "minus reference",
+carrying a `reference` attribute that names the row or the group
+category of the coordinates array it is measured against, written as
+`row=<i>` or `group:<k>=<category name>`. It is never the previous
+row, so nothing accumulates or drifts. Connectivity
 does not vary (section 8).
 
 
@@ -447,21 +450,31 @@ Errors (the file is rejected):
   E04  an array whose leading dimension disagrees with `varies`
   E05  an array whose node or cell count disagrees with its support
   E06  a row referencing a support that does not exist
-  E07  `aligned = true` with rows on more than one support
+  E07  retired. A file with rows on more than one support and
+       `aligned = true` also breaks E28 and E37, both decidable from
+       the file, so nothing was left for E07 to catch.
   E08  a `support_id` that does not match the stored arrays
   E09  time not strictly increasing within a trajectory
   E10  a categorical, group, label, or status value outside its
        category table
   E11  a field or scalar without units
   E12  a quantile statistic without a quantile, or a statistic
-       without `of`
+       other than `value` or `draw` without `of`. A slot whose
+       statistic is `draw` holds the base quantity itself and does
+       not name it again
   E13  a derived array without `derived_from` and `recipe`
   E14  a slot whose `source` names a callable id that does not exist
   E15  a callable group without `type`
   E16  a stored slot whose leading dimension disagrees with the row
-       count
+       count it must have: the file's row count for any slot in an
+       aligned file, and the number of rows referencing the slot's
+       support for a row-varying array in an unaligned file
+       (section 22)
   E17  `format`, `writer`, or `created` missing
-  E18  public information present only under `/private`
+  E18  public information present only under `/private`. This is a
+       rule for a writer. A validator reports it only from the public
+       objects it can see are missing, and never by interpreting
+       `/private`, which section 29 forbids it to interpret
 
 The rules below come from the byte-level layout of sections 18 to 25.
 
@@ -502,10 +515,17 @@ The rules below come from the byte-level layout of sections 18 to 25.
        from the number of categories of its group key
   E35  an `axis` support whose coordinates do not have `varies = none`
   E36  a `source` that is neither `data` nor `callable:<id>`
-  E37  `aligned = true` with more than one support declared
+  E37  `aligned` disagreeing with the number of supports declared:
+       true with more than one, or false with at most one
   E38  a mesh support missing `cell_types`, `cell_offsets` or
        `cell_connectivity`, or an `axis` or `none` support carrying
        any of them
+  E39  a required attribute of section 19 absent from an object that
+       requires it, where no other rule covers it. E02 covers a
+       missing role, E11 units on a field or a scalar, E13
+       `derived_from` and `recipe`, E15 a callable's `type`, E17
+       `format`, `writer` and `created`, E31 `components`, and W06
+       `recomputed`
 
 Warnings (the file is accepted; the reader must report):
 
@@ -516,10 +536,13 @@ Warnings (the file is accepted; the reader must report):
   W04  a key value outside its declared bounds
   W05  more than one support (index-aligned operations unavailable)
   W06  weights or normals present but not marked as recomputed
-  W07  a group key with no category table entry for some value
-  W08  the observed range of a key differs from its declared bounds
-       by more than a stated tolerance (possibly stale bounds)
-  W09  a categorical key stored as floating point
+  W07  a group key whose category table has an entry no row uses.
+       A group value with no entry in the table is E10
+  W08  declared bounds wider than the observed range of a key by
+       more than a factor of four in width (possibly stale bounds).
+       A key value outside its bounds is W04 and not W08
+  W09  retired. A categorical key stored as floating point is an
+       error by the dtype table of section 19 (E20)
   W10  a units string the validator cannot parse
   W11  an attribute or a group this reader does not know, ignored
        under section 28
@@ -584,6 +607,58 @@ Taken on 2026-09-19 while pinning the byte layout (sections 18 to 30):
  16. A zero-dimensional array in a callable's dictionary is stored as
      an attribute, because no rule that preserved it as an array
      could round-trip in MATLAB and C++ as well as in Python.
+
+Taken on 2026-09-20, from building the conformance corpus. These are
+the fourteen places where writing one file for every rule of section
+14 showed the text was silent, self-contradictory, or describing
+something no file could do:
+
+ 17. expected.json has a sixth field, `evaluation`, so that the
+     affine callable can be conformance tested at all. Section 30.
+ 18. The probe schema names the leading dimension of a group-varying
+     array `instance`, and names the axes of a support's own cell
+     datasets. Neither had a name and the corpus must probe both.
+     Section 30.
+ 19. A probe's `value` is a decimal string: the "%.17e" form for a
+     float64 slot and the plain decimal form for an integer slot.
+     Section 30.
+ 20. W08 has a number where it had "a stated tolerance" that was
+     stated nowhere: declared bounds wider than the observed range by
+     more than a factor of four in width. A value outside the bounds
+     is W04 and not W08. Section 14.
+ 21. W07 is narrowed to a category table entry no row uses, because a
+     group value with no entry in the table was already E10 and the
+     two could not be told apart. Section 14.
+ 22. W09 is retired: a floating-point categorical key is E20 by the
+     dtype table, so W09 could never be the only outcome. Sections 14
+     and 19.
+ 23. E07 is retired for the same reason, and E37 is widened to
+     `aligned` disagreeing with the number of supports in either
+     direction, which also closes the case section 22 required and no
+     rule caught. Section 14.
+ 24. E18 is a rule for a writer, because section 29 forbids the
+     reader it addressed to interpret `/private`. E39 is added for a
+     required attribute of section 19 that is simply absent, which
+     nothing covered. Section 14.
+ 25. The affine evaluation accumulates the dot product in the
+     declared key order and adds b last, with no fused multiply-add.
+     The formula alone left the last bit of the worked example open.
+     Section 27.
+ 26. A support of kind `none` carries no `node` dimension scale,
+     because a zero-length fixed dimension is not legal. Sections 20
+     and 21.
+ 27. The support_id of an axis support whose coordinates wrongly vary
+     is computed over the stored bytes as they are, so that such a
+     file breaks E35 and nothing else. Section 24.
+ 28. `reference` is an attribute of the derived array and not of the
+     coordinates, written `row=<i>` or `group:<k>=<category name>`.
+     Sections 5 and 19.
+ 29. A slot whose statistic is `draw` holds the base quantity itself
+     and does not carry `of`. Section 14.
+ 30. In an unaligned file a row-varying array on a support has one
+     entry per row referencing that support, in the file's row order,
+     over a support-local `row` dimension. Nothing said what such an
+     array held for a row on another support. Sections 14, 21 and 22.
 
 Still open: nothing.
 
@@ -708,6 +783,9 @@ on write, so that two readers never disagree about a value.
                                                 string
   a dataset inside a callable's dictionary      section 25
 
+A categorical, group, split or status key stored as floating point is
+an error by this table (E20). There is no warning for it.
+
 A fixed-length string dataset has character set H5T_CSET_UTF8 and
 padding H5T_STR_NULLPAD, as in section 18. Its size is the largest
 UTF-8 byte length among its elements, or 1 when every element is
@@ -778,7 +856,9 @@ Required attributes, by object:
                           when a label uses a table; recomputed
                           (boolean) on weight and normal;
                           derived_from (string) and recipe (string)
-                          on derived, with optional reference;
+                          on derived, with optional reference, whose
+                          value is `row=<i>` or
+                          `group:<k>=<category name>` (section 5);
                           output (string) when source is a callable;
                           optional statistic, of, quantile
   /callables/<id>         type (string), optional repr (string)
@@ -833,7 +913,11 @@ A support of kind `axis` or `none` has n_cells = 0 and carries no
 `cell_types`, `cell_offsets` or `cell_connectivity` dataset and no
 `cell` dimension (E38). A support of kind `none` has n_nodes = 0 and
 no coordinates; it exists so that a slot may declare that it lives on
-no support, and scalars do not reference it.
+no support, and scalars do not reference it. It carries no `node`
+dimension scale either: a zero-length extent is legal only for `row`
+and for a zero-length axis of a dictionary dataset (section 19), so a
+`node` dimension of length 0 would not be a legal netCDF-4
+dimension.
 
 An `axis` support has exactly one coordinates array and that array
 must have `varies = none` (E35). The axis coordinate is part of the
@@ -899,10 +983,22 @@ them:
 Support-local scales are in the support's own group, because their
 lengths differ between supports:
 
-  node           length n_nodes
+  node           length n_nodes; absent when the kind is `none`
   cell           length n_cells; absent when n_cells is 0
   cell_plus_one  length n_cells + 1; absent when n_cells is 0
   index          length of cell_connectivity; absent when n_cells is 0
+  row            only in an unaligned file, and only in a support
+                 that carries an array with `varies = row`: length
+                 equal to the number of rows referencing that
+                 support, and unlimited as the file-level `row` is
+
+The support-local `row` shadows the file-level one, which is legal
+and intended: netCDF-4 resolves a dimension in the group holding the
+variable before any ancestor, so the logical dimension name of such
+an array is still `row` and a reader permutes by that name. Section
+22 says what an index into it means. An aligned file never has one,
+because there every row is on the one support and the two lengths
+agree.
 
 Scales for the datasets inside a callable's dictionary are in the
 group that holds the dataset and are named `mestra_<dataset>_d<i>`,
@@ -976,6 +1072,16 @@ under /supports sorted by their UTF-8 bytes. A value outside
 [0, number of supports) is an error (E06). Sorting by bytes is used
 because it is the one ordering every language produces identically;
 HDF5 link order is not.
+
+Row-varying arrays in an unaligned file. An array with
+`varies = row` on support s has a leading dimension whose length is
+the number of rows that reference s, and it holds those rows in the
+file's row order: its element i is the i-th row, counting from zero,
+whose `/row_support` value is s. It is not indexed by the file's row
+number, because the rows on one support are not contiguous in the
+file. That leading dimension is the support-local `row` of section
+21, and E16 checks the count per support. In an aligned file the two
+counts are equal and nothing about this changes.
 
 Rows and callable slots together. A file may have rows and callable
 slots at the same time. When it does, the key columns hold rows, for
@@ -1054,6 +1160,11 @@ A support of kind `axis` or `none` has no cell arrays, so steps 2 to 4
 contribute no bytes at all for it; they are not replaced by anything.
 Coordinates of a mesh support are not hashed, because they may vary
 between rows while the support does not.
+
+When the coordinates of an `axis` support do not have `varies = none`
+the file is already invalid (E35); the digest is then computed over
+the stored bytes as they are, so that E35 is the only rule such a
+file breaks.
 
 The attribute is the digest in lower-case hexadecimal, 64 characters.
 A digest that does not match the stored arrays is an error (E08).
@@ -1238,6 +1349,13 @@ each row of Y to `shape` in C order. The slot's stored form is then
 (row, node | cell, component) for an array and (row) for a scalar. An
 `affine` callable never sets `statistic` to `draw`.
 
+The dot product is accumulated over the keys in the declared key
+order and b is added last, and no fused multiply-add is used. The
+order matters because the corpus compares float64 results bit for
+bit, and the other orders differ in the last place: the worked cl
+below is 1.45 when b is added last and one unit in the last place
+above it when b is accumulated first.
+
 Worked example. Two keys in the order mach, alpha. One scalar slot cl
 and one node-array slot pressure on a support of six nodes with one
 component:
@@ -1338,7 +1456,12 @@ expected.json is canonical JSON (below) with exactly these fields:
                   slot       the HDF5 path of the dataset, for example
                              "/supports/s0/node_arrays/pressure"
                   row        the row index; omitted when the slot has
-                             no row dimension
+                             no row dimension. For a row-varying array
+                             in an unaligned file it is the index
+                             within that support's rows (section 22)
+                  instance   the index along the leading dimension of
+                             an array whose `varies` is `group:<k>`;
+                             present in place of `row` for such a slot
                   node       the node index, or the cell index for a
                              cell array; omitted when the slot has no
                              node or cell dimension
@@ -1346,9 +1469,27 @@ expected.json is canonical JSON (below) with exactly these fields:
                              slot has no component dimension
                   draw       the draw index; present only when the
                              slot has a draw dimension
-                  value      the value, as a decimal string
+                  index      the index along the flat connectivity
+                             axis
+                  value      the value as a decimal string: the
+                             "%.17e" form below for a float64 slot and
+                             the plain decimal form for an integer
+                             slot. The rule below that integers are
+                             JSON numbers applies to indices and
+                             counts, not to a probe's value
+                A probe on one of a support's own cell datasets names
+                its axis `cell` for `cell_types`, `cell_plus_one` for
+                `cell_offsets` and `index` for `cell_connectivity`.
   codec         an object from callable id to the round trip of that
                 callable's dictionary, in the tagged form below
+  evaluation    a list of objects, each a worked evaluation of one
+                callable: `callable` the id, `keys` the keys table it
+                is evaluated on as an object from key name to a list
+                of "%.17e" strings one per table row, and `probes`
+                the expected outputs in the probe form above, whose
+                `row` is the index into that table and not into any
+                row the file stores. The list is empty when there is
+                nothing to evaluate
 
 Numbers as text. Every float in expected.json is a string in the C
 format "%.17e", which every language produces identically and which
