@@ -98,11 +98,11 @@ Dataset evaluate(const Dataset& d, const KeysTable& keys) {
     out.keys.push_back(std::move(n));
   }
 
-  // Instantiate every callable the file holds once.
-  std::map<std::string, std::unique_ptr<Callable>, BytesLess> made;
+  // Every callable the file holds is built once through the registry
+  // and called once, however many slots it serves.
   std::map<std::string, Outputs, BytesLess> produced;
   for (const StoredCallable& c : d.callables) {
-    std::unique_ptr<Callable> object =
+    const std::unique_ptr<Callable> object =
         CallableRegistry::from_dict(c.type, c.dict);
     if (!object) {
       throw Error("", "no factory is registered for the callable type \"" +
@@ -110,7 +110,6 @@ Dataset evaluate(const Dataset& d, const KeysTable& keys) {
                                    "not interpreted");
     }
     produced[c.id] = object->call(keys);
-    made[c.id] = std::move(object);
   }
 
   auto outputs_for = [&](const std::string& id, const std::string& output,

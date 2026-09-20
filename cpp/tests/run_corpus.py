@@ -35,10 +35,13 @@ class Tool(object):
     def __init__(self, path):
         self.path = path
 
-    def run(self, *arguments):
+    def run(self, *arguments, **options):
+        """Runs the tool. `validate` exits 1 on a file it rejects, which
+        is not a failure of the tool, so a caller may allow it."""
+        allowed = options.pop("allowed", (0,))
         done = subprocess.run([self.path] + list(arguments),
                               capture_output=True, text=True)
-        if done.returncode != 0:
+        if done.returncode not in allowed:
             raise RuntimeError("mestra-cli %s failed: %s"
                                % (" ".join(arguments), done.stderr.strip()))
         return done.stdout
@@ -227,7 +230,7 @@ def run_case(tool, directory, name, totals, problems):
                         % (name, what, got, want))
 
     # --- the validator ------------------------------------------------
-    lines = tool.run("validate", mes).splitlines()
+    lines = tool.run("validate", mes, allowed=(0, 1)).splitlines()
     errors = [line[2:] for line in lines if line.startswith("E ")]
     warnings = [line[2:] for line in lines if line.startswith("W ")]
     totals["validator"] += 1

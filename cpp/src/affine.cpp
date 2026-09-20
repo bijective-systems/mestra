@@ -66,18 +66,21 @@ Outputs Affine::call(const KeysTable& table) const {
         a.f64[r * flat + i] = acc;
       }
     }
-    // The stored form is (row, node | cell, component) for an array
-    // and (row) for a scalar.
+    // Section 27: the stored form is (row, node | cell, component)
+    // for an array slot and (row) for a scalar, so `shape` is either
+    // [node count, component count] or empty and nothing else.
+    if (!o.shape.empty() && o.shape.size() != 2) {
+      throw Error("", "the affine output \"" + entry.first +
+                          "\" has a shape of rank " +
+                          std::to_string(o.shape.size()) +
+                          "; section 27 allows [node, component] or []");
+    }
     for (const std::int64_t e : o.shape) {
       a.shape.push_back(static_cast<std::size_t>(e));
     }
     if (o.shape.size() == 2) {
       a.dims.push_back("node");
       a.dims.push_back("component");
-    } else {
-      for (std::size_t i = 0; i < o.shape.size(); ++i) {
-        a.dims.push_back("component");
-      }
     }
     out.set(entry.first, std::move(a));
   }

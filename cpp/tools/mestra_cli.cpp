@@ -76,7 +76,15 @@ int cmd_validate(const std::string& path) {
   for (const std::string& id : r.warning_ids()) {
     std::cout << "W " << id << "\n";
   }
-  return 0;
+  // A failure no rule of section 14 covers still has to be said out
+  // loud rather than leaving the file looking clean.
+  for (const mestra::Finding& f : r.errors) {
+    if (f.id.empty()) {
+      std::cerr << "mestra-cli: " << f.where << ": " << f.message << "\n";
+    }
+  }
+  // Exit 1 when the file is rejected, so that a shell can tell.
+  return r.ok() ? 0 : 1;
 }
 
 int cmd_info(const std::string& path) {

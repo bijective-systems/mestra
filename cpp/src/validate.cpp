@@ -1433,7 +1433,18 @@ void Validator::check_dict(const std::string& path, bool top_level) {
 Report validate(const std::string& path) {
   Report r;
   try {
-    File f = File::open_read(path);
+    File f;
+    try {
+      f = File::open_read(path);
+    } catch (const Error& e) {
+      // A file this reader cannot open as HDF5 at all has no `format`
+      // and no `writer` or `created` either, which is what a reader
+      // would say about any other file missing them.
+      r.errors.push_back({"E01", path, e.what()});
+      r.errors.push_back({"E17", path, "the file carries no root "
+                                       "attributes this reader can read"});
+      return r;
+    }
     Validator v(f, &r);
     v.run();
   } catch (const Error& e) {

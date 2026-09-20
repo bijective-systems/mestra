@@ -52,7 +52,8 @@ Five minutes with the tool
     mestra-cli validate FILE
         the rule identifiers of section 14, one per line, errors as
         "E <id>" and warnings as "W <id>". No output means the file is
-        clean.
+        clean. It exits 1 when the file is rejected and 0 otherwise, so
+        warnings alone still exit 0.
 
     mestra-cli info FILE
         the row count, the keys with their roles and bounds, the
