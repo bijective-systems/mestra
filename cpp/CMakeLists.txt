@@ -14,6 +14,8 @@ option(MESTRA_BUILD_TESTS "Build the mestra test suite" ON)
 # sanitizers from time to time as well as plain.
 option(MESTRA_SANITIZE "Build with the address and undefined sanitizers" OFF)
 
+# Everything built here -- the library, the tool, the tests and the
+# examples -- compiles under these and is warning-free.
 set(MESTRA_WARNINGS -Wall -Wextra -Wpedantic -Wshadow -Wconversion
                     -Wsign-conversion)
 set(MESTRA_SANITIZER_FLAGS "")
@@ -73,9 +75,12 @@ target_link_libraries(mestra-cli PRIVATE mestra)
 target_compile_options(mestra-cli PRIVATE
   ${MESTRA_WARNINGS} -ffp-contract=off ${MESTRA_SANITIZER_FLAGS})
 
+add_subdirectory(examples)
+
 if(MESTRA_BUILD_TESTS)
   enable_testing()
 
+  # `unit` is the pure C++ checks; its own file says what they are.
   add_executable(mestra-unit tests/unit_tests.cpp)
   target_link_libraries(mestra-unit PRIVATE mestra)
   target_include_directories(mestra-unit PRIVATE
@@ -86,6 +91,14 @@ if(MESTRA_BUILD_TESTS)
 
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND)
+    # Every case of vectors/cases through mestra-cli: the validator
+    # outcome and the shape of its output, every support id, every
+    # probe, every codec round trip, every worked evaluation, a lazy
+    # row read, and read-write-compare for the cases that validate.
+    # Three corpus files are generated rather than committed, because
+    # of their size; run `python vectors/generate.py --hostile-deep
+    # --wide` once before ctest, and not again while a test is reading
+    # vectors/.
     add_test(NAME corpus COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_corpus.py
       --cli $<TARGET_FILE:mestra-cli>
@@ -126,6 +139,14 @@ if(MESTRA_BUILD_TESTS)
       --cli $<TARGET_FILE:mestra-cli>
       --dir ${CMAKE_CURRENT_SOURCE_DIR}/tests/hostile)
     set_tests_properties(hostile PROPERTIES TIMEOUT 600)
+
+    # The seven examples, each run and compared to the "Expected
+    # output" block of the README beside its source, so that a change
+    # to this API that a document did not follow fails here.
+    add_test(NAME examples COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_examples.py
+      --bin-dir ${CMAKE_BINARY_DIR}/examples
+      --examples ${CMAKE_CURRENT_SOURCE_DIR}/../docs/examples)
   endif()
 endif()
 
