@@ -191,8 +191,6 @@ class _FileValidator:
         #: True for a metadata open: read a category table and
         #: nothing else (section 7 of docs/api-conventions.md).
         self.tables_only = False
-        #: Datasets a rule wanted and this pass would not read.
-        self.unread: list[str] = []
         self.visited = 0
         self.limit = limits.MAX_CHECK_ELEMENTS
         self.too_large: list[str] = []
@@ -282,7 +280,6 @@ class _FileValidator:
             # left unchecked, which is not a finding: the nine
             # structural rules of section 2 of the conventions do not
             # need them, and everything else waits for the read.
-            self.unread.append(where)
             return None
         try:
             return np.asarray(h5safe.read_values(dset, where,
