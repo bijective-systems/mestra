@@ -350,6 +350,34 @@ classdef ConventionsTest < matlab.unittest.TestCase
             testCase.verifyEmpty(r.warnings, strjoin(r.warnings, ','));
         end
 
+        function anEvaluatedFileValidatesClean(testCase)
+        %anEvaluatedFileValidatesClean  Section 2: a file this package
+        %   writes validates clean, and an evaluated file is one of
+        %   them.  Finding 10 of the Phase 3 report is a chunk carried
+        %   over from a file of no rows onto a file of two, which
+        %   every validator then warns about (W12).  Section 23
+        %   measures the default against the row dimension the leading
+        %   axis is attached to, and after evaluation that is the
+        %   table's row count and not the source file's.
+            for name = {'affine_zero_rows', 'callable_two_slots'}
+                file = fullfile(corpusRoot(), name{1}, 'case.mes');
+                e = CorpusTest.expected(name{1});
+                entry = e.evaluation;
+                if iscell(entry), entry = entry{1}; else, entry = entry(1); end
+                d = mestra.read(file);
+                out = [tempname() '.mes'];
+                cleanup = onCleanup(@() ...
+                    ConventionsTest.removeIfPresent(out)); %#ok<NASGU>
+                mestra.write(mestra.evaluate(d, ...
+                    CorpusTest.keysTable(entry.keys)), out);
+                r = mestra.validate(out);
+                testCase.verifyEmpty(r.errors, ...
+                    sprintf('%s: %s', name{1}, strjoin(r.errors, ',')));
+                testCase.verifyEmpty(r.warnings, ...
+                    sprintf('%s: %s', name{1}, strjoin(r.warnings, ',')));
+            end
+        end
+
         function aStrictReadRefusesAStructuralFault(testCase)
         %aStrictReadRefusesAStructuralFault  Section 2: a read is
         %   strict by default and refuses a file that breaks a
