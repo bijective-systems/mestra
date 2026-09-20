@@ -506,8 +506,13 @@ What the reader refuses, and under which rule:
   * any link but a hard link, E40. A soft link is not resolved, a
     dangling one is not an error, a cycle of them cannot start, and
     an external link never opens the file it names;
-  * an attribute this format names whose dataspace is not scalar,
-    E19. An array where a number belongs is not used;
+  * an attribute that is not encoded as section 18 requires, E19: a
+    variable-length string, an array where the format names a scalar,
+    an integer that is not int64, a float that is not float64, a
+    string where a number belongs or a number where a string does, or
+    a boolean holding anything but 0 or 1. The rules are the ones
+    `mestra.validate` reports E19 for, asked of the same place, so the
+    two cannot disagree;
   * nesting past `maxDepth` levels, and a group already visited in
     this walk, which is how a cycle of hard links ends: E41;
   * an eager read of more than `maxElements`, E41. A lazy read and a
@@ -527,7 +532,9 @@ What the reader refuses, and under which rule:
     back would be worse than refusing it;
   * an axis with no dimension scale, more than one, or one this
     reader cannot name, E25;
-  * a string whose stored bytes are not valid UTF-8, E26;
+  * a string whose stored bytes are not valid UTF-8, or which holds a
+    NUL anywhere but in its trailing padding, E26. It is checked on a
+    string attribute and on the entries of a category table;
   * a member of the wrong kind, E41: a key that is a group, a support
     that is a dataset, a callable that is not a group.
 
@@ -554,6 +561,18 @@ and `mestra:reader` for a file that will not open at all:
 inside its own guard, so an object that will not read stops that
 object and the rest of the file is still checked; the failure is E41
 with that object's path, and a link is E40.
+
+A dataset this version of the format does not know, inside a group it
+does, is checked. Section 14 excepts two things from the byte-level
+rules of sections 18 to 25 -- `/private`, and a group this version
+does not know -- and an unknown dataset in a known group is neither,
+so it is one of the "public objects only" the rules are checked on.
+Only the rules that need nothing this version does not know are
+decidable on one: section 23's, which are about the row dimension the
+dataset is attached to and not about what the dataset means. So a
+contiguous dataset with a row dimension inside a support group is
+E27, whatever it is called, and its name is W11 as well when this
+version does not know that either.
 
 Dimension names are resolved through a map this package builds during
 its own bounded walk of the file, keyed by object address. Asking the

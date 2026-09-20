@@ -937,12 +937,46 @@ function checkOneSupport(ctx, parent, name, index)
 
     known = [cellNames {'coordinates', 'node_arrays', 'cell_arrays', ...
                         'node', 'cell', 'cell_plus_one', 'index', 'row'}];
+    checked = [cellNames {'coordinates', 'node_arrays', 'cell_arrays'}];
     for nm = H5.children(sid)
         if ~ismember(nm{1}, known)
             rep.add('W11', [path '/' nm{1}], ...
                 'this reader does not know this object; it is ignored');
         end
+        if ~ismember(nm{1}, checked)
+            checkUnknownDataset(ctx, sid, nm{1}, [path '/' nm{1}]);
+        end
     end
+end
+
+function checkUnknownDataset(ctx, gid, name, path)
+%checkUnknownDataset  The byte-level rules on a dataset this version
+%   does not describe, inside a group it does.
+%
+%   Section 14 says of the rules of sections 18 to 25: "They are
+%   checked on the public objects only. /private is not checked, and
+%   neither is any group this version of the format does not know".
+%   A dataset this version does not know, inside a group it does, is
+%   neither of the two exceptions, so it is a public object and the
+%   rules are checked on it.  That is the reading taken here; the
+%   other reading, that only the objects this version names are
+%   checked, would leave a file free to put an unchunked
+%   row-dimensioned dataset anywhere it liked and still pass.
+%
+%   Only the rules that need nothing this version does not know are
+%   decidable: section 23's, which are about the row dimension the
+%   dataset is attached to and not about what the dataset means.  A
+%   dimension scale is not subject to them (section 23), and a
+%   dataset this version does know is checked as the slot it is.
+    H5 = mestra.internal.H5;
+    if ~mestra.internal.Reader.hasKind(gid, name, 'dataset'), return, end
+    did = H5D.open(gid, name);
+    closer = onCleanup(@() H5D.close(did)); %#ok<NASGU>
+    info = H5.dsetInfo(did);
+    if info.isScale || isempty(info.dims), return, end
+    leading = H5.scaleNames(did, 0, ctx.scales);
+    if isempty(leading) || ~strcmp(leading(1).name, 'row'), return, end
+    checkChunking(ctx, did, info, path, info.dims(1));
 end
 
 function [values, info] = plainValues(ctx, sid, name, path, wanted)
