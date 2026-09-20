@@ -437,7 +437,7 @@ end
 # ------------------------------------------------------------ names
 
 function check_names!(v::Validator)
-    deep = walk_objects(v.f) do path, obj
+    deep = walk_objects(v.f; skip = unchecked_group) do path, obj
         for n in split(lstrip(path, '/'), '/')
             isempty(n) && continue
             legal_name(n) || report!(v, "E33", path,
@@ -482,8 +482,12 @@ end
 
 """Visit every object reachable by hard links, on an explicit stack
 and no deeper than MAX_DEPTH.  The call stack is not used, because the
-file chooses how deep it goes."""
-function walk_objects(fn, root, path = "")
+file chooses how deep it goes.
+
+`skip(path, obj)` names a subtree the walk neither visits nor enters,
+which is how the byte-level passes leave `/private` and the groups
+this version does not know alone (section 14)."""
+function walk_objects(fn, root, path = ""; skip = nothing)
     stack = Tuple{Any,String,Int}[(root, String(path), 0)]
     visited = 0
     deep = Set{String}()
@@ -501,6 +505,7 @@ function walk_objects(fn, root, path = "")
             obj = hard_child(g, name)
             obj === nothing && continue
             p = base * "/" * name
+            skip !== nothing && skip(p, obj) && continue
             try
                 fn(p, obj)
             catch
@@ -509,6 +514,28 @@ function walk_objects(fn, root, path = "")
         end
     end
     return deep
+end
+
+"""Section 14, of the byte-level rules of sections 18 to 25: "They are
+checked on the public objects only.  `/private` is not checked, and
+neither is any group this version of the format does not know, which
+is reported as W11 and otherwise left alone."
+
+Section 29 goes further for `/private` and forbids a reader to
+interpret it at all.  A producer's private records are in whatever
+representation it chose, so a validator that walked into one would
+reject files that conform.  W11 is reported for the unknown group
+itself by `check_unknown!` and by the support pass, which is the whole
+of what this version has to say about either."""
+function unchecked_group(path::AbstractString, obj)
+    obj isa HDF5.Group || return false
+    parts = split(String(path), '/'; keepempty = false)
+    if length(parts) == 1
+        return parts[1] == "private" || !(parts[1] in ROOT_GROUPS)
+    elseif length(parts) == 3 && parts[1] == "supports"
+        return !(parts[3] in ("node_arrays", "cell_arrays"))
+    end
+    return false
 end
 
 # ------------------------------------------------------- categories
@@ -1459,7 +1486,7 @@ end
 # --------------------------------------- every dataset, byte-level
 
 function check_every_dataset!(v::Validator)
-    walk_objects(v.f) do path, obj
+    walk_objects(v.f; skip = unchecked_group) do path, obj
         obj isa HDF5.Dataset || return
         is_scale(obj) && return
         guard!(v, path) do

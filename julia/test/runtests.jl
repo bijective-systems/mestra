@@ -732,6 +732,57 @@ end
     end
 end
 
+@testset "a conforming file carrying /private is accepted (sections 12, 14, 29)" begin
+    # Section 14, of the byte-level rules of sections 18 to 25: "They
+    # are checked on the public objects only.  `/private` is not
+    # checked".  Section 29 forbids a reader to interpret it at all.
+    # A producer's private records are in whatever representation it
+    # chose, so everything below would be an error in the public tree
+    # and none of it may be one here.
+    src = case_file("mesh_two_rows")
+    path = joinpath(SCRATCH, "with_private.mes")
+    cp(src, path; force = true)
+    chmod(path, 0o644)
+    HDF5.h5open(path, "r+") do f
+        p = HDF5.create_group(f, "private")
+        # a string attribute stored the way section 18 forbids
+        HDF5.attributes(p)["note"] = "a producer's own record"
+        # a dimension scale of its own, and a dataset on it
+        p["epoch"] = Float32[0, 1, 2, 3]
+        HDF5.API.h5ds_set_scale(p["epoch"], "an epoch of our own")
+        p["residual"] = Float32[1, 2, 3, 4]
+        HDF5.API.h5ds_attach_scale(p["residual"], p["epoch"], 0)
+        # a float32 dataset with no scale on it at all, which is E20
+        # and E25 in the public tree
+        p["history"] = Float32[1 2 3; 4 5 6]
+        # and a group inside the group, with a dataset of its own
+        g = HDF5.create_group(p, "stamps")
+        g["when"] = Int32[1, 2, 3]
+    end
+    r = Mestra.validate(path)
+    @test r.errors == String[]
+    @test r.warnings == String[]
+    @test all(f -> !startswith(f.path, "/private"), r.findings)
+    # and a strict read opens it and keeps the group without reading
+    # anything in it as a slot
+    ds = Mestra.read(path)
+    @test ds.private !== nothing
+    @test isempty(ds.findings)
+    @test !haskey(ds.supports[1].node_arrays, "residual")
+    # the same file with the same objects in the public tree is
+    # rejected, so the test is about /private and not about the file
+    public = joinpath(SCRATCH, "with_public_junk.mes")
+    cp(src, public; force = true)
+    chmod(public, 0o644)
+    HDF5.h5open(public, "r+") do f
+        f["supports"]["s0"]["node_arrays"]["history"] =
+            Float32[1 2 3; 4 5 6]
+    end
+    bad = Mestra.validate(public)
+    @test "E25" in bad.errors
+    @test "E20" in bad.errors
+end
+
 @testset "gzip and shuffle, the two portable filters (section 23)" begin
     ds = Mestra.Dataset(writer = "mestra.jl test 0",
                         created = "2026-09-19T00:00:00Z")
