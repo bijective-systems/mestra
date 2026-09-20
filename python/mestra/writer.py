@@ -47,8 +47,15 @@ _SCALAR_ORDER = ("units", "source", "output", "statistic", "of",
                  "quantile")
 
 
-def write(dataset: Dataset, path: str) -> None:
+def write(dataset: Dataset, path: str, check: bool = True) -> None:
     """Write `dataset` to `path` as a mestra/0 file.
+
+    The dataset is validated first and an error refuses the write,
+    with the findings: a writer that emits a file its own validator
+    rejects is the one failure mode an open format cannot afford,
+    because the file outlives the session that made it. Warnings do
+    not stop a write. `check=False` writes whatever is there, which
+    is how a test makes a file to be refused.
 
     A dataset that was read from a file with parts this reader could
     not copy is refused rather than written short: rewriting it
@@ -59,8 +66,30 @@ def write(dataset: Dataset, path: str) -> None:
             "E41", "this dataset was read from a file with parts "
             "that could not be copied (%s), so writing it would lose "
             "them" % ", ".join(sorted(dataset.lossy)[:4]), str(path))
+    if check:
+        _refuse_what_the_validator_would(dataset, str(path))
     with h5py.File(path, "w") as f:
         _write(dataset, f)
+
+
+def _refuse_what_the_validator_would(dataset: Dataset,
+                                     path: str) -> None:
+    """Section 2 of the conventions: validate before writing."""
+    from .validator import validate
+
+    errors = validate(dataset).errors
+    if not errors:
+        return
+    listed = "\n".join("  %s %s: %s" % (f.rule, f.where, f.message)
+                       if f.where else "  %s %s" % (f.rule, f.message)
+                       for f in errors[:8])
+    if len(errors) > 8:
+        listed += "\n  ... and %d more" % (len(errors) - 8)
+    raise MestraError(
+        errors[0].rule,
+        "this dataset breaks %d rule(s) of section 14, so it was not "
+        "written; fix them, or pass check=False to write it "
+        "anyway:\n%s" % (len(errors), listed), path)
 
 
 def _write(ds: Dataset, f: h5py.File) -> None:

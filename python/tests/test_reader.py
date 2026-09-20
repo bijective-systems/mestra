@@ -112,12 +112,13 @@ def test_notes_and_unknown_things_survive_a_rewrite(tmp_path):
 
 
 def test_a_private_group_is_copied_and_not_interpreted(tmp_path):
+    """The case is E18, so writing it back needs `check=False`."""
     source = corpus.case_path("err_e18")
     path = str(tmp_path / "again.mes")
     with mestra.read(source) as ds:
         assert "private" in ds.opaque
         assert ds.generalisation_group is None
-        mestra.write(ds, path)
+        mestra.write(ds, path, check=False)
     with h5py.File(path, "r") as f:
         assert "private" in f
 
