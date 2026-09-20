@@ -49,8 +49,17 @@ fattr(a::Dict{String,RawAttr}, name) =
 iattr(a::Dict{String,RawAttr}, name) =
     haskey(a, name) && a[name].value isa Real && !(a[name].value isa Bool) ?
     Int(a[name].value) : nothing
+# Section 18 gives a boolean the values 0 and 1 and no other, so an
+# int8 holding anything else decodes to nothing and this returns
+# nothing too: the reader has no value, rather than a value it made up.
 battr(a::Dict{String,RawAttr}, name) =
-    haskey(a, name) ? (a[name].value === true) : nothing
+    haskey(a, name) && a[name].value isa Bool ? a[name].value : nothing
+
+"""True when `name` is there and is not a boolean this format defines,
+which is E19 and which the reader says rather than choosing a meaning
+for it."""
+illegal_bool(a::Dict{String,RawAttr}, name) =
+    haskey(a, name) && !(a[name].value isa Bool)
 
 """
     Mestra.read(path; lazy = true, strict = true) -> Dataset
@@ -165,6 +174,9 @@ function read_dataset(f::HDF5.File, path::String, lazy::Bool,
                  created = something(sattr(root, "created"), ""))
     ds.format = something(sattr(root, "format"), "")
     ds.aligned = something(battr(root, "aligned"), true)
+    illegal_bool(root, "aligned") && note!(ds, "E19", "/",
+        "`aligned` is not a boolean of section 18, whose only values " *
+        "are 0 and 1; this reader has no alignment claim from this file")
     ds.generalisation_group = sattr(root, "generalisation_group")
     ds.path = path
     ds.lazy = lazy

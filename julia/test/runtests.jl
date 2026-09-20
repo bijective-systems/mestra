@@ -696,6 +696,42 @@ end
     end
 end
 
+@testset "a boolean attribute is 0 or 1 and nothing else (section 18)" begin
+    # Section 18: "value 0 for false and 1 for true.  No other value
+    # is legal."  E19 covers "a boolean that is not int8 or whose
+    # value is not 0 or 1".
+    src = case_file("mesh_two_rows")
+    path = joinpath(SCRATCH, "aligned_is_two.mes")
+    cp(src, path; force = true)
+    chmod(path, 0o644)
+    HDF5.h5open(path, "r+") do f
+        HDF5.delete_attribute(f, "aligned")
+        HDF5.write_attribute(f, "aligned", Int8(2))
+    end
+    r = Mestra.validate(path)
+    @test r.errors == ["E19"]
+    # E28 and E37 are both about the claim the file makes, and it has
+    # made none, so E19 says the whole of what is wrong
+    @test !("E28" in r.errors) && !("E37" in r.errors)
+    e = refusal(() -> Mestra.read(path))
+    @test e !== nothing && e.rule == "E19"
+    # and a non-strict read never gives 2 the meaning that would
+    # suppress the /row_support requirement of E28
+    ds = Mestra.read(path; strict = false)
+    @test any(f -> f.rule == "E19" && f.path == "/", ds.findings)
+    # a legal 0 and a legal 1 are still read as the booleans they are
+    for (byte, want) in ((Int8(0), false), (Int8(1), true))
+        q = joinpath(SCRATCH, "aligned_$(byte).mes")
+        cp(src, q; force = true)
+        chmod(q, 0o644)
+        HDF5.h5open(q, "r+") do f
+            HDF5.delete_attribute(f, "aligned")
+            HDF5.write_attribute(f, "aligned", byte)
+        end
+        @test Mestra.read(q; strict = false).aligned == want
+    end
+end
+
 @testset "gzip and shuffle, the two portable filters (section 23)" begin
     ds = Mestra.Dataset(writer = "mestra.jl test 0",
                         created = "2026-09-19T00:00:00Z")

@@ -100,6 +100,11 @@ mutable struct Validator
     gen_group::Union{Nothing,String}
     missing_public::Bool
     max_elements::Int
+    # False when `aligned` is there and is not a boolean section 18
+    # defines.  The alignment claim is then not a thing this file
+    # states, so E28 and E37, which are both about what it claims,
+    # have nothing to decide and E19 says the whole of what is wrong.
+    aligned_known::Bool
 end
 
 """One finding per rule per object (`docs/api-conventions.md` section
@@ -240,7 +245,7 @@ function validate(path::AbstractString;
                       String[], Int[], true, Dict{String,Vector{String}}(),
                       Dict{String,String}(), Dict{String,Any}(),
                       Dict{String,String}(), nothing, false,
-                      Int(max_elements))
+                      Int(max_elements), true)
         run_validator!(v)
         errs = sort(unique([x.rule for x in v.findings if x.rule[1] == 'E']))
         warns = sort(unique([x.rule for x in v.findings if x.rule[1] == 'W']))
@@ -299,6 +304,7 @@ function check_root!(v::Validator)
         v.missing_public = true
     else
         v.aligned = a["aligned"].value === true
+        v.aligned_known = a["aligned"].value isa Bool
     end
     v.gen_group = haskey(a, "generalisation_group") &&
                   a["generalisation_group"].value isa AbstractString ?
@@ -321,7 +327,9 @@ function check_root!(v::Validator)
     length(v.supports) > 1 && report!(v, "W05", "/supports",
         "$(length(v.supports)) supports; index-aligned operations are " *
         "not available")
-    if v.aligned && length(v.supports) > 1
+    if !v.aligned_known
+        # nothing to say: E19 already has it
+    elseif v.aligned && length(v.supports) > 1
         report!(v, "E37", "/",
                 "`aligned` is true with $(length(v.supports)) supports")
     elseif !v.aligned && length(v.supports) <= 1
@@ -329,6 +337,13 @@ function check_root!(v::Validator)
                 "`aligned` is false with $(length(v.supports)) support(s)")
     end
     return v
+end
+
+"""What a one-byte attribute holds, for the message E19 prints when it
+is not a legal boolean."""
+function int8_text(at::RawAttr)
+    isempty(at.raw) && return "no byte this validator could read"
+    return string(Int(reinterpret(Int8, at.raw[1:1])[1]))
 end
 
 """E19: every attribute this specification names has one encoding."""
@@ -368,8 +383,20 @@ function check_attr_types!(v::Validator, path::String,
             end
         elseif at.ti.class === :int
             if expected === :bool
-                (at.ti.size == 1) || report!(v, "E19", path,
-                    "boolean `$(name)` is not int8")
+                if at.ti.size != 1
+                    report!(v, "E19", path, "boolean `$(name)` is not int8")
+                elseif !(at.value isa Bool)
+                    # Section 18: "value 0 for false and 1 for true.
+                    # No other value is legal."  E19 covers "a boolean
+                    # that is not int8 or whose value is not 0 or 1",
+                    # so a file that says something the format does not
+                    # define is refused rather than given the meaning
+                    # that suppresses another rule.
+                    report!(v, "E19", path,
+                        "boolean `$(name)` holds $(int8_text(at)); " *
+                        "section 18 gives a boolean the value 0 or 1 " *
+                        "and no other")
+                end
             elseif expected === :int
                 (at.ti.size == 8 && at.ti.signed) ||
                     report!(v, "E19", path, "integer `$(name)` is not int64")
@@ -909,7 +936,9 @@ end
 function check_row_support!(v::Validator)
     rsobj = hard_child(v.f, "row_support")
     present = rsobj isa HDF5.Dataset
-    if v.aligned && present
+    if !v.aligned_known
+        # nothing to say: E19 already has it
+    elseif v.aligned && present
         report!(v, "E28", "/row_support",
                 "present in a file with `aligned = true`")
     elseif !v.aligned && !present

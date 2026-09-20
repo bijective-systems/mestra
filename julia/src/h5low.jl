@@ -312,7 +312,16 @@ function decode_raw(ti::TypeInfo, raw::Vector{UInt8}, npoints::Int)
         T === Nothing && return nothing
         vals = reinterpret(T, raw)
         if ti.size == 1
-            return npoints == 1 ? (vals[1] != 0) : [v != 0 for v in vals]
+            # Section 18: an int8 attribute is a boolean, "value 0 for
+            # false and 1 for true.  No other value is legal."  There
+            # is no value to decode from any other byte, so nothing is
+            # decoded and E19 says why; a reader that mapped 2 to true
+            # would give a file a meaning the format does not define.
+            legal(x) = x == 0 || x == 1
+            if npoints == 1
+                return legal(vals[1]) ? (vals[1] != 0) : nothing
+            end
+            return all(legal, vals) ? [v != 0 for v in vals] : nothing
         end
         return npoints == 1 ? Int64(vals[1]) : Int64.(collect(vals))
     elseif ti.class === :float
