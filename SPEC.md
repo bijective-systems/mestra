@@ -258,21 +258,37 @@ comparison, and a mismatch is an error before any data is read.
 9. Uncertainty
 --------------
 
-Model outputs are stored as arrays and scalars with the same roles as
-data, plus:
+Representing uncertainty is optional. A file that carries none is an
+ordinary file, and nothing in the format obliges a producer to
+quantify anything.
+
+Where it is carried, model outputs are stored as arrays and scalars
+with the same roles as data, plus:
 
   statistic    value | mean | std | quantile | draw
   of           the name of the base quantity this is a statistic of
   quantile     a number in (0, 1) when statistic = quantile
 
-Draws carry the `draw` dimension. Draws of a field are joint across
-nodes: draw k of pressure is one whole field. How many draws, from
-which seed, in what batches, are the producer's business and its
-records, not the format's; the file may repeat them as optional
-metadata, and nothing in the format depends on them.
+The slot's `statistic` and `of` are what say which of these an output
+is. A producer may serve none of `value`, `mean`, `std`, `quantile`
+and `draw`, some of them, or all five; a reader learns which from the
+slot's attributes and never has to ask the producer. These five are
+the summaries the format names. Any other summary is a derived array
+carrying `derived_from` and a `recipe` (section 3), so that every
+number in a file says where it came from.
 
-Summaries (mean, std, quantiles) are derived from draws by an open
-routine, so a card's numbers can be recomputed from the file.
+Draws carry the `draw` dimension. A draw is one whole field or one
+whole scalar: draw k of pressure is a complete field over every node,
+so whatever dependence the producer has across nodes is preserved in
+the file instead of being collapsed to a per-node number that cannot
+be put back. How many draws, from which seed, in what batches, are
+the producer's business and its records, not the format's; the file
+may repeat them as optional metadata, and nothing in the format
+depends on them.
+
+Where a file carries both draws and a summary of them, the summary is
+derived from the draws by an open routine, so it can be recomputed
+from the file.
 
 
 10. Callables
@@ -304,7 +320,13 @@ are given by where it sits in the file and are not attributes (section
 19); the
 content attribute `source` is `data` or `callable:<id>`, and for
 callables that serve several slots, `output` names which of the
-callable's outputs fills this slot. A callable is stored once under
+callable's outputs fills this slot. Named outputs are the whole of a
+callable's contract: it does not declare which statistic an output
+is, and the format never asks it to. What an output means is the
+slot's `statistic` and `of` (section 9), so a producer may serve none
+of `value`, `mean`, `std`, `quantile` and `draw`, some of them, or
+all five, with the same four-thing protocol in every case. A callable
+is stored once under
 `/callables/<id>` and may be referenced by any number of slots. A slot
 holding data is a dataset; a slot served by a callable is a group with
 the same attributes and no data (section 19).
