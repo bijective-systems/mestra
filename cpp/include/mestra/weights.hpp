@@ -33,10 +33,17 @@ struct WeightOptions {
 // An existing array of that name at that location is replaced, so
 // calling this twice leaves one weight array and not two.
 //
-// Refuses, with a message naming the cell type, anything it cannot
-// measure: the quadratic cell types of section 20, a support whose
-// cells are not all of one dimension, and a support with no
-// coordinates.  An `axis` support has no cells, so its node weights
+// Measured here: line, triangle, quadrilateral, polygon, tetrahedron,
+// hexahedron, wedge and pyramid.  A surface cell of any shape goes
+// through Newell's method, which is exact for a polygon that is not
+// convex and gives the projected area for one that is not planar; a
+// volume cell is a signed sum of tetrahedra.
+//
+// Refuses, with a message naming the cell type and the cell index,
+// anything it cannot measure: the quadratic cell types of section 20,
+// which are refused rather than approximated by their corner nodes, a
+// support whose cells are not all of one dimension, and a support with
+// no coordinates.  An `axis` support has no cells, so its node weights
 // come from the spacing of its coordinates and `Location::Cell` on
 // one is refused.
 ArraySlot& compute_weights(Support& s, Location where,
