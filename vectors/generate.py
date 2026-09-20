@@ -625,26 +625,31 @@ def affine_base(f, o):
     return sup
 
 
-AFFINE_AT = {"mach": 0.5, "alpha": 4.0}
+AFFINE_AT = [{"mach": 0.5, "alpha": 4.0}]
 
 
-def affine_evaluation(slots):
-    """The worked evaluation of section 27 as an expected.json entry.
-    `slots` maps the callable's output name to the slot path."""
+def affine_evaluation(cid, keys, outputs, slots, table):
+    """A worked evaluation of section 27 as an expected.json entry.
+    `slots` maps the callable's output name to the slot path and
+    `table` is the keys table, one dictionary per table row. The row
+    index in each probe is the index into that table, not the index
+    of any row stored in the file."""
     probes = []
     for output in sorted(slots):
-        y = evaluate_affine(AFFINE[output], AFFINE_KEYS, AFFINE_AT)
-        if y.ndim == 0:
-            probes.append({"slot": slots[output], "row": 0,
-                           "value": fnum(y)})
-        else:
-            for n in range(y.shape[0]):
-                for c in range(y.shape[1]):
-                    probes.append({"slot": slots[output], "row": 0,
-                                   "node": n, "component": c,
-                                   "value": fnum(y[n, c])})
-    return {"callable": "m1",
-            "keys": dict((k, [fnum(AFFINE_AT[k])]) for k in AFFINE_KEYS),
+        for r, at in enumerate(table):
+            y = evaluate_affine(outputs[output], keys, at)
+            if y.ndim == 0:
+                probes.append({"slot": slots[output], "row": r,
+                               "value": fnum(y)})
+            else:
+                for n in range(y.shape[0]):
+                    for c in range(y.shape[1]):
+                        probes.append({"slot": slots[output], "row": r,
+                                       "node": n, "component": c,
+                                       "value": fnum(y[n, c])})
+    return {"callable": cid,
+            "keys": dict((k, [fnum(at[k]) for at in table])
+                         for k in keys),
             "probes": probes}
 
 
@@ -690,8 +695,10 @@ def case_affine_zero_rows(f):
         ],
         codec={"m1": tagged(affine_dict())},
         evaluation=[affine_evaluation(
+            "m1", AFFINE_KEYS, AFFINE,
             {"cl": "/scalars/cl",
-             "pressure": "/supports/s0/node_arrays/pressure"})])
+             "pressure": "/supports/s0/node_arrays/pressure"},
+            AFFINE_AT)])
 
 
 # ------------------------------------------------- the five mappings
@@ -1377,8 +1384,11 @@ def case_affine_with_rows(f):
                 probe("/keys/alpha", alpha, row=1)],
         codec={"m1": tagged(affine_dict())},
         evaluation=[affine_evaluation(
+            "m1", AFFINE_KEYS, AFFINE,
             {"cl": "/scalars/cl",
-             "pressure": "/supports/s0/node_arrays/pressure"})])
+             "pressure": "/supports/s0/node_arrays/pressure"},
+            [{"mach": float(mach[i]), "alpha": float(alpha[i])}
+             for i in range(n_rows)])])
 
 
 TWO_SLOT_KEYS = ["mach"]
@@ -1394,7 +1404,7 @@ TWO_SLOT = {
         "shape": np.array([6, 1], dtype="<i8"),
     },
 }
-TWO_SLOT_AT = {"mach": 0.5}
+TWO_SLOT_AT = [{"mach": 0.5}, {"mach": 0.8}]
 
 
 def case_callable_two_slots(f):
@@ -1447,16 +1457,6 @@ def case_callable_two_slots(f):
         for name in ("A", "b", "shape"):
             codec_array(gslot, name, TWO_SLOT[slot][name])
 
-    probes = []
-    for output in sorted(TWO_SLOT):
-        y = evaluate_affine(TWO_SLOT[output], TWO_SLOT_KEYS, TWO_SLOT_AT)
-        for n in range(y.shape[0]):
-            for c2 in range(y.shape[1]):
-                probes.append(
-                    {"slot": "/supports/s0/node_arrays/" + output,
-                     "row": 0, "node": n, "component": c2,
-                     "value": fnum(y[n, c2])})
-
     return expect(
         "No rows; one affine callable fills two node-array slots on "
         "one support, each naming its own output.",
@@ -1464,9 +1464,11 @@ def case_callable_two_slots(f):
         probes=[probe("/callables/m2/outputs/heat_flux/b",
                       TWO_SLOT["heat_flux"]["b"], node=4)],
         codec={"m2": tagged(affine_dict(TWO_SLOT_KEYS, TWO_SLOT))},
-        evaluation=[{"callable": "m2",
-                     "keys": {"mach": [fnum(TWO_SLOT_AT["mach"])]},
-                     "probes": probes}])
+        evaluation=[affine_evaluation(
+            "m2", TWO_SLOT_KEYS, TWO_SLOT,
+            dict((s, "/supports/s0/node_arrays/" + s)
+                 for s in TWO_SLOT),
+            TWO_SLOT_AT)])
 
 
 def case_two_supports_unaligned(f):
@@ -2135,8 +2137,8 @@ CASES = {
         support_ids={"s0": MESH_SID}),
     "warn_w08": mk(
         mesh_base, {"mach_bounds": (-1000.0, 1000.0)},
-        "Declared bounds a thousand times wider than the observed "
-        "range, which is what stale bounds look like.",
+        "Declared bounds thousands of times wider than the "
+        "observed range, which is what stale bounds look like.",
         warnings=["W08"], support_ids={"s0": MESH_SID}),
     "warn_w09": mk(
         mesh_base, {"extra_scales": [("category_regime", 2)],

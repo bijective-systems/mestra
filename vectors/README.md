@@ -126,7 +126,10 @@ An evaluation entry states what a callable must produce:
   keys        the keys table it is evaluated on, key name to a list of
               "%.17e" strings, one entry per table row
   probes      the expected outputs, in the probe form above, against
-              the slot each output fills
+              the slot each output fills. The row index is the index
+              into the keys table here and not into any row the file
+              stores, which matters for `affine_with_rows`, where the
+              table happens to be the design the file also carries
 
 
 Three places the specification leaves a choice
