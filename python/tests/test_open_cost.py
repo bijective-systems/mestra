@@ -24,11 +24,12 @@ They are timings, which are never exact. The second is a ratio and so
 is indifferent to how busy the machine is; it is the one that says
 what section 29 asks, and the one that fails if the scan inside the
 scan ever comes back. The first is an absolute bar, and its number is
-chosen rather than derived: a thousand columns opens in about a
-second on an idle machine and about a second and a half on a busy
-one, against 155 s before, and the bar is three seconds so that a
-loaded machine cannot fail it and no return of the old behaviour can
-pass it.
+chosen rather than derived. A thousand columns opens in about 1.2 s
+on the machine this was written on when nothing else is running, and
+in 2.6 s on the same machine under a load average of thirty; it took
+181 s before. The bar is five seconds, which no machine this is
+likely to run on will fail and which nothing quadratic can pass. The
+ratio is where the sharp statement lives.
 
 What is left at a thousand columns is not one hot spot but about
 1 ms of h5py per object, spent twice: once by the check `read` makes
@@ -116,7 +117,7 @@ def test_a_thousand_columns_open_in_seconds_and_not_minutes(opens):
     costs about a second, and a reader that re-walks the file once
     per dataset cannot come near the bar however idle the machine.
     """
-    assert opens[LARGE] < 3.0, (
+    assert opens[LARGE] < 5.0, (
         "opening a %d column file took %.2f s" % (LARGE, opens[LARGE]))
 
 
