@@ -181,6 +181,11 @@ A reader that does not know a type may still copy its dictionary and
 must not interpret it, which is what `read_dict` and `write_dict` are
 for.
 
+One thing a round trip does not carry. Section 29 forbids a reader to
+interpret `/private`, so nothing of it is read and `write` does not
+reproduce it. `Dataset::has_private` says the file had one; a producer
+that needs to keep its private group copies that group itself.
+
 
 What the dictionary dump looks like
 -----------------------------------

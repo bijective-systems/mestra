@@ -356,6 +356,13 @@ void Validator::root() {
            "a root group this version does not know; it is ignored");
     }
   }
+  // /notes is free-form, so nothing there is unknown (no W11), but
+  // section 18 still holds: legal names, no variable-length string
+  // anywhere in the file, and valid UTF-8.  /private is not looked at
+  // at all, which section 29 requires.
+  if (f_.is_group("/notes")) {
+    check_attribute_encodings("/notes", f_.attributes("/notes"));
+  }
 
   if (f_.is_dataset("/row")) {
     const DsetInfo info = f_.dataset_info("/row");

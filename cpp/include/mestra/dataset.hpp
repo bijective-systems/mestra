@@ -162,7 +162,12 @@ struct Dataset {
 
   AttrMap notes;                 // /notes, free-form
   bool has_notes = false;
-  bool has_private = false;      // /private exists; never interpreted
+  // /private exists in the file this came from.  Section 29 forbids a
+  // reader to interpret it, so nothing of it is carried here and
+  // `write` does not reproduce it: a round trip through this library
+  // drops a producer's private group, and a producer that needs to
+  // keep one copies the group itself.
+  bool has_private = false;
   AttrMap root_extra;            // root attributes this version does
                                  // not know (W11)
   std::vector<std::string> unknown_root_groups;
