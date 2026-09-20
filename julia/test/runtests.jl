@@ -920,6 +920,57 @@ end
     @test Mestra.validate(dst).errors == String[]
 end
 
+@testset "an axis is named from DIMENSION_LIST, never from REFERENCE_LIST" begin
+    # Section 21: REFERENCE_LIST is informational and a scale whose
+    # one is missing, short or stale is not an error.  It is not a
+    # hypothetical either: the 4086th attachment to a scale created
+    # without decision 52's property deletes the REFERENCE_LIST it was
+    # extending, and `docs/scale/report.md` 6.5 measured this reader
+    # calling the axis of such a file `unknown` while every other
+    # reader still called it `row`.  The fixture is
+    # `vectors/cases/mesh_two_rows/case.mes` with the `row` scale's
+    # REFERENCE_LIST deleted and `component_1`'s truncated to one
+    # entry; see julia/test/scales/make_scales.py.
+    lost = joinpath(HERE, "scales", "lost_reference_list.mes")
+    @test isfile(lost)
+    HDF5.h5open(lost, "r") do f
+        @test !haskey(HDF5.attributes(f["row"]), "REFERENCE_LIST")
+        short = read(HDF5.attributes(f["component_1"])["REFERENCE_LIST"])
+        @test length(short) == 1
+    end
+    # no rule in section 14 is about it
+    r = Mestra.validate(lost)
+    @test r.errors == String[]
+    @test r.warnings == String[]
+    # and every axis is still named, by the link name of the scale its
+    # DIMENSION_LIST points at
+    ds = Mestra.read(lost)
+    @test ds.nrows == 2
+    @test ds["pressure"].ldims == [:row, :node, :component]
+    @test ds.scalars["cl"].ldims == [:row]
+    @test ds.supports[1].coordinates.ldims ==
+          [Symbol("group:member"), :node, :component]
+    @test ds.supports[1].cell_arrays["region"].ldims == [:cell, :component]
+    @test all(s -> !(:unknown in s.ldims), Mestra.all_slots(ds))
+    io = IOBuffer()
+    Mestra.info(lost; io = io)
+    text = String(take!(io))
+    @test !occursin("unknown", text)
+    @test occursin("(row, node, component) 2x6x1", text)
+    # reading by name still works, and gives the same numbers the
+    # corpus case does
+    v = Mestra.values(ds, ds["pressure"])
+    @test Mestra.at(v; row = 2, node = 4, component = 1) == 204.0
+    # and so does a round trip: what comes back is the corpus file,
+    # REFERENCE_LIST and all, because a writer builds it again
+    dst = joinpath(SCRATCH, "lost_reference_list_out.mes")
+    Mestra.write(Mestra.read(lost; lazy = false), dst)
+    @test isempty(Mestra.structural_diff(case_file("mesh_two_rows"), dst))
+    HDF5.h5open(dst, "r") do f
+        @test haskey(HDF5.attributes(f["row"]), "REFERENCE_LIST")
+    end
+end
+
 @testset "an evaluated file carries no /callables (conventions 7)" begin
     # Evaluating turns every callable slot into a stored slot, so the
     # result has no callable to keep: the group is absent, not present
