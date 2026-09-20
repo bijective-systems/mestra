@@ -104,7 +104,8 @@ Uncertainty is draws, because transform error must be included
 
 Summaries computed in coefficient space are not honest in field space
 (in our experience, bands with full coverage in coefficient space
-decode to a small fraction of that pointwise). So model outputs carry joint draws over nodes
+decode to a small fraction of that pointwise). So model outputs carry
+joint draws over nodes
 under a `draw` dimension, summaries are derived from them by an open
 routine, and the parameters that change the numbers (draw count,
 seed, batch size) are recorded with the result. Whether draws are

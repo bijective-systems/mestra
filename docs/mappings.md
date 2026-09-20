@@ -36,7 +36,8 @@ Validator   would refuse a member whose connectivity hash differs (a
             failed remap), which is exactly the silent failure the
             structural check cannot catch today.
 
-With a solver sweep on top (a freestream sweep per member), rows become 122 times n_conditions,
+With a solver sweep on top (a freestream sweep per member), rows
+become 122 times n_conditions,
 keys gain mach:condition and altitude:condition, coordinates become
 `varies = group:member`, and pressure (row, field, node, 1, Pa) and
 heat_flux (row, field, node, 1, W/m^2) are added.
