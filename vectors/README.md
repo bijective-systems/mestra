@@ -274,12 +274,26 @@ What a check verifies beyond the bytes
 `check.py` also reads back, for every case that is not `err_e42`, the
 dataset creation property list of every dimension scale, and refuses
 a file whose scales are not created with attribute creation order
-tracked and indexed and with object times off. That rule is section
-21's, and it is the one thing in this format that a property list
-rather than a byte position decides. A writer that forgets it
-produces files that are correct until the 4086th dataset attaches to
-one scale, at which point HDF5 fails the attachment after deleting
-the REFERENCE_LIST it was extending, and leaves a file that every
-reader and every validator still accepts. `cases/wide_keys` is the
-case that would not exist without the rule, and `cases/err_e42` is
-the case that breaks it on purpose.
+tracked and indexed. That rule is section 21's E42, and it is the one
+thing in this format that a property list rather than a byte position
+decides. A writer that forgets it produces files that are correct
+until the 4086th dataset attaches to one scale, at which point HDF5
+fails the attachment after deleting the REFERENCE_LIST it was
+extending, and leaves a file that every reader and every validator
+still accepts. `cases/wide_keys` is the case that would not exist
+without the rule, and `cases/err_e42` is the case that breaks it on
+purpose.
+
+Creation order is all it refuses on. Section 21 asks a writer for
+object time tracking off as well, and the check reads that property
+too, but a scale it reads as tracking prints a note beside the case
+and fails nothing (decision 57). HDF5 stores the flag only in a
+version 2 object header, and it is tracking the attribute creation
+order that gives a scale one: on a version 1 header the four
+timestamps are kept whatever the writer asked for, and the property
+reads back as tracking on. So the only scale the flag can be read
+from is one that already obeys E42, and a check of it could say
+nothing that the E42 line has not said. What the second call is for
+is byte reproducibility, and that is decided here by regenerating
+each case and comparing it with the committed copy, which is the
+first thing this file does.

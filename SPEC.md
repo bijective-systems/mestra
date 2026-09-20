@@ -837,6 +837,36 @@ reading:
      ceiling decision 52 lifts, and the third covers two groups that
      thirty valid cases never exercised. Section 30.
 
+Taken on 2026-09-20, fourth batch, from the cleanup that Phase 3
+left open. Two of them say what a rule does not cover; the third
+writes down an algorithm that four implementations had each invented
+for themselves:
+
+ 57. E42 is about attribute creation order alone. Object time
+     tracking off stays a writer requirement of section 21 and is
+     not validated, because HDF5 stores the flag only in a version 2
+     object header: read back from anything else it says tracking is
+     on whatever the writer asked, so a check of it would fault only
+     the files E42 already rejects. vectors/check.py now reports it
+     as a warning line rather than a failure. Sections 14 and 21.
+ 58. `grouped_split` has one portable algorithm, so that a seed
+     names the same split in every language: the units ordered by
+     their category names as bytes, one splitmix64 draw each, the
+     units sorted by the draw, and part sizes by largest remainder
+     with a floor of one unit per part. Each of the four
+     implementations shuffled with its own language's generator,
+     which agrees with nobody else's. New section 31.
+ 59. The three questions the API conventions left open are answered
+     there and not by a new rule: a metadata open may also read
+     `/row_support`, because it is a column rather than a slot and
+     E16 needs it in an unaligned file; an evaluated file does not
+     carry `/private`, because the result is a new dataset whose
+     producer attaches its own records; and an unknown dataset
+     inside a known group is not carried through a rewrite, which is
+     phase-3 finding 12. A reader lists it as lossy and a write
+     refuses it unless checking is off, so nothing is dropped in
+     silence. Section 14 gains no rule and section 29 is unchanged.
+
 Still open: nothing.
 
 
@@ -1147,7 +1177,9 @@ those two functions produces the layout netCDF-C expects.
 
 A dimension scale is created with attribute creation order tracked
 and indexed, and with object time tracking off, on its dataset
-creation property list (E42):
+creation property list. The first of the two is E42; the second is a
+writer requirement that nothing validates, for the reason given
+below:
 
     H5Pset_attr_creation_order(dcpl,
         H5P_CRT_ORDER_TRACKED | H5P_CRT_ORDER_INDEXED);
@@ -1164,6 +1196,19 @@ attribute it was extending, which leaves a file that every reader and
 every validator still accepts. The second call keeps the file byte
 reproducible, because a version 2 object header records four
 timestamps unless it is told not to.
+
+Object time tracking is a writer requirement and not a validated
+one. HDF5 stores the flag only in a version 2 object header; a
+version 1 header keeps its four timestamps whatever the writer
+asked for, and the property read back from one reports tracking on
+in every case. So the only object the flag can be read from is a
+scale that already obeys E42, where the answer is never the
+interesting one, and a check of it would report a second fault on
+exactly the files E42 rejects and nothing on any other. E42 is
+therefore about attribute creation order alone, and no validator may
+reject a file over object times. What the second call is for is byte
+reproducibility, and that is checked by writing the file twice and
+comparing, not by reading a property list.
 
 Three things about that rule. H5Pset_attr_phase_change looks like the
 way to ask for the same thing and is not: under the default library
@@ -1913,3 +1958,96 @@ between two files that should be the same is structural equality:
     the same value;
   - the same dimension scale attached to each axis of each dataset,
     compared by the dimension's name.
+
+
+31. Grouped split
+-----------------
+
+A grouped split divides the rows of a file into named parts by whole
+units of generalisation, so that no unit has rows in two parts. The
+helper is `grouped_split(dataset, fractions, seed)` (section 4 of the
+API conventions). This section is the algorithm it follows, written
+down so that one seed names one split in every language. An
+implementation that shuffles with its own language's random generator
+is not conforming, however good the generator is: the four in this
+repository each chose a different one and no two agreed on a split.
+
+The units. The file names a unit of generalisation, which is a key of
+role group (section 7). A key of that role stores category ids
+(section 21), so the units are the distinct ids the key's column
+holds, and they are put in order by the entries those ids name in the
+key's category table, compared as UTF-8 byte strings. Table order is
+not the order: two files that hold the same units in tables written
+in two orders must split the same way. A file that names no unit of
+generalisation cannot be split this way and the call is refused.
+
+The generator. One 64-bit value is drawn per unit from splitmix64,
+seeded with the seed, in the unit order above. The generator is
+sixty-four bits of state and this update, with every operation on
+unsigned 64-bit integers and every shift logical:
+
+    state = state + 0x9E3779B97F4A7C15
+    z     = state
+    z     = (z XOR (z >> 30)) * 0xBF58476D1CE4E5B9
+    z     = (z XOR (z >> 27)) * 0x94D049BB133111EB
+    draw  = z XOR (z >> 31)
+
+The state starts at the seed, and the first draw is the one the first
+update returns; the seed itself is never a draw. splitmix64 is used
+because it is five lines, has no state beyond the seed, and gives the
+same stream in every language that has 64-bit wrapping arithmetic.
+The units are then sorted by their draw, as unsigned integers and
+ascending, and two units with the same draw are ordered by their
+category names as bytes.
+
+The parts. `fractions` names each part and gives it a fraction; the
+parts are taken in order of their names as UTF-8 byte strings, which
+is the order they are filled in and the order of the result. The
+fractions are normalised by their sum, so that 8 and 2 mean what 0.8
+and 0.2 mean. A fraction that is negative, or a set of fractions that
+sums to zero or less, is refused.
+
+The sizes. With u units and a part whose normalised fraction is f,
+the part's exact share is f * u in float64, its base size is the
+floor of that, and the remainder is what is left. The base sizes are
+handed out first, and the u - sum(base) units still unassigned go one
+each to the parts with the largest remainders, ties broken by part
+name. Then the floor: while some part has no unit at all, the part
+with the fewest -- in name order among equals -- takes one unit from
+the part with the most, ties again broken by name. A part with no
+unit in it is not a test set, and with at least as many units as
+parts some part always has one to give. Fewer units than parts is
+refused rather than split: the call cannot do what it was asked.
+
+The assignment. The sorted units are dealt out as consecutive blocks
+in part-name order: the first part takes the first block of its size,
+the second the next, and so on. A part's rows are then every row
+whose unit is in that part, in ascending row order.
+
+A worked example. A file whose unit of generalisation is the key
+`rotor`, whose category table holds five entries in the table order
+`rotor_b`, `rotor_a`, `rotor_d`, `rotor_c`, `rotor_e`, so that the
+ids are 0 to 4 in that order, split with `seed = 0` and the fractions
+`{"train": 0.8, "test": 0.2}`.
+
+In unit order, which is by name and not by id, the draws are:
+
+    unit      id   draw
+    rotor_a    1   0xe220a8397b1dcdaf
+    rotor_b    0   0x6e789e6aa1b965f4
+    rotor_c    3   0x06c45d188009454f
+    rotor_d    2   0xf88bb8a8724c81ec
+    rotor_e    4   0x1b39896a51a8749b
+
+Sorted by the draw, the units are `rotor_c`, `rotor_e`, `rotor_b`,
+`rotor_a`, `rotor_d`. The parts in name order are `test` then
+`train`; the exact shares are 1.0 and 4.0, so the base sizes are 1
+and 4, nothing is left over and no part is empty. Dealing the sorted
+units in part-name order gives:
+
+    test    rotor_c
+    train   rotor_e, rotor_b, rotor_a, rotor_d
+
+and each part's rows are the rows whose `rotor` value is one of its
+units. An implementation that reproduces this table reproduces every
+split, because nothing else in the algorithm depends on the file.

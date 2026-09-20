@@ -235,12 +235,24 @@ def structural_diff(path_a, path_b, chain=None):
 
 
 def scale_property_checks(path):
-    """Section 21: every dimension scale is created with attribute
-    creation order tracked and indexed, and with object times off.
-    Without the first no scale takes more than 4085 attachments;
-    without the second the file is not byte reproducible."""
+    """Section 21 on the creation properties of a dimension scale.
+
+    Returns (problems, remarks). A problem fails the case; a remark
+    is printed and fails nothing.
+
+    Attribute creation order tracked and indexed is E42 and is the
+    problem: without it no scale takes more than 4085 attachments.
+    Object times off is a writer requirement of section 21 that
+    nothing validates, because HDF5 stores the flag only in a
+    version 2 object header and a version 1 header reads back as
+    tracking on whatever the writer asked. Reading it here can
+    therefore only repeat what the E42 line already said, so it is a
+    remark. Byte reproducibility is decided by the comparison of two
+    runs above and not by a property list.
+    """
     want = h5py.h5p.CRT_ORDER_TRACKED | h5py.h5p.CRT_ORDER_INDEXED
     problems = []
+    remarks = []
     with h5py.File(path, "r") as f:
         objs, _by_addr, _capped = walk(f)
         for p, obj in sorted(objs.items()):
@@ -254,8 +266,10 @@ def scale_property_checks(path):
                     "requires %d (tracked and indexed)"
                     % (p, order, want))
             if dcpl.get_obj_track_times():
-                problems.append("%s: object times are tracked" % p)
-    return problems
+                remarks.append(
+                    "%s: object times read back as tracked; not "
+                    "checked (section 21)" % p)
+    return problems, remarks
 
 
 # ------------------------------------------------ the netCDF readers
@@ -375,6 +389,7 @@ def main(argv):
 
         for name in expected_names:
             notes = []
+            remarks = []
             a = os.path.join(cases_dir, name, "case.mes")
             b = os.path.join(fresh_cases, name, "case.mes")
             aj = os.path.join(cases_dir, name, "expected.json")
@@ -414,7 +429,9 @@ def main(argv):
                     how = "structurally equal, bytes differ"
             exp = json.loads(ja.decode("utf-8"))
             if "E42" not in exp["validator"]["errors"]:
-                notes.extend(scale_property_checks(a))
+                bad, said = scale_property_checks(a)
+                notes.extend(bad)
+                remarks.extend(said)
             if not exp["validator"]["errors"]:
                 notes.extend(netcdf_checks(a))
             if notes:
@@ -422,8 +439,12 @@ def main(argv):
                 print("%-28s FAIL  %s" % (name, how))
                 for note in notes:
                     print("%-28s       %s" % ("", note))
+                for said in remarks:
+                    print("%-28s note  %s" % ("", said))
             else:
                 print("%-28s ok    %s" % (name, how))
+                for said in remarks:
+                    print("%-28s note  %s" % ("", said))
 
         hostile_dir = os.path.join(root, "hostile")
         fresh_hostile = os.path.join(tmp, "hostile")
