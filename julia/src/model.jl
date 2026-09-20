@@ -19,6 +19,17 @@ function Base.showerror(io::IO, e::MestraError)
     print(io, e.msg)
 end
 
+"""One thing a reader or the validator found, with the rule of
+section 14 it belongs to and the path it was found at."""
+struct Finding
+    rule::String
+    path::String
+    message::String
+end
+
+Base.show(io::IO, f::Finding) =
+    print(io, f.rule, "  ", f.path, ": ", f.message)
+
 const KEY_ROLES = (:design, :condition, :time, :categorical, :group,
                    :split, :id, :status)
 const ARRAY_ROLES = (:coordinates, :field, :label, :weight, :normal,
@@ -211,6 +222,12 @@ mutable struct Dataset
     # The container groups the file carried, so that a round trip
     # keeps an empty /scalars that a producer chose to write.
     container_groups::Set{String}
+    # What the reader met and would not follow or could not read: a
+    # link that is not a hard link (E40) and an object whose read
+    # failed or was refused (E41).  A file is untrusted input, so the
+    # reader reports rather than throws wherever it can carry on.
+    findings::Vector{Finding}
+    max_elements::Int
     path::Union{Nothing,String}
     lazy::Bool
 end
@@ -230,7 +247,8 @@ function Dataset(; writer::AbstractString = "mestra.jl 0",
             generalisation_group, Int(nrows), Dict{String,KeyColumn}(),
             Dict{String,Slot}(), Dict{String,CategoryTable}(), Support[],
             nothing, Dict{String,CallableRef}(), nothing, nothing,
-            RawAttr[], RawGroupCopy[], Set{String}(), nothing, false)
+            RawAttr[], RawGroupCopy[], Set{String}(), Finding[],
+            DEFAULT_MAX_ELEMENTS, nothing, false)
 end
 
 function utc_now()

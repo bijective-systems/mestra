@@ -4,6 +4,66 @@
 # attribute encodings, the fixed-length UTF-8 strings, the dimension
 # scales, the chunk shapes and the filters.  Nothing above this file
 # is allowed to reach for the raw API.
+#
+# A file is untrusted input.  Every number a file states about itself
+# -- how many elements a dataset has, how many values a filter
+# declares, how deep the groups go -- is a claim by whoever wrote it,
+# and this file is where each claim is checked before anything is
+# sized from it.  Nothing above here allocates from a shape it has not
+# seen checked, opens a link without asking what kind it is, or
+# recurses on a structure the file controls the depth of.
+
+"""The most elements any single read will materialise.  Above this a
+read is refused with E41 rather than attempted: a file may declare a
+trillion elements and hold none.  `Mestra.read`, `values` and `rows`
+take a `max_elements` keyword to change it for one call."""
+const DEFAULT_MAX_ELEMENTS = 1 << 31
+
+"""The most bytes any single read will materialise, whatever the
+element count allows.  A chunk of four hundred million float64 is
+under the element cap and is still three gigabytes, so the two caps
+are both needed.  Raise it, deliberately, for a file you trust:
+
+    Mestra.MAX_READ_BYTES[] = 8 * (1 << 30)
+"""
+const MAX_READ_BYTES = Ref(1 << 30)
+
+"""The most bytes one attribute may hold.  Every attribute this format
+names is a scalar, so nothing legal is near this."""
+const MAX_ATTR_BYTES = 1 << 24
+
+"""The deepest this reader will walk into a file.  Nothing this format
+defines nests beyond about six, and a callable's dictionary has no
+reason to; beyond the cap the subtree is reported as E41 and not
+read."""
+const MAX_DEPTH = 64
+
+"""The most objects one walk will visit, so that a file cannot hold a
+reader in a loop of its own making."""
+const MAX_OBJECTS = 1 << 20
+
+"""The most client-data values this reader will take from one filter
+declaration."""
+const MAX_FILTER_CD = 256
+
+"""
+    element_count(dims) -> Int
+
+The product of the extents, saturating at `typemax(Int)` instead of
+wrapping.  A file that declares (2^40, 2^40) would otherwise overflow
+into a small positive number and be read.
+"""
+function element_count(dims)
+    any(d -> d == 0, dims) && return 0
+    n = 1
+    for d in dims
+        d < 0 && return typemax(Int)
+        big = Int128(n) * Int128(d)
+        big > typemax(Int) && return typemax(Int)
+        n = Int(big)
+    end
+    return n
+end
 
 const MACHINERY_ATTRS = Set([
     "CLASS", "NAME", "DIMENSION_LIST", "REFERENCE_LIST",
@@ -39,7 +99,125 @@ function space_npoints(sp::HDF5.Dataspace)
     n = HDF5.API.h5s_get_simple_extent_ndims(sp)
     n == 0 && return 1
     dims, _ = HDF5.API.h5s_get_simple_extent_dims(sp)
-    return Int(prod(dims))
+    return element_count(Int.(dims))
+end
+
+"""True when the dataspace is the scalar one section 18 requires of
+every attribute."""
+is_scalar_space(sp::HDF5.Dataspace) =
+    HDF5.API.h5s_get_simple_extent_ndims(sp) == 0
+
+# ------------------------------------------------------------- links
+#
+# `keys(group)` lists link names, and indexing a group follows the
+# link.  A soft link may point at nothing or in a circle, and an
+# external link opens another file, which this reader must never do
+# on a file's say-so.  So the link is asked what kind it is before
+# anything opens it.
+
+# HDF5.jl wraps H5Lget_info, which is the 1.10 name; libhdf5 1.12
+# renamed it H5Lget_info2 and 2.0 dropped the old symbol, so there is
+# no wrapper to call on a current library.  This is the one place in
+# the package that reaches past HDF5.jl to the C API with a ccall, and
+# H5Lget_info2 is the one function it calls.  Only the first field of
+# H5L_info2_t is read, the link type, which is first in the struct in
+# every version of it; the buffer is far larger than the struct so
+# that the rest of the layout does not have to be guessed.
+const _LINK_INFO_BYTES = 128
+
+function _h5l_get_info2(parent_id, name::String)
+    buf = zeros(UInt8, _LINK_INFO_BYTES)
+    st = ccall((:H5Lget_info2, HDF5.API.libhdf5), HDF5.API.herr_t,
+               (HDF5.API.hid_t, Cstring, Ptr{UInt8}, HDF5.API.hid_t),
+               parent_id, name, buf, HDF5.API.H5P_DEFAULT)
+    st < 0 && return nothing
+    return Int(reinterpret(Int32, buf[1:4])[1])
+end
+
+"""
+    link_type(parent, name) -> Symbol
+
+`:hard`, `:soft`, `:external`, `:missing` or `:other`.  Nothing here
+follows the link: this is what is asked before anything is opened.
+"""
+function link_type(parent, name::AbstractString)
+    try
+        HDF5.API.h5l_exists(parent, String(name), HDF5.API.H5P_DEFAULT) ||
+            return :missing
+        t = _h5l_get_info2(parent.id, String(name))
+        t === nothing && return :other
+        # The values are the C enum H5L_type_t.  HDF5.jl's own
+        # H5L_TYPE_EXTERNAL is 2, which is not what the library
+        # returns, so the literals are used and anything unrecognised
+        # is treated as not a hard link, which is the safe answer.
+        t == 0 && return :hard          # H5L_TYPE_HARD
+        t == 1 && return :soft          # H5L_TYPE_SOFT
+        t == 64 && return :external     # H5L_TYPE_EXTERNAL
+        return :other
+    catch
+        return :other
+    end
+end
+
+"""Every child of a group as (name, link type), in name order, with a
+cap so that a group cannot hold a reader forever."""
+function child_links(g)
+    out = Tuple{String,Symbol}[]
+    # Ask how many links there are before asking for their names: a
+    # group may declare a billion, and listing them all to throw most
+    # of the list away is the allocation this is here to avoid.
+    n = try
+        Int(HDF5.API.h5g_get_num_objs(g))
+    catch
+        -1
+    end
+    names = if 0 <= n <= MAX_OBJECTS
+        try
+            collect(keys(g))
+        catch
+            String[]
+        end
+    elseif n > MAX_OBJECTS
+        [try
+             HDF5.API.h5l_get_name_by_idx(g, ".", HDF5.API.H5_INDEX_NAME,
+                                          HDF5.API.H5_ITER_INC, i - 1,
+                                          HDF5.API.H5P_DEFAULT)
+         catch
+             ""
+         end for i in 1:MAX_OBJECTS]
+    else
+        try
+            collect(keys(g))
+        catch
+            String[]
+        end
+    end
+    for nm in names
+        isempty(nm) && continue
+        push!(out, (String(nm), link_type(g, nm)))
+    end
+    return out
+end
+
+"""The names of the children reached by a hard link, in name order.
+A soft, external or broken link is not one, and is left to the
+validator to report as E40."""
+hard_link_names(g) = String[n for (n, t) in child_links(g) if t === :hard]
+
+"""
+    hard_child(parent, name) -> object or nothing
+
+Open a child only when the link to it is a hard link and the open
+succeeds.  This is the only way anything above this file opens an
+object it found by walking.
+"""
+function hard_child(parent, name::AbstractString)
+    link_type(parent, String(name)) === :hard || return nothing
+    try
+        return parent[String(name)]
+    catch
+        return nothing
+    end
 end
 
 """What an HDF5 datatype is, as sections 18 and 19 name the kinds."""
@@ -102,6 +280,8 @@ struct RawAttr
     ti::TypeInfo
     raw::Vector{UInt8}       # the stored bytes, for a scalar attribute
     npoints::Int
+    scalar::Bool             # the dataspace is scalar, as section 18 asks
+    readable::Bool           # the value was read; false when refused
     value::Any               # decoded: Bool, Int64, Float64, String, ...
 end
 
@@ -146,27 +326,62 @@ end
 
 """Read one attribute exactly as stored."""
 function read_raw_attr(obj, name::AbstractString)
-    a = HDF5.open_attribute(obj, name)
+    a = try
+        HDF5.open_attribute(obj, name)
+    catch
+        return RawAttr(String(name), TypeInfo(:other, 0, false, true,
+                                              false, 0, 0),
+                       UInt8[], 0, false, false, nothing)
+    end
     try
         t = HDF5.datatype(a)
         ti = type_info(t)
         sp = HDF5.dataspace(a)
+        scalar = is_scalar_space(sp)
         npoints = space_npoints(sp)
+        # A variable-length attribute is never legal (E19) and its
+        # buffer is pointers, not bytes, so it is never read here.
         if ti.vlen
-            return RawAttr(String(name), ti, UInt8[], npoints, nothing)
+            return RawAttr(String(name), ti, UInt8[], npoints, scalar,
+                           false, nothing)
+        end
+        # Size the buffer from the file's claim only after checking it.
+        if ti.size <= 0 || npoints < 0 ||
+           Int128(ti.size) * Int128(max(npoints, 1)) > MAX_ATTR_BYTES
+            return RawAttr(String(name), ti, UInt8[], npoints, scalar,
+                           false, nothing)
         end
         raw = Vector{UInt8}(undef, ti.size * max(npoints, 1))
-        HDF5.API.h5a_read(a, t, raw)
-        return RawAttr(String(name), ti, raw, npoints,
-                       decode_raw(ti, raw, npoints))
+        try
+            HDF5.API.h5a_read(a, t, raw)
+        catch
+            return RawAttr(String(name), ti, UInt8[], npoints, scalar,
+                           false, nothing)
+        end
+        # Only a scalar attribute carries a value this format names;
+        # an array one is E19 and its elements are not interpreted.
+        value = scalar ? decode_raw(ti, raw, npoints) : nothing
+        return RawAttr(String(name), ti, raw, npoints, scalar, true, value)
+    catch
+        return RawAttr(String(name), TypeInfo(:other, 0, false, true,
+                                              false, 0, 0),
+                       UInt8[], 0, false, false, nothing)
     finally
         close(a)
     end
 end
 
+function attr_names(obj)
+    try
+        return collect(keys(HDF5.attributes(obj)))
+    catch
+        return String[]
+    end
+end
+
 function raw_attrs(obj)
     out = RawAttr[]
-    for name in keys(HDF5.attributes(obj))
+    for name in attr_names(obj)
         push!(out, read_raw_attr(obj, name))
     end
     return out
@@ -175,7 +390,7 @@ end
 """Every attribute of `obj` that this format owns, by name."""
 function own_attrs(obj)
     d = Dict{String,RawAttr}()
-    for name in keys(HDF5.attributes(obj))
+    for name in attr_names(obj)
         name in MACHINERY_ATTRS && continue
         d[name] = read_raw_attr(obj, name)
     end
@@ -242,6 +457,9 @@ end
 """The on-disk shape of a dataset, in C order, with its maximum."""
 function disk_shape(d::HDF5.Dataset)
     sp = HDF5.dataspace(d)
+    if HDF5.API.h5s_get_simple_extent_ndims(sp) == 0
+        return (Int[], Int[])
+    end
     dims, maxdims = HDF5.API.h5s_get_simple_extent_dims(sp)
     return (Int.(dims), [m == HDF5.API.H5S_UNLIMITED ? -1 : Int(m)
                          for m in maxdims])
@@ -252,41 +470,140 @@ function dataset_layout(d::HDF5.Dataset)
     layout = HDF5.API.h5p_get_layout(dcpl)
     chunk = nothing
     if layout == HDF5.API.H5D_CHUNKED
-        c, _ = HDF5.API.h5p_get_chunk(dcpl)
-        chunk = Int.(c)
+        try
+            c, _ = HDF5.API.h5p_get_chunk(dcpl)
+            chunk = Int.(c)
+        catch
+            chunk = nothing
+        end
     end
-    nf = HDF5.API.h5p_get_nfilters(dcpl)
+    nf = try
+        Int(HDF5.API.h5p_get_nfilters(dcpl))
+    catch
+        0
+    end
     filters = Tuple{Int,Vector{Int}}[]
     for i in 0:(nf - 1)
         flags = Ref{Cuint}()
-        nelem = Ref{Csize_t}(16)
-        cd = Vector{Cuint}(undef, 16)
+        # The library writes at most as many values as the buffer
+        # holds and reports how many the filter declares, which may
+        # be more.  Taking the reported count as the length of the
+        # buffer is how a reader reads past the end of it.
+        cd = Vector{Cuint}(undef, MAX_FILTER_CD)
+        nelem = Ref{Csize_t}(length(cd))
         namebuf = Vector{UInt8}(undef, 256)
-        fid = HDF5.API.h5p_get_filter(dcpl, i, flags, nelem, cd,
-                                      length(namebuf), namebuf, C_NULL)
-        push!(filters, (Int(fid), Int.(cd[1:Int(nelem[])])))
+        fid = try
+            HDF5.API.h5p_get_filter(dcpl, i, flags, nelem, cd,
+                                    length(namebuf), namebuf, C_NULL)
+        catch
+            continue
+        end
+        got = min(Int(nelem[]), length(cd))
+        got = max(got, 0)
+        push!(filters, (Int(fid), Int.(cd[1:got])))
     end
     return (layout == HDF5.API.H5D_CHUNKED ? :chunked :
             layout == HDF5.API.H5D_CONTIGUOUS ? :contiguous : :other,
             chunk, filters)
 end
 
+"""
+    check_readable(d; max_elements) -> Int
+
+The number of elements `d` holds, having checked that reading it will
+not ask for more than `max_elements` of them and that its chunk is no
+larger either, since the library reads a whole chunk at a time.
+Throws `MestraError("E41")` rather than letting a claim size a
+buffer.
+"""
+function check_readable(d::HDF5.Dataset;
+                        max_elements::Integer = DEFAULT_MAX_ELEMENTS,
+                        max_bytes::Integer = MAX_READ_BYTES[])
+    cdims, _ = disk_shape(d)
+    n = element_count(cdims)
+    path = try
+        HDF5.name(d)
+    catch
+        "?"
+    end
+    n > max_elements && throw(MestraError("E41",
+        "$(path) declares $(n) elements, more than the $(max_elements) " *
+        "this reader will materialise; raise `max_elements` if the " *
+        "file is trusted"))
+    width = try
+        Int(HDF5.API.h5t_get_size(HDF5.datatype(d)))
+    catch
+        1
+    end
+    bytes = Int128(n) * Int128(max(width, 1))
+    bytes > max_bytes && throw(MestraError("E41",
+        "$(path) would take $(bytes) bytes, more than the $(max_bytes) " *
+        "this reader will materialise; raise `Mestra.MAX_READ_BYTES[]` " *
+        "if the file is trusted"))
+    check_chunk(d; max_elements = max_elements, max_bytes = max_bytes)
+    return n
+end
+
+"""
+    check_chunk(d; max_elements, max_bytes)
+
+The library reads a whole chunk at a time, so a chunk this reader
+would not materialise is a dataset it will not read, however small the
+part asked for.  This is what makes a one-row lazy read of a hostile
+file cost one row.
+"""
+function check_chunk(d::HDF5.Dataset;
+                     max_elements::Integer = DEFAULT_MAX_ELEMENTS,
+                     max_bytes::Integer = MAX_READ_BYTES[])
+    _, chunk, _ = dataset_layout(d)
+    chunk === nothing && return nothing
+    path = try
+        HDF5.name(d)
+    catch
+        "?"
+    end
+    width = try
+        Int(HDF5.API.h5t_get_size(HDF5.datatype(d)))
+    catch
+        1
+    end
+    c = element_count(chunk)
+    c > max_elements && throw(MestraError("E41",
+        "$(path) has a chunk of $(c) elements, more than the " *
+        "$(max_elements) this reader will materialise"))
+    bytes = Int128(c) * Int128(max(width, 1))
+    bytes > max_bytes && throw(MestraError("E41",
+        "$(path) has a chunk of $(bytes) bytes, more than the " *
+        "$(max_bytes) this reader will materialise"))
+    return nothing
+end
+
 """Raw bytes of a whole dataset, in the file's own datatype."""
-function read_raw_dataset(d::HDF5.Dataset)
+function read_raw_dataset(d::HDF5.Dataset;
+                          max_elements::Integer = DEFAULT_MAX_ELEMENTS)
     t = HDF5.datatype(d)
     ti = type_info(t)
-    sp = HDF5.dataspace(d)
-    n = space_npoints(sp)
+    ti.vlen && throw(MestraError("E41",
+        "a variable-length dataset is not one this reader will read"))
+    n = check_readable(d; max_elements = max_elements)
     n == 0 && return ti, UInt8[], 0
+    ti.size > 0 || throw(MestraError("E41", "a datatype of no size"))
     raw = Vector{UInt8}(undef, ti.size * n)
-    HDF5.API.h5d_read(d, t, HDF5.API.H5S_ALL, HDF5.API.H5S_ALL,
-                      HDF5.API.H5P_DEFAULT, raw)
+    try
+        HDF5.API.h5d_read(d, t, HDF5.API.H5S_ALL, HDF5.API.H5S_ALL,
+                          HDF5.API.H5P_DEFAULT, raw)
+    catch e
+        throw(MestraError("E41",
+            "the library could not read this dataset: " *
+            first(sprint(showerror, e), 200)))
+    end
     return ti, raw, n
 end
 
 """A fixed-length string dataset, as the raw record bytes."""
-function read_string_records(d::HDF5.Dataset)
-    ti, raw, n = read_raw_dataset(d)
+function read_string_records(d::HDF5.Dataset;
+                             max_elements::Integer = DEFAULT_MAX_ELEMENTS)
+    ti, raw, n = read_raw_dataset(d; max_elements = max_elements)
     recs = Vector{Vector{UInt8}}(undef, n)
     for i in 1:n
         recs[i] = raw[((i - 1) * ti.size + 1):(i * ti.size)]
@@ -294,8 +611,33 @@ function read_string_records(d::HDF5.Dataset)
     return ti, recs
 end
 
-read_strings(d::HDF5.Dataset) =
-    [String(strip_nul(r)) for r in read_string_records(d)[2]]
+read_strings(d::HDF5.Dataset;
+             max_elements::Integer = DEFAULT_MAX_ELEMENTS) =
+    [String(strip_nul(r))
+     for r in read_string_records(d; max_elements = max_elements)[2]]
+
+"""
+    safe_read(d; max_elements) -> Array
+
+A whole dataset as a Julia array, checked first.  Everything above
+this file that materialises a dataset comes through here or through
+`read_raw_dataset`, so no HDF5.jl high-level read is ever reached with
+a shape this package has not looked at.
+"""
+function safe_read(d::HDF5.Dataset;
+                   max_elements::Integer = DEFAULT_MAX_ELEMENTS)
+    ti = type_info(HDF5.datatype(d))
+    ti.class === :string &&
+        return read_strings(d; max_elements = max_elements)
+    check_readable(d; max_elements = max_elements)
+    try
+        return HDF5.read(d)
+    catch e
+        throw(MestraError("E41",
+            "the library could not read $(HDF5.name(d)): " *
+            first(sprint(showerror, e), 200)))
+    end
+end
 
 """Create a dataset with object times off, as section 30 requires."""
 function make_dcpl(; chunk = nothing, deflate = nothing, shuffle = false)
@@ -368,14 +710,25 @@ function create_scale(parent, name::AbstractString, length_::Integer;
     return d
 end
 
-is_scale(d::HDF5.Dataset) = HDF5.API.h5ds_is_scale(d)
+function is_scale(d::HDF5.Dataset)
+    try
+        return HDF5.API.h5ds_is_scale(d)
+    catch
+        return false
+    end
+end
 
 """Attach `scale` to C-order axis `axis` (zero based) of `d`."""
 attach_scale!(d::HDF5.Dataset, scale::HDF5.Dataset, axis::Integer) =
     HDF5.API.h5ds_attach_scale(d, scale, axis)
 
-num_scales(d::HDF5.Dataset, axis::Integer) =
-    Int(HDF5.API.h5ds_get_num_scales(d, axis))
+function num_scales(d::HDF5.Dataset, axis::Integer)
+    try
+        return Int(HDF5.API.h5ds_get_num_scales(d, axis))
+    catch
+        return -1
+    end
+end
 
 """The link name of the one scale attached to C-order axis `axis`.
 
@@ -387,9 +740,12 @@ H5DSis_attached rather than by iterating.  Nothing here needs a ccall.
 function attached_scale_name(d::HDF5.Dataset, axis::Integer,
                              candidates::Vector{Pair{String,HDF5.Dataset}})
     for (name, s) in candidates
-        if HDF5.API.h5ds_is_attached(d, s, axis)
-            return name
+        attached = try
+            HDF5.API.h5ds_is_attached(d, s, axis)
+        catch
+            false
         end
+        attached && return name
     end
     return nothing
 end
@@ -398,18 +754,30 @@ end
 group first so that a support-local `row` is found before the file one."""
 function collect_scales(f::HDF5.File)
     out = Pair{String,HDF5.Dataset}[]
-    function walk(g, prefix)
-        for name in keys(g)
-            obj = g[name]
+    # An explicit stack, not the call stack: a file chooses how deep
+    # its groups go and thirty thousand levels would overflow one.
+    stack = Tuple{Any,Int}[(f, 0)]
+    visited = 0
+    while !isempty(stack)
+        g, depth = pop!(stack)
+        depth >= MAX_DEPTH && continue
+        for (name, kind) in child_links(g)
+            kind === :hard || continue
+            visited += 1
+            visited > MAX_OBJECTS && return out
+            obj = hard_child(g, name)
+            obj === nothing && continue
             if obj isa HDF5.Dataset
-                if haskey(HDF5.attributes(obj), "CLASS") && is_scale(obj)
-                    push!(out, name => obj)
+                ok = try
+                    haskey(HDF5.attributes(obj), "CLASS") && is_scale(obj)
+                catch
+                    false
                 end
+                ok && push!(out, String(name) => obj)
             elseif obj isa HDF5.Group
-                walk(obj, prefix * "/" * name)
+                push!(stack, (obj, depth + 1))
             end
         end
     end
-    walk(f, "")
     return out
 end

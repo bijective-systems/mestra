@@ -5,13 +5,20 @@
 # Retired identifiers (E07, W09) are never emitted.  The validator
 # works on the file itself rather than on the reader's model, so that
 # a file the reader would refuse still gets a full report.
-
-"""One thing the validator found, with the rule it belongs to."""
-struct Finding
-    rule::String
-    path::String
-    message::String
-end
+#
+# Two rules beyond section 14 as it stands, for what a file that was
+# not written by a conforming writer can be:
+#
+#   E40  a link that is not a hard link anywhere in the public tree.
+#        It is reported and never followed: a soft link may point at
+#        nothing or in a circle, and an external link would open
+#        another file on this file's say-so.
+#   E41  an object the validator could not read, with its path. The
+#        pass then continues, so that one unreadable object does not
+#        hide everything after it.
+#
+# Every per-object check below runs inside `guard!`, which turns
+# anything thrown into E41 against that object's path and carries on.
 
 """
     ValidationReport
@@ -53,10 +60,56 @@ mutable struct Validator
     keycat::Dict{String,String}
     gen_group::Union{Nothing,String}
     missing_public::Bool
+    max_elements::Int
 end
 
 report!(v::Validator, rule, path, msg) =
-    push!(v.findings, Finding(rule, path, msg))
+    push!(v.findings, Finding(rule, String(path), String(msg)))
+
+"""Run one object's checks, and turn anything thrown into E41 against
+that object rather than into the end of the pass."""
+function guard!(fn, v::Validator, path)
+    try
+        return fn()
+    catch e
+        e isa MestraError && e.rule !== nothing ?
+            report!(v, e.rule, path, e.msg) :
+            report!(v, "E41", path,
+                    "this object could not be read: " *
+                    first(sprint(showerror, e), 200))
+        return nothing
+    end
+end
+
+"""The children of a group reached by a hard link, in name order,
+reporting every other link as E40 without following it."""
+function vchildren!(v::Validator, g, path)
+    out = String[]
+    for (name, kind) in child_links(g)
+        if kind === :hard
+            push!(out, name)
+        else
+            report!(v, "E40", "$(path)/$(name)",
+                    "a $(kind) link; the public tree is hard links and " *
+                    "this reader never follows another kind")
+        end
+    end
+    return sort(out, by = codeunits)
+end
+
+"""Open a child through its hard link, reporting E41 if it will not
+open."""
+function vopen!(v::Validator, g, name, path)
+    obj = hard_child(g, name)
+    obj === nothing && report!(v, "E41", path, "this object would not open")
+    return obj
+end
+
+"""A root group, if it is one, reached by a hard link."""
+function vroot(v::Validator, name)
+    obj = hard_child(v.f, name)
+    return obj isa HDF5.Group ? obj : nothing
+end
 
 const KEY_ATTRS = Set(["role", "units", "lower", "upper", "category",
                        "trajectory_group", "parent"])
@@ -88,32 +141,44 @@ const DTYPE_BY_ROLE = Dict{String,Vector{DataType}}(
 Check a file against section 14.  The report names rules by identifier
 and nothing else, as the conformance corpus does.
 """
-function validate(path::AbstractString)
-    HDF5.h5open(String(path), "r") do f
+function validate(path::AbstractString;
+                  max_elements::Integer = DEFAULT_MAX_ELEMENTS)
+    if !isfile(String(path))
+        return ValidationReport(["E01"], String[],
+            [Finding("E01", String(path), "there is no file here")])
+    end
+    f = try
+        HDF5.h5open(String(path), "r")
+    catch e
+        return ValidationReport(["E01"], String[],
+            [Finding("E01", String(path),
+                     "not a file this reader can open as HDF5: " *
+                     first(sprint(showerror, e), 200))])
+    end
+    try
         v = Validator(f, ScaleIndex(collect_scales(f)), Finding[], 0,
                       String[], Int[], true, Dict{String,Vector{String}}(),
                       Dict{String,String}(), Dict{String,Any}(),
-                      Dict{String,String}(), nothing, false)
+                      Dict{String,String}(), nothing, false,
+                      Int(max_elements))
         run_validator!(v)
         errs = sort(unique([x.rule for x in v.findings if x.rule[1] == 'E']))
         warns = sort(unique([x.rule for x in v.findings if x.rule[1] == 'W']))
         return ValidationReport(errs, warns, v.findings)
+    finally
+        close(f)
     end
 end
 
 function run_validator!(v::Validator)
-    check_root!(v)
-    check_names!(v)
-    collect_categories!(v)
-    collect_keys!(v)
-    check_keys!(v)
-    check_scalars!(v)
-    check_row_support!(v)
-    check_supports!(v)
-    check_callables!(v)
-    check_every_dataset!(v)
-    check_unknown!(v)
-    check_private!(v)
+    for pass in (check_root!, check_names!, collect_categories!,
+                 collect_keys!, check_keys!, check_scalars!,
+                 check_row_support!, check_supports!, check_callables!,
+                 check_every_dataset!, check_unknown!, check_private!)
+        guard!(v, "/") do
+            pass(v)
+        end
+    end
     return v
 end
 
@@ -159,15 +224,19 @@ function check_root!(v::Validator)
                   a["generalisation_group"].value isa AbstractString ?
                   a["generalisation_group"].value : nothing
 
-    v.nrows = haskey(f, "row") && f["row"] isa HDF5.Dataset ?
-              disk_shape(f["row"])[1][1] : 0
-    if haskey(f, "row") && f["row"] isa HDF5.Dataset
-        _, cmax = disk_shape(f["row"])
-        cmax[1] == -1 || report!(v, "E27", "/row",
-            "`row` is not an unlimited dimension")
+    rowscale = hard_child(f, "row")
+    if rowscale isa HDF5.Dataset
+        guard!(v, "/row") do
+            cdims, cmax = disk_shape(rowscale)
+            v.nrows = isempty(cdims) ? 0 : cdims[1]
+            isempty(cmax) || cmax[1] == -1 || report!(v, "E27", "/row",
+                "`row` is not an unlimited dimension")
+        end
     end
-    if haskey(f, "supports") && f["supports"] isa HDF5.Group
-        v.supports = sort(collect(keys(f["supports"])), by = codeunits)
+    sup = vroot(v, "supports")
+    if sup !== nothing
+        v.supports = String[n for n in vchildren!(v, sup, "/supports")
+                            if hard_child(sup, n) isa HDF5.Group]
     end
     length(v.supports) > 1 && report!(v, "W05", "/supports",
         "$(length(v.supports)) supports; index-aligned operations are " *
@@ -188,6 +257,22 @@ function check_attr_types!(v::Validator, path::String,
     for (name, at) in a
         expected = attr_kind(name)
         expected === nothing && continue
+        if !at.scalar
+            report!(v, "E19", path,
+                    "`$(name)` has a dataspace of $(at.npoints) elements; " *
+                    "section 18 gives every attribute a scalar one")
+            continue
+        end
+        if !at.readable
+            # A variable-length attribute is not read on purpose: E19
+            # says everything there is to say about it.
+            at.ti.vlen ?
+                report!(v, "E19", path,
+                        "`$(name)` is a variable-length string") :
+                report!(v, "E41", "$(path)@$(name)",
+                        "this attribute could not be read")
+            continue
+        end
         if at.ti.class === :string
             if expected !== :string
                 report!(v, "E19", path, "`$(name)` is a string")
@@ -245,31 +330,40 @@ end
 # ------------------------------------------------------------ names
 
 function check_names!(v::Validator)
-    walk_objects(v.f) do path, obj
+    deep = walk_objects(v.f) do path, obj
         for n in split(lstrip(path, '/'), '/')
             isempty(n) && continue
             legal_name(n) || report!(v, "E33", path,
                 "`$(n)` is not a legal netCDF-4 name")
         end
-        for n in keys(HDF5.attributes(obj))
+        for n in attr_names(obj)
             n in MACHINERY_ATTRS && continue
             legal_name(n) || report!(v, "E33", path,
                 "attribute `$(n)` is not a legal netCDF-4 name")
         end
     end
-    for (group, _) in (("keys", 0), ("scalars", 0), ("categories", 0),
-                       ("supports", 0), ("callables", 0))
-        haskey(v.f, group) && v.f[group] isa HDF5.Group || continue
-        for n in keys(v.f[group])
+    for p in sort(collect(deep))
+        report!(v, "E41", isempty(p) ? "/" : p,
+                "groups nested deeper than $(MAX_DEPTH); this validator " *
+                "stops there rather than following a file's own depth")
+    end
+    for group in ("keys", "scalars", "categories", "supports", "callables")
+        g = vroot(v, group)
+        g === nothing && continue
+        for n in vchildren!(v, g, "/$(group)")
             reserved(n) && report!(v, "E33", "/$(group)/$(n)",
                 "a producer-chosen name may not begin with `mestra_`")
         end
     end
+    supports = vroot(v, "supports")
+    supports === nothing && return v
     for s in v.supports
-        g = v.f["supports"][s]
+        g = hard_child(supports, s)
+        g isa HDF5.Group || continue
         for sub in ("node_arrays", "cell_arrays")
-            haskey(g, sub) && g[sub] isa HDF5.Group || continue
-            for n in keys(g[sub])
+            sg = hard_child(g, sub)
+            sg isa HDF5.Group || continue
+            for n in vchildren!(v, sg, "/supports/$(s)/$(sub)")
                 reserved(n) && report!(v, "E33",
                     "/supports/$(s)/$(sub)/$(n)",
                     "a producer-chosen name may not begin with `mestra_`")
@@ -279,27 +373,55 @@ function check_names!(v::Validator)
     return v
 end
 
-function walk_objects(fn, g, path = "")
-    for name in keys(g)
-        obj = g[name]
-        p = path * "/" * name
-        fn(p, obj)
-        obj isa HDF5.Group && walk_objects(fn, obj, p)
+"""Visit every object reachable by hard links, on an explicit stack
+and no deeper than MAX_DEPTH.  The call stack is not used, because the
+file chooses how deep it goes."""
+function walk_objects(fn, root, path = "")
+    stack = Tuple{Any,String,Int}[(root, String(path), 0)]
+    visited = 0
+    deep = Set{String}()
+    while !isempty(stack)
+        g, base, depth = pop!(stack)
+        if depth >= MAX_DEPTH
+            base in deep && continue
+            push!(deep, base)
+            continue
+        end
+        for (name, kind) in child_links(g)
+            kind === :hard || continue
+            visited += 1
+            visited > MAX_OBJECTS && return deep
+            obj = hard_child(g, name)
+            obj === nothing && continue
+            p = base * "/" * name
+            try
+                fn(p, obj)
+            catch
+            end
+            obj isa HDF5.Group && push!(stack, (obj, p, depth + 1))
+        end
     end
+    return deep
 end
 
 # ------------------------------------------------------- categories
 
 function collect_categories!(v::Validator)
-    haskey(v.f, "categories") && v.f["categories"] isa HDF5.Group || return v
-    for name in keys(v.f["categories"])
-        d = v.f["categories"][name]
-        d isa HDF5.Dataset || continue
-        ti, recs = read_string_records(d)
+    g = vroot(v, "categories")
+    g === nothing && return v
+    for name in vchildren!(v, g, "/categories")
+        d = vopen!(v, g, name, "/categories/$(name)")
+        if !(d isa HDF5.Dataset)
+            d === nothing || report!(v, "E30", "/categories/$(name)",
+                "a category table is a dataset")
+            continue
+        end
+        guard!(v, "/categories/$(name)") do
+        ti, recs = read_string_records(d; max_elements = v.max_elements)
         if ti.class !== :string || ti.vlen
             report!(v, "E20", "/categories/$(name)",
                     "a category table must be a fixed-length UTF-8 string")
-            continue
+            return
         end
         for r in recs
             check_string_bytes(r) || report!(v, "E26", "/categories/$(name)",
@@ -311,6 +433,7 @@ function collect_categories!(v::Validator)
         longest = maximum(vcat([ncodeunits(e) for e in entries], [1]))
         ti.size > longest && report!(v, "W13", "/categories/$(name)",
             "stored in $(ti.size) bytes where $(longest) would do")
+        end
     end
     return v
 end
@@ -318,18 +441,20 @@ end
 # ------------------------------------------------------------- keys
 
 function collect_keys!(v::Validator)
-    haskey(v.f, "keys") && v.f["keys"] isa HDF5.Group || return v
-    for name in keys(v.f["keys"])
-        d = v.f["keys"][name]
+    g = vroot(v, "keys")
+    g === nothing && return v
+    for name in vchildren!(v, g, "/keys")
+        d = hard_child(g, name)
         d isa HDF5.Dataset || continue
-        a = own_attrs(d)
-        haskey(a, "role") && a["role"].value isa AbstractString &&
-            (v.keyroles[name] = a["role"].value)
-        haskey(a, "category") && a["category"].value isa AbstractString &&
-            (v.keycat[name] = a["category"].value)
-        ti = type_info(HDF5.datatype(d))
-        v.keyvals[name] = ti.class === :string ? read_strings(d) :
-                          vec(HDF5.read(d))
+        guard!(v, "/keys/$(name)") do
+            a = own_attrs(d)
+            haskey(a, "role") && a["role"].value isa AbstractString &&
+                (v.keyroles[name] = a["role"].value)
+            haskey(a, "category") && a["category"].value isa AbstractString &&
+                (v.keycat[name] = a["category"].value)
+            v.keyvals[name] = vec(safe_read(d;
+                                            max_elements = v.max_elements))
+        end
     end
     return v
 end
@@ -338,20 +463,23 @@ roles_of(v::Validator, role) =
     sort([k for (k, r) in v.keyroles if r == role], by = codeunits)
 
 function check_keys!(v::Validator)
-    haskey(v.f, "keys") && v.f["keys"] isa HDF5.Group || return v
+    kg = vroot(v, "keys")
+    kg === nothing && return v
     for role in ("time", "split", "id", "status")
         n = length(roles_of(v, role))
         n > 1 && report!(v, "E03", "/keys",
             "$(n) keys with the role $(role), where the role allows " *
             "at most one")
     end
-    for name in sort(collect(keys(v.f["keys"])), by = codeunits)
-        d = v.f["keys"][name]
+    for name in vchildren!(v, kg, "/keys")
+        d = vopen!(v, kg, name, "/keys/$(name)")
         path = "/keys/$(name)"
+        d === nothing && continue
         if !(d isa HDF5.Dataset)
             report!(v, "E30", path, "a key must be a dataset")
             continue
         end
+        guard!(v, path) do
         a = own_attrs(d)
         check_attr_types!(v, path, a)
         for n in keys(a)
@@ -362,11 +490,11 @@ function check_keys!(v::Validator)
         if role === nothing
             report!(v, "E02", path, "no `role` attribute")
             v.missing_public = true
-            continue
+            return
         end
         if !(Symbol(role) in KEY_ROLES)
             report!(v, "E02", path, "`$(role)` is not a role of section 3")
-            continue
+            return
         end
         ti = type_info(HDF5.datatype(d))
         check_key_dtype!(v, path, role, ti)
@@ -396,6 +524,7 @@ function check_keys!(v::Validator)
         end
         check_key_categories!(v, path, name, role, a)
         check_key_bounds!(v, path, name, a)
+        end
     end
     if !isempty(roles_of(v, "group")) && v.gen_group === nothing
         report!(v, "E39", "/",
@@ -486,8 +615,11 @@ end
 
 function check_time!(v::Validator)
     times = roles_of(v, "time")
+    kg = vroot(v, "keys")
+    kg === nothing && return v
     for t in times
-        d = v.f["keys"][t]
+        d = hard_child(kg, t)
+        d === nothing && continue
         a = own_attrs(d)
         tg = haskey(a, "trajectory_group") &&
              a["trajectory_group"].value isa AbstractString ?
@@ -553,10 +685,13 @@ end
 # ---------------------------------------------------------- scalars
 
 function check_scalars!(v::Validator)
-    haskey(v.f, "scalars") && v.f["scalars"] isa HDF5.Group || return v
-    for name in sort(collect(keys(v.f["scalars"])), by = codeunits)
-        obj = v.f["scalars"][name]
+    g = vroot(v, "scalars")
+    g === nothing && return v
+    for name in vchildren!(v, g, "/scalars")
+        obj = vopen!(v, g, name, "/scalars/$(name)")
+        obj === nothing && continue
         path = "/scalars/$(name)"
+        guard!(v, path) do
         a = own_attrs(obj)
         check_attr_types!(v, path, a)
         for n in keys(a)
@@ -580,12 +715,15 @@ function check_scalars!(v::Validator)
                 report!(v, "E16", path,
                     "$(cdims[1]) elements in a file of $(v.nrows) rows")
             if ti.class === :float && ti.size == 8
-                x = vec(HDF5.read(obj))
-                any(y -> !isfinite(y), x) && report!(v, "W03", path,
-                    "a non-finite value")
+                guard!(v, path) do
+                    x = vec(safe_read(obj; max_elements = v.max_elements))
+                    any(y -> !isfinite(y), x) && report!(v, "W03", path,
+                        "a non-finite value")
+                end
             end
         end
         check_statistic!(v, path, a)
+        end
     end
     return v
 end
@@ -637,8 +775,8 @@ end
 # ------------------------------------------------------ row_support
 
 function check_row_support!(v::Validator)
-    present = haskey(v.f, "row_support") &&
-              v.f["row_support"] isa HDF5.Dataset
+    rsobj = hard_child(v.f, "row_support")
+    present = rsobj isa HDF5.Dataset
     if v.aligned && present
         report!(v, "E28", "/row_support",
                 "present in a file with `aligned = true`")
@@ -647,11 +785,14 @@ function check_row_support!(v::Validator)
                 "absent in a file with `aligned = false`")
     end
     present || return v
-    d = v.f["row_support"]
-    ti = type_info(HDF5.datatype(d))
-    (ti.class === :int && ti.signed && ti.size == 4) ||
-        report!(v, "E20", "/row_support", "/row_support must be int32")
-    v.row_support = Int.(vec(HDF5.read(d)))
+    d = rsobj
+    guard!(v, "/row_support") do
+        ti = type_info(HDF5.datatype(d))
+        (ti.class === :int && ti.signed && ti.size == 4) ||
+            report!(v, "E20", "/row_support", "/row_support must be int32")
+        v.row_support = Int.(vec(safe_read(d;
+                                           max_elements = v.max_elements)))
+    end
     n = length(v.supports)
     for x in v.row_support
         (0 <= x < n) || report!(v, "E06", "/row_support",
@@ -673,10 +814,19 @@ end
 # --------------------------------------------------------- supports
 
 function check_supports!(v::Validator)
-    haskey(v.f, "supports") && v.f["supports"] isa HDF5.Group || return v
+    sg = vroot(v, "supports")
+    sg === nothing && return v
+    for name in vchildren!(v, sg, "/supports")
+        obj = hard_child(sg, name)
+        obj isa HDF5.Group || (obj === nothing ||
+            report!(v, "E30", "/supports/$(name)",
+                    "a support is a group, not a dataset"))
+    end
     for (i, name) in pairs(v.supports)
-        g = v.f["supports"][name]
+        g = hard_child(sg, name)
+        g isa HDF5.Group || continue
         path = "/supports/$(name)"
+        guard!(v, path) do
         a = own_attrs(g)
         check_attr_types!(v, path, a)
         for n in keys(a)
@@ -709,8 +859,9 @@ function check_supports!(v::Validator)
                 "`support_id` does not match the stored arrays")
         end
         check_support_arrays!(v, path, g, name, i, kind, n_nodes, n_cells)
-        for n in keys(g)
-            obj = g[n]
+        for n in vchildren!(v, g, path)
+            obj = hard_child(g, n)
+            obj === nothing && continue
             if obj isa HDF5.Group
                 n in ("node_arrays", "cell_arrays") || report!(v, "W11",
                     "$(path)/$(n)", "a group this reader does not know")
@@ -719,13 +870,14 @@ function check_supports!(v::Validator)
                     "a dataset this reader does not know")
             end
         end
+        end
     end
     return v
 end
 
 function check_cells!(v::Validator, path, g, kind, n_nodes, n_cells)
-    has = [haskey(g, n) for n in ("cell_types", "cell_offsets",
-                                  "cell_connectivity")]
+    has = [hard_child(g, n) isa HDF5.Dataset
+           for n in ("cell_types", "cell_offsets", "cell_connectivity")]
     if kind == "mesh"
         all(has) || report!(v, "E38", path,
             "a mesh support needs cell_types, cell_offsets and " *
@@ -735,9 +887,16 @@ function check_cells!(v::Validator, path, g, kind, n_nodes, n_cells)
             "an `$(kind)` support carries a cell dataset")
     end
     all(has) || return (UInt8[], Int64[], Int64[])
-    types = UInt8.(vec(HDF5.read(g["cell_types"])))
-    offsets = Int64.(vec(HDF5.read(g["cell_offsets"])))
-    conn = Int64.(vec(HDF5.read(g["cell_connectivity"])))
+    read3 = guard!(v, path) do
+        (UInt8.(vec(safe_read(g["cell_types"];
+                              max_elements = v.max_elements))),
+         Int64.(vec(safe_read(g["cell_offsets"];
+                              max_elements = v.max_elements))),
+         Int64.(vec(safe_read(g["cell_connectivity"];
+                              max_elements = v.max_elements))))
+    end
+    read3 === nothing && return (UInt8[], Int64[], Int64[])
+    types, offsets, conn = read3
     ti = type_info(HDF5.datatype(g["cell_types"]))
     (ti.class === :int && !ti.signed && ti.size == 1) ||
         report!(v, "E20", "$(path)/cell_types", "cell_types must be uint8")
@@ -790,15 +949,16 @@ function check_cells!(v::Validator, path, g, kind, n_nodes, n_cells)
 end
 
 function check_coordinates!(v::Validator, path, g, kind, n_nodes)
+    have = hard_child(g, "coordinates")
     if kind in ("mesh", "axis")
-        haskey(g, "coordinates") || (report!(v, "E03", path,
+        have === nothing && (report!(v, "E03", path,
             "a $(kind) support requires a coordinates array"); return nothing)
     else
-        haskey(g, "coordinates") && report!(v, "E03", path,
+        have === nothing || report!(v, "E03", path,
             "a support of kind none has no coordinates")
         return nothing
     end
-    d = g["coordinates"]
+    d = have
     a = own_attrs(d)
     if kind == "axis"
         vr = haskey(a, "varies") && a["varies"].value isa AbstractString ?
@@ -809,23 +969,29 @@ function check_coordinates!(v::Validator, path, g, kind, n_nodes)
     d isa HDF5.Dataset || return nothing
     # Section 24 hashes the stored bytes as they are, so that a file
     # whose axis coordinates wrongly vary breaks E35 and nothing else.
-    return vec(HDF5.read(d))
+    return guard!(v, "$(path)/coordinates") do
+        vec(safe_read(d; max_elements = v.max_elements))
+    end
 end
 
 function check_support_arrays!(v::Validator, path, g, sname, sindex, kind,
                                n_nodes, n_cells)
     slots = Tuple{String,Symbol,Any}[]
-    haskey(g, "coordinates") &&
-        push!(slots, ("$(path)/coordinates", :node, g["coordinates"]))
+    c = hard_child(g, "coordinates")
+    c === nothing || push!(slots, ("$(path)/coordinates", :node, c))
     for (sub, loc) in (("node_arrays", :node), ("cell_arrays", :cell))
-        haskey(g, sub) && g[sub] isa HDF5.Group || continue
-        for n in sort(collect(keys(g[sub])), by = codeunits)
-            push!(slots, ("$(path)/$(sub)/$(n)", loc, g[sub][n]))
+        sg = hard_child(g, sub)
+        sg isa HDF5.Group || continue
+        for n in vchildren!(v, sg, "$(path)/$(sub)")
+            obj = vopen!(v, sg, n, "$(path)/$(sub)/$(n)")
+            obj === nothing && continue
+            push!(slots, ("$(path)/$(sub)/$(n)", loc, obj))
         end
     end
     nweight = Dict(:node => 0, :cell => 0)
     nnormal = Dict(:node => 0, :cell => 0)
     for (spath, loc, obj) in slots
+        guard!(v, spath) do
         a = own_attrs(obj)
         check_attr_types!(v, spath, a)
         for n in keys(a)
@@ -872,9 +1038,10 @@ function check_support_arrays!(v::Validator, path, g, sname, sindex, kind,
                     "not marked as recomputed from the connectivity")
         end
         check_label_categories!(v, spath, obj, a, role)
-        obj isa HDF5.Dataset || continue
+        obj isa HDF5.Dataset || return
         check_array_shape!(v, spath, obj, a, role, loc, sname, sindex,
                            n_nodes, n_cells)
+        end
     end
     for loc in (:node, :cell)
         nweight[loc] > 1 && report!(v, "E03", path,
@@ -898,7 +1065,11 @@ function check_label_categories!(v::Validator, spath, obj, a, role)
     end
     obj isa HDF5.Dataset || return v
     n = length(v.categories[table])
-    for x in vec(HDF5.read(obj))
+    vals = guard!(v, spath) do
+        vec(safe_read(obj; max_elements = v.max_elements))
+    end
+    vals === nothing && return v
+    for x in vals
         x isa Integer || continue
         (0 <= x < n) || report!(v, "E10", spath,
             "label value $(x) is outside a table of $(n) entries")
@@ -965,8 +1136,11 @@ function check_array_shape!(v::Validator, spath, d, a, role, loc, sname,
         end
     end
     if role == "field" && ti.class === :float && ti.size == 8
-        any(x -> !isfinite(x), HDF5.read(d)) &&
-            report!(v, "W03", spath, "a non-finite value")
+        guard!(v, spath) do
+            any(x -> !isfinite(x),
+                safe_read(d; max_elements = v.max_elements)) &&
+                report!(v, "W03", spath, "a non-finite value")
+        end
     end
     return v
 end
@@ -974,28 +1148,46 @@ end
 # -------------------------------------------------------- callables
 
 function check_callables!(v::Validator)
-    haskey(v.f, "callables") && v.f["callables"] isa HDF5.Group || return v
-    for id in sort(collect(keys(v.f["callables"])), by = codeunits)
-        g = v.f["callables"][id]
+    cg = vroot(v, "callables")
+    cg === nothing && return v
+    for id in vchildren!(v, cg, "/callables")
+        g = vopen!(v, cg, id, "/callables/$(id)")
+        g === nothing && continue
         path = "/callables/$(id)"
         g isa HDF5.Group || (report!(v, "E15", path,
             "a callable must be a group"); continue)
-        a = own_attrs(g)
-        check_attr_types!(v, path, a)
-        haskey(a, "type") || (report!(v, "E15", path,
-            "no `type` attribute"); v.missing_public = true)
-        check_dict!(v, path, g, true)
+        guard!(v, path) do
+            a = own_attrs(g)
+            check_attr_types!(v, path, a)
+            haskey(a, "type") || (report!(v, "E15", path,
+                "no `type` attribute"); v.missing_public = true)
+            check_dict!(v, path, g, true, 0)
+        end
     end
     return v
 end
 
 """E32: what a callable's dictionary may hold (section 25)."""
-function check_dict!(v::Validator, path, g, toplevel::Bool)
-    for name in keys(HDF5.attributes(g))
+function check_dict!(v::Validator, path, g, toplevel::Bool, depth::Int)
+    if depth >= MAX_DEPTH
+        report!(v, "E41", path,
+                "a dictionary nested deeper than $(MAX_DEPTH); this " *
+                "validator stops there")
+        return v
+    end
+    for name in attr_names(g)
         name in MACHINERY_ATTRS && continue
         reserved(name) && continue
         toplevel && name in ("type", "repr") && continue
         at = read_raw_attr(g, name)
+        if !at.readable
+            at.ti.vlen ?
+                report!(v, "E19", "$(path)@$(name)",
+                        "a variable-length string attribute") :
+                report!(v, "E41", "$(path)@$(name)",
+                        "this attribute could not be read")
+            continue
+        end
         if at.ti.class === :string
             at.ti.vlen && report!(v, "E19", path,
                 "attribute `$(name)` is a variable-length string")
@@ -1010,28 +1202,31 @@ function check_dict!(v::Validator, path, g, toplevel::Bool)
                 "attribute `$(name)` is not float64")
         end
     end
-    for name in keys(g)
+    for name in vchildren!(v, g, path)
         reserved(name) && continue
-        obj = g[name]
+        obj = hard_child(g, name)
+        obj === nothing && continue
         p = "$(path)/$(name)"
         if obj isa HDF5.Group
             toplevel && name in ("type", "repr") && report!(v, "E32", p,
                 "a dictionary may not have a top-level `$(name)`")
-            check_dict!(v, p, obj, false)
+            check_dict!(v, p, obj, false, depth + 1)
             continue
         end
         is_scale(obj) && continue
+        guard!(v, p) do
         cdims, _ = disk_shape(obj)
         if isempty(cdims)
             report!(v, "E32", p,
                     "a zero-dimensional dataset; section 25 says to write " *
                     "it as an attribute")
-            continue
+            return
         end
         ti = type_info(HDF5.datatype(obj))
         if ti.class === :string
             ti.vlen && report!(v, "E32", p, "a variable-length string")
-            _, recs = read_string_records(obj)
+            _, recs = read_string_records(obj;
+                                          max_elements = v.max_elements)
             for r in recs
                 check_string_bytes(r) || report!(v, "E32", p,
                     "a string that is not UTF-8 or holds a NUL byte")
@@ -1044,6 +1239,7 @@ function check_dict!(v::Validator, path, g, toplevel::Bool)
             T in (Int8, Int32, Int64, Float64) || report!(v, "E32", p,
                 "a dtype the codec does not allow: $(T)")
         end
+        end
     end
     return v
 end
@@ -1054,6 +1250,7 @@ function check_every_dataset!(v::Validator)
     walk_objects(v.f) do path, obj
         obj isa HDF5.Dataset || return
         is_scale(obj) && return
+        guard!(v, path) do
         cdims, _ = disk_shape(obj)
         layout, chunk, filters = dataset_layout(obj)
         for (fid, cd) in filters
@@ -1069,7 +1266,11 @@ function check_every_dataset!(v::Validator)
         names = axis_scale_names(obj, v.idx)
         for (axis, n) in pairs(names)
             k = num_scales(obj, axis - 1)
-            if k == 0
+            if k < 0
+                report!(v, "E41", path,
+                        "axis $(axis - 1): the library would not say how " *
+                        "many dimension scales are attached")
+            elseif k == 0
                 report!(v, "E25", path,
                         "axis $(axis - 1) carries no dimension scale")
             elseif k > 1
@@ -1096,7 +1297,8 @@ function check_every_dataset!(v::Validator)
         ti = type_info(HDF5.datatype(obj))
         if ti.class === :string && !ti.vlen &&
            !startswith(path, "/categories/") && !startswith(path, "/callables/")
-            _, recs = read_string_records(obj)
+            _, recs = read_string_records(obj;
+                                          max_elements = v.max_elements)
             for r in recs
                 check_string_bytes(r) || report!(v, "E26", path,
                     "a string that is not UTF-8 or holds a NUL byte " *
@@ -1110,6 +1312,7 @@ function check_every_dataset!(v::Validator)
             "float32 is not allowed anywhere")
         ti.vlen && report!(v, "E19", path,
             "a variable-length type is never legal")
+        end
     end
     return v
 end
@@ -1130,8 +1333,14 @@ function default_chunk_for(v::Validator, d::HDF5.Dataset, cdims::Vector{Int})
     sc = attached_scale_name(d, 0, v.idx.all)
     sc === nothing && return nothing
     for (name, s) in v.idx.all
-        if HDF5.API.h5ds_is_attached(d, s, 0)
-            nrows = disk_shape(s)[1][1]
+        attached = try
+            HDF5.API.h5ds_is_attached(d, s, 0)
+        catch
+            false
+        end
+        if attached
+            sdims, _ = disk_shape(s)
+            nrows = isempty(sdims) ? 0 : sdims[1]
             break
         end
     end
@@ -1147,8 +1356,9 @@ function check_unknown!(v::Validator)
         name in ROOT_ATTRS || report!(v, "W11", "/",
             "root attribute `$(name)` is not one this reader knows")
     end
-    for name in keys(v.f)
-        obj = v.f[name]
+    for name in vchildren!(v, v.f, "")
+        obj = hard_child(v.f, name)
+        obj === nothing && continue
         if obj isa HDF5.Group
             name in ROOT_GROUPS || report!(v, "W11", "/$(name)",
                 "a root group this reader does not know")
@@ -1164,7 +1374,7 @@ end
 forbids a validator to interpret /private, so this is decided from the
 public objects it can see are missing and from nothing else."""
 function check_private!(v::Validator)
-    haskey(v.f, "private") || return v
+    hard_child(v.f, "private") === nothing && return v
     v.missing_public || return v
     report!(v, "E18", "/private",
             "a required public attribute is missing while the file " *

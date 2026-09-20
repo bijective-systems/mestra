@@ -44,6 +44,22 @@ bytes as they are even when those coordinates wrongly vary, so that
 such a file breaks E35 and nothing else.
 """
 function support_id(s::Support)
+    # A support whose arrays the reader refused or could not read has
+    # no digest: computing one over what is missing would answer a
+    # question the file did not.
+    if s.kind == "mesh" && s.n_cells > 0 &&
+       (s.cell_types === nothing || s.cell_offsets === nothing ||
+        s.cell_connectivity === nothing)
+        throw(MestraError("E41",
+            "support $(s.name) declares $(s.n_cells) cells whose arrays " *
+            "this reader could not read, so it has no support_id"))
+    end
+    if s.kind == "axis" &&
+       (s.coordinates === nothing || s.coordinates.data === nothing)
+        throw(MestraError("E41",
+            "support $(s.name) is an axis whose coordinates this reader " *
+            "could not read, so it has no support_id"))
+    end
     coords = nothing
     if s.kind == "axis" && s.coordinates !== nothing &&
        s.coordinates.data !== nothing

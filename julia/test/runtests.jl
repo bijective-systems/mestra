@@ -665,6 +665,130 @@ end
     @test_throws Mestra.MestraError Mestra.grouped_split(none)
 end
 
+@testset "hostile files: a reader is handed untrusted input" begin
+    hostile = joinpath(HERE, "hostile")
+    deepdir = joinpath(SCRATCH, "deep")
+    include(joinpath(hostile, "make_deep.jl"))
+    deepfiles = make_deep_files(deepdir)
+    files = vcat(sort([joinpath(hostile, f) for f in readdir(hostile)
+                       if endswith(f, ".mes")]), deepfiles)
+    @test length(files) >= 18
+
+    # A child process, because a test meant to catch a hang cannot
+    # catch it from inside the process that is hanging.
+    logfile = joinpath(SCRATCH, "hostile.log")
+    cmd = `$(Base.julia_cmd()) --startup-file=no
+           --project=$(Base.active_project())
+           $(joinpath(hostile, "run_hostile.jl")) $files`
+    proc = run(pipeline(cmd; stdout = logfile, stderr = devnull);
+               wait = false)
+    finished = timedwait(() -> !process_running(proc), 300.0;
+                         pollint = 0.25)
+    if finished !== :ok
+        kill(proc, Base.SIGKILL)
+        wait(proc)
+    end
+    text = isfile(logfile) ? read(logfile, String) : ""
+    lines = [l for l in split(text, '\n') if !isempty(l)]
+    got = Dict{String,NamedTuple}()
+    for l in lines
+        parts = split(l, '|')
+        length(parts) == 6 || continue
+        got[String(parts[1])] = (status = String(parts[2]),
+                                 seconds = parse(Float64, parts[3]),
+                                 errors = split(parts[4], ',';
+                                                keepempty = false),
+                                 warnings = split(parts[5], ',';
+                                                  keepempty = false),
+                                 note = String(parts[6]))
+    end
+    @test finished === :ok
+
+    # Every file answered, none of them slowly, none of them any way
+    # but a report or a MestraError with a rule a file may be refused
+    # with.
+    for f in files
+        name = splitext(basename(f))[1]
+        @test haskey(got, name)
+        haskey(got, name) || continue
+        @test got[name].status == "ok"
+        got[name].status == "ok" || @info "hostile" name got[name].note
+        @test got[name].seconds < 20.0
+    end
+
+    # what each kind must be answered with
+    for name in ("link_dangling", "link_cycle", "link_external")
+        @test "E40" in got[name].errors
+    end
+    for name in ("huge_declared", "huge_strings", "deep_keys",
+                 "deep_callables", "unreadable_continues")
+        @test "E41" in got[name].errors
+    end
+    @test "E01" in got["not_hdf5"].errors
+    for name in ("attr_array_root", "attr_array_key", "attr_array_slot")
+        @test "E19" in got[name].errors
+    end
+    @test "E29" in got["filter_many_cd"].errors
+    @test "E29" in got["filter_unknown"].errors
+    @test "E25" in got["scale_twice"].errors
+    @test "E30" in got["kind_confusion"].errors
+    @test "E26" in got["bad_utf8"].errors
+
+    # one unreadable object must not hide what comes after it
+    r = Mestra.validate(joinpath(hostile, "unreadable_continues.mes"))
+    @test any(f -> f.path == "/scalars/a_broken" && f.rule == "E41",
+              r.findings)
+    @test "W10" in r.warnings          # y_warns, after the broken one
+    @test "E36" in r.errors            # z_errors, after that
+    @test "E39" in r.errors            # and a key after both
+
+    # a claim of a trillion elements costs nothing to refuse
+    huge = joinpath(hostile, "huge_declared.mes")
+    Mestra.validate(huge)              # warm
+    @test (@allocated Mestra.validate(huge)) < 64_000_000
+    Mestra.read(huge)
+    @test (@allocated Mestra.read(huge)) < 16_000_000
+    ds = Mestra.read(huge)
+    # the whole slot is refused
+    @test_throws Mestra.MestraError Mestra.values(ds, ds.scalars["huge"])
+    e = try
+        Mestra.values(ds, ds.scalars["huge"])
+    catch err
+        err
+    end
+    @test e.rule == "E41"
+    # one row of it is a lazy read and costs one row
+    one = Mestra.rows(ds, ds.scalars["huge"], 1:1)
+    @test size(one) == (1,)
+    @test (@allocated Mestra.rows(ds, ds.scalars["huge"], 1:1)) < 1_000_000
+    # a range that is not is refused before anything is asked for
+    @test_throws Mestra.MestraError Mestra.rows(ds, ds.scalars["huge"],
+                                                1:(1 << 40))
+    # a chunk this reader would not materialise is refused even for
+    # one row, because the library reads whole chunks
+    @test_throws Mestra.MestraError Mestra.rows(ds,
+        ds.scalars["huge_chunk"], 1:1)
+    # an eager read reports rather than throws, so that one refused
+    # slot does not lose the file
+    tight = Mestra.read(huge; lazy = false, max_elements = 10)
+    @test any(f -> f.rule == "E41", tight.findings)
+    @test tight.scalars["huge"].data === nothing
+
+    # a link this reader will not follow is reported, not followed
+    ds2 = Mestra.read(joinpath(hostile, "link_external.mes"))
+    @test any(f -> f.rule == "E40", ds2.findings)
+    @test !haskey(ds2.scalars, "elsewhere")
+    @test !haskey(ds2.scalars, "neighbour")
+
+    # every recursive routine is capped
+    @test !Mestra.parse_units("(" ^ 10_000 * "m" * ")" ^ 10_000)
+    @test !Mestra.parse_units("m" ^ 100_000)
+    @test Mestra.parse_units("((m))")
+    @test Mestra.MAX_DEPTH <= 64
+    @test Mestra.element_count([1 << 40, 1 << 40]) == typemax(Int)
+    @test Mestra.element_count([10, 0, 10]) == 0
+end
+
 @testset "the two files of docs/example.md, checked as it asks" begin
     # docs/example.md, "Checking an implementation against these two"
     one = Mestra.read(joinpath(REPO, "docs", "examples",
