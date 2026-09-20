@@ -412,10 +412,12 @@ Dataset read_impl(const std::string& path, bool with_data) {
           if (!info.is_scale || info.shape.empty()) continue;
           const bool unlimited =
               !info.maxshape.empty() && info.maxshape[0] == H5S_UNLIMITED;
-          const bool default_layout =
-              unlimited ? (info.chunked && info.chunk.size() == 1 &&
-                           info.chunk[0] == 1)
-                        : !info.chunked;
+          const hsize_t want = unlimited
+                                   ? 1
+                                   : (info.shape[0] == 0 ? 1 : info.shape[0]);
+          const bool default_layout = info.chunked &&
+                                      info.chunk.size() == 1 &&
+                                      info.chunk[0] == want;
           if (!default_layout && info.chunked) {
             d.chunk_overrides[p] =
                 std::vector<std::size_t>(info.chunk.begin(),

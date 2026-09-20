@@ -46,8 +46,8 @@ std::string scale_name(const std::string& dataset, std::size_t axis) {
 Dict read_dict_group(const File& f, const std::string& path, bool top_level,
                      int depth) {
   if (depth >= kMaxDictDepth) {
-    throw Error("E32", "\"" + path + "\" is nested deeper than this reader "
-                                      "will walk");
+    throw Error("E41", "\"" + path + "\" is nested deeper than this reader "
+                                      "walks");
   }
   Dict d;
   for (const RawAttr& a : f.attributes(path)) {
@@ -79,9 +79,9 @@ Dict read_dict_group(const File& f, const std::string& path, bool top_level,
     if (m.kind != LinkKind::Hard) {
       // A dictionary is data, and this reader follows a hard link and
       // nothing else.
-      throw Error("E32", "\"" + child + "\" is " +
+      throw Error("E40", "\"" + child + "\" is " +
                              link_kind_name(m.kind) +
-                             " and not an object of the dictionary");
+                             "; a reader never follows one");
     }
     if (m.is_group) {
       d.set(m.name,
@@ -125,8 +125,8 @@ Dict read_dict_group(const File& f, const std::string& path, bool top_level,
 void write_dict_group(File& f, const std::string& path, const Dict& d,
                       const ChunkOverrides* chunks, int depth) {
   if (depth >= kMaxDictDepth) {
-    throw Error("E32", "\"" + path + "\" is nested deeper than this writer "
-                                      "will walk");
+    throw Error("E41", "\"" + path + "\" is nested deeper than this writer "
+                                      "walks");
   }
   auto scale_chunk = [chunks](const std::string& p) {
     std::vector<hsize_t> out;

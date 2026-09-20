@@ -278,8 +278,8 @@ Value Value::strings(const Array& a) {
 
 Value Value::dict(Dict d) {
   if (d.depth() + 1 > kMaxDictDepth) {
-    throw Error("E32",
-                "a dictionary nested deeper than this reader will walk");
+    throw Error("E41",
+                "a dictionary nested deeper than this reader walks");
   }
   Value x;
   x.kind_ = Kind::Dict;
@@ -392,8 +392,8 @@ std::string shape_text(const std::vector<std::size_t>& shape) {
 void dump_value(const std::string& path, const Value& v,
                 std::vector<std::string>& lines, int depth) {
   if (depth > kMaxDictDepth) {
-    throw Error("E32", "a dictionary nested deeper than this reader will "
-                       "walk at \"" + path + "\"");
+    throw Error("E41", "a dictionary nested deeper than this reader walks, "
+                       "at \"" + path + "\"");
   }
   switch (v.kind()) {
     case Value::Kind::Null:

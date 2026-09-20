@@ -844,21 +844,18 @@ std::string File::dataset_link_name(hid_t object) const {
 void File::make_scale(const std::string& path, hsize_t length,
                       bool unlimited, const std::vector<hsize_t>& chunk) {
   make_group(parent_of(path));
-  // Section 21: one-dimensional H5T_IEEE_F32BE, no value ever written,
-  // chunked with chunk length 1 when unlimited and contiguous
-  // otherwise.
+  // Section 21, decision 31: one-dimensional H5T_IEEE_F32BE, no value
+  // ever written, chunked with chunk length 1 when it is unlimited and
+  // with a chunk equal to its length when it is not, which is what
+  // H5DSset_scale leaves behind.
   const hsize_t max = unlimited ? H5S_UNLIMITED : length;
   Id space(H5Screate_simple(1, &length, &max));
   Id dcpl(H5Pcreate(H5P_DATASET_CREATE));
   H5Pset_obj_track_times(dcpl.get(), 0);
-  if (!chunk.empty()) {
-    H5Pset_chunk(dcpl.get(), 1, chunk.data());
-    H5Pset_fill_time(dcpl.get(), H5D_FILL_TIME_ALLOC);
-  } else if (unlimited) {
-    const hsize_t one = 1;
-    H5Pset_chunk(dcpl.get(), 1, &one);
-    H5Pset_fill_time(dcpl.get(), H5D_FILL_TIME_ALLOC);
-  }
+  const hsize_t fallback = unlimited ? 1 : (length == 0 ? 1 : length);
+  const hsize_t* use = chunk.empty() ? &fallback : chunk.data();
+  H5Pset_chunk(dcpl.get(), 1, use);
+  H5Pset_fill_time(dcpl.get(), H5D_FILL_TIME_ALLOC);
   Id dset(H5Dcreate2(id_.get(), path.c_str(), H5T_IEEE_F32BE, space.get(),
                      H5P_DEFAULT, dcpl.get(), H5P_DEFAULT));
   need(dset.valid(), "cannot create the dimension scale \"" + path + "\"");

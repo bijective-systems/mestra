@@ -385,7 +385,9 @@ void hardened_value_types() {
       deep = next;
     }
   } catch (const mestra::Error& e) {
-    refused = e.rule() == "E32";
+    // E41: an object the reader cannot read, which is what a nesting
+    // past the cap is (section 14, decision 48).
+    refused = e.rule() == "E41";
   }
   check::is_true("a dictionary deeper than the limit is refused", refused);
   check::is_true("the depth stops at the limit",

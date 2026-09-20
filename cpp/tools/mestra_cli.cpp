@@ -17,7 +17,7 @@ int usage() {
   std::cout <<
       "mestra-cli COMMAND ARGUMENTS\n"
       "\n"
-      "  read FILE                        read the whole file and say what\n"
+      "  read FILE                        check, then read the whole file and say what\n"
       "                                   came back\n"
       "  validate FILE                    rule ids, one per line;\n"
       "                                   \"! path: why\" for a fault no\n"
@@ -36,7 +36,8 @@ int usage() {
       "A probe index may be `-` when the slot has no such axis, and "
       "any\n"
       "index may also be given as NAME=VALUE, with NAME one of row,\n"
-      "instance, draw, node, cell, component or index.  A float64 slot\n"
+      "instance, draw, node, cell, cell_plus_one, component or index.\n"
+      "A float64 slot\n"
       "prints its value in the C format \"%.17e\" and an integer slot\n"
       "in plain decimal, which is what section 30 asks a probe for.\n";
   return 2;
@@ -49,9 +50,10 @@ struct ProbeIndex {
   bool has_draw = false;
   bool has_node = false;
   bool has_component = false;
+  bool has_cell_plus_one = false;
   bool has_index = false;
   std::size_t row = 0, instance = 0, draw = 0, node = 0, component = 0,
-              index = 0;
+              cell_plus_one = 0, index = 0;
 };
 
 bool parse_index(const std::string& text, std::size_t* out) {
@@ -70,12 +72,13 @@ std::vector<std::size_t> subscripts(const ProbeIndex& p) {
   if (p.has_draw) out.push_back(p.draw);
   if (p.has_node) out.push_back(p.node);
   if (p.has_component) out.push_back(p.component);
+  if (p.has_cell_plus_one) out.push_back(p.cell_plus_one);
   if (p.has_index) out.push_back(p.index);
   return out;
 }
 
-int cmd_validate(const std::string& path) {
-  const mestra::Report r = mestra::validate(path);
+// Prints a report as rule identifiers, one per line.
+void print_report(const mestra::Report& r) {
   for (const std::string& id : r.error_ids()) std::cout << "E " << id << "\n";
   for (const std::string& id : r.warning_ids()) {
     std::cout << "W " << id << "\n";
@@ -89,12 +92,31 @@ int cmd_validate(const std::string& path) {
       std::cout << "! " << f.where << ": " << f.message << "\n";
     }
   }
+}
+
+int cmd_validate(const std::string& path) {
+  const mestra::Report r = mestra::validate(path);
+  print_report(r);
   // Exit 1 when the file is rejected, so that a shell can tell.
   return r.ok() ? 0 : 1;
 }
 
+// Section 30, the hostile subset: opening a file for its metadata
+// alone, and any operation that reads a slot, must refuse a file the
+// validator rejects with the same identifiers rather than return
+// something.  So both check before they read.  The library's own
+// `read_header` still reads no dataset; this is the tool's policy and
+// it is what a caller of a command-line tool should want.
+bool refused(const std::string& path) {
+  const mestra::Report r = mestra::validate(path);
+  if (r.ok()) return false;
+  print_report(r);
+  return true;
+}
+
 // Reads everything, which is what `info` deliberately does not do.
 int cmd_read(const std::string& path) {
+  if (refused(path)) return 1;
   const mestra::Dataset d = mestra::read(path);
   std::size_t arrays = 0;
   std::size_t values = 0;
@@ -124,6 +146,7 @@ int cmd_read(const std::string& path) {
 }
 
 int cmd_info(const std::string& path) {
+  if (refused(path)) return 1;
   const mestra::Dataset d = mestra::read_header(path);
   std::cout << "format " << d.format << "\n";
   std::cout << "writer " << d.writer << "\n";
@@ -228,6 +251,9 @@ int cmd_probe(int argc, char** argv) {
       } else if (name == "component") {
         p.has_component = true;
         p.component = value;
+      } else if (name == "cell_plus_one") {
+        p.has_cell_plus_one = true;
+        p.cell_plus_one = value;
       } else if (name == "index") {
         p.has_index = true;
         p.index = value;
