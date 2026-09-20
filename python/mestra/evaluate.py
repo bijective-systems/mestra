@@ -2,9 +2,34 @@
 
 Section 10: evaluating a file on a keys table yields a file with the
 same slots, now holding data. Distillation is that operation on a
-grid, and the table it produces is stored data and therefore public,
-so the result carries no callables: it is a plain data file with the
-same keys, the same supports and the same slot attributes.
+grid.
+
+What the result carries under `/callables`. Section 10 says only
+that the slots now hold data, and the four implementations read that
+sentence three different ways, which is finding 7 of the Phase 3
+report: two leave no `/callables` group, one leaves it present and
+empty, one leaves the whole callable with its dictionary. All three
+conform -- section 13 lets a container group be absent or present
+and empty, and no rule forbids a callable nothing references -- so
+the sentence alone does not settle it and another one has to.
+
+Section 12 is that sentence: "A distilled lookup table is stored
+data and therefore public; the callable that produced it, its
+history, and its validation records are not." The evaluated file is
+the distilled table. The callable is the thing section 12 says is
+not part of it, so this implementation leaves no `/callables` group
+at all: the result is a plain data file with the same keys, the same
+supports and the same slot attributes, and every slot's `source` is
+`data`.
+
+Section 13's rule that "a writer reproducing a file it read keeps
+whichever of the two it found" is about a round trip and not about
+this: evaluation does not reproduce the file it read, it produces a
+different file, and a group that would be empty may be absent.
+
+Nothing here reads `/private` or copies it. An evaluated file is a
+new file and not a round trip of the one the callables came from;
+`read` and `write` are what preserve a producer's own records.
 """
 
 from __future__ import annotations
@@ -40,6 +65,11 @@ def evaluate(dataset: Dataset, table: Any,
 
     The result is a new dataset whose rows are the table's rows and
     whose callable slots hold the values the callables produced.
+    Every slot's `source` is `data`, and the result carries no
+    callables and no `/private`: section 12 says the distilled table
+    is public and that the callable that produced it, its history
+    and its validation records are not. The module docstring has the
+    argument in full.
     """
     columns = keys_table(table, names)
     rows = table_length(columns)

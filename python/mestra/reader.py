@@ -54,6 +54,23 @@ __all__ = ["read", "support_ids", "REFUSED"]
 #: than hand back values it does not trust. Everything else - a role
 #: it does not know, missing units, a cardinality - is the file
 #: describing itself badly, and the values still mean what they say.
+#: It is the set section 2 of docs/api-conventions.md fixes.
+#:
+#: One set decides every entry point, which is finding 13 of the
+#: Phase 3 report: the metadata open, an eager read, `mestra info`
+#: and any operation that reads a slot all go through `_refuse`
+#: below and all name the same rule for the same file. A file this
+#: reader opens is a file it will read, and a file it refuses to
+#: read is one it refuses to open; there is no file that opens and
+#: then fails on the first slot, and none that is refused at the
+#: door and would have read cleanly. `test_entry_points.py` holds
+#: that over every case of the corpus and every hostile file.
+#:
+#: The one difference section 29 allows is the element cap, and it
+#: goes the other way: "a lazy read and a row-range read are not
+#: subject to that last limit ... so the same file may be readable
+#: one way and E41 the other". A slot too large to materialise is
+#: E41 from an eager read of it and readable a row range at a time.
 REFUSED = ("E01", "E16", "E19", "E25", "E26", "E29", "E30", "E40",
            "E41")
 

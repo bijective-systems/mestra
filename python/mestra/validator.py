@@ -1146,8 +1146,29 @@ class _FileValidator:
         keep its own records there in whatever representation it
         chooses and section 29 forbids a reader to interpret them.
         A group this version does not know is left alone too:
-        section 28 says to ignore it and report it, which is the W11
-        the root check already made.
+        section 14 says it "is reported as W11 and otherwise left
+        alone", and section 28 says where one may be, "at the root
+        and inside a support". `_unknown_group` below is those two
+        places; the W11 itself is made by the root check and by the
+        support check.
+
+        A *dataset* this version does not know, inside a group it
+        does know, is checked like any other, and that is finding 12
+        of the Phase 3 report, on which the four implementations
+        split two against two. The text settles it in two steps.
+        Section 14 exempts two things from the byte-level rules of
+        sections 18 to 25 and names them: "`/private` is not
+        checked, and neither is any group this version of the format
+        does not know". A dataset in a support group is neither, so
+        it is one of the "public objects only" the rules are checked
+        on, and an unchunked one with a row dimension is E27.
+        Section 28 is the second step: what a version may add is
+        "new optional attributes" and "new optional groups ... at
+        the root and inside a support", and not datasets, so an
+        unknown dataset is not a forward-compatibility extension at
+        all and there is nothing to make room for. It draws no W11
+        either, because W11 is "an attribute or a group this reader
+        does not know" and this is neither.
         """
         self._object(self.f, "/")
         stack = [(self.f, "", 0)]
@@ -1162,11 +1183,10 @@ class _FileValidator:
             for member in self.members(group, prefix or "/"):
                 name, obj = member.name, member.obj
                 path = "%s/%s" % (prefix, name)
-                if not prefix and name not in _ROOT_GROUPS \
-                        and name != "row_support" \
-                        and isinstance(obj, h5py.Group):
-                    continue
                 if path == "/private":
+                    continue
+                if isinstance(obj, h5py.Group) and _unknown_group(
+                        prefix, name):
                     continue
                 self.visited += 1
                 if self.visited > limits.MAX_OBJECTS:
@@ -1600,6 +1620,27 @@ def _attr(obj: Any, name: str) -> Any:
 def _strings(dset: h5py.Dataset) -> list[str]:
     return [v.rstrip(b"\x00").decode("utf-8", errors="replace")
             if isinstance(v, bytes) else str(v) for v in dset[()]]
+
+
+def _unknown_group(prefix: str, name: str) -> bool:
+    """True for a group this version of the format does not know.
+
+    Section 28 says where one may appear: "new optional groups may
+    be added at the root and inside a support". Those are the two
+    places, so they are the two places this asks about. Section 14
+    then says what to do with one: it "is reported as W11 and
+    otherwise left alone", and the byte-level rules of sections 18
+    to 25 are not checked inside it, exactly as they are not checked
+    inside `/private`. A group anywhere else is not an extension
+    point and is checked; so is every dataset, wherever it sits,
+    because section 28 never adds datasets.
+    """
+    if not prefix:
+        return name not in _ROOT_GROUPS and name != "row_support"
+    parts = prefix.strip("/").split("/")
+    if len(parts) == 2 and parts[0] == "supports":
+        return name not in _SUPPORT_MEMBERS
+    return False
 
 
 def _logical(dset: h5py.Dataset,
