@@ -75,13 +75,15 @@ def scale(group, name, length, unlimited=False):
 
 def chunk_rows(itemsize, rest, n_rows):
     """The default of section 23: about 1 MiB of rows, at least one."""
+    if n_rows == 0:
+        return 1
     b = itemsize
     for extent in rest:
         b *= max(1, extent)
     c = 1048576 // b
     if c < 1:
         c = 1
-    if n_rows >= 1 and c > n_rows:
+    if c > n_rows:
         c = n_rows
     return c
 

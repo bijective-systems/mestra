@@ -901,7 +901,7 @@ lengths differ between supports:
   node           length n_nodes
   cell           length n_cells; absent when n_cells is 0
   cell_plus_one  length n_cells + 1; absent when n_cells is 0
-  index          length of cell_connectivity
+  index          length of cell_connectivity; absent when n_cells is 0
 
 Scales for the datasets inside a callable's dictionary are in the
 group that holds the dataset and are named `mestra_<dataset>_d<i>`,
@@ -1003,11 +1003,16 @@ The default for c: let b be the size in bytes of one row of the
 dataset, that is the dtype size times the product of the non-row
 extents, with a zero-length extent counted as 1. Then
 
-  c = floor(1048576 / b), or 1 when that is 0;
-  c = the row count, when the row count is one or more and c is
-      larger than it.
+  c = 1 when the row count is 0;
+  otherwise c = floor(1048576 / b), or 1 when that is 0, and then
+  c = the row count when c is larger than the row count.
 
-1048576 is 1 MiB. This is a default, not a requirement: a writer may
+1048576 is 1 MiB. A file with no rows takes c = 1 rather than the
+hundred thousand rows a megabyte would hold, because nothing is going
+to be written into it in this file and a chunk that large costs a
+reader a megabyte of cache for an empty dataset.
+
+This is a default, not a requirement: a writer may
 choose another c and a reader must accept it. A dataset whose chunk
 shape is not the default draws a warning (W12), because a corpus file
 is expected to use it.
@@ -1139,8 +1144,11 @@ dimension scale on each axis named `mestra_<dataset>_d<i>` as section
 
 Key order. Dictionary key order is not significant and a reader must
 not depend on it, on HDF5 link order or on attribute order. A writer
-creates links and attributes in ascending order of their UTF-8 bytes,
-so that the same dictionary produces the same file.
+visits a dictionary's keys in ascending order of their UTF-8 bytes,
+rather than in whatever order the language hands them over, so that
+two writers given the same dictionary produce the same file. The
+dimension scales the container adds are created alongside the dataset
+they belong to and are not dictionary keys.
 
 The reserved prefix. A dictionary key must not begin with `mestra_`.
 A reader reconstructing a dictionary skips every member and every
