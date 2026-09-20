@@ -115,3 +115,22 @@ source, and for callable slots the callable id and output.
 An error names the rule id first, then the object path, then what to
 do. A builder error says which argument to change. The models are the
 Python E04 and W01 messages.
+
+
+7. Two decisions from the verification round
+--------------------------------------------
+
+What an evaluated file carries. Evaluating a file turns every callable
+slot into a stored slot, so the result has no callable to keep: the
+`/callables` group is absent from an evaluated file, not present and
+empty. This is the same rule as section 13's container groups, and it
+keeps the four writers' output identical.
+
+What a metadata open may read. Opening a file reads attributes,
+dataspaces, link types, and dimension-scale structure, and may read a
+category table in full, because tables are small by construction and
+the open needs them to name E10, E26, and E41 on the same files the
+read names them on. An open never reads a slot's data and never reads
+a dataset inside a callable's dictionary; those wait for the read.
+The nine structural rules of section 2 are decided from exactly this
+much, so the open and the read name the same rule for the same file.
