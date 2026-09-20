@@ -861,8 +861,9 @@ dimension that has no coordinate variable:
       This is a netCDF dimension but not a netCDF variable.
 
     followed by the dimension's length as a decimal integer right
-    justified in ten columns, which is the C format "%s%10d" and
-    gives a 63-character value;
+    justified in ten columns, which is the C format "%s%10d"; the
+    value is 63 characters for any length of up to ten digits, and
+    longer for a longer one;
   - no values are written into it and a reader must not read any.
 
 Setting CLASS and NAME is what H5DSset_scale does, with NAME given as

@@ -8,6 +8,11 @@ served by one `affine` callable. Both are in docs/examples/ and both
 were written by docs/examples/make_examples.py, which is the rules of
 SPEC.md sections 18 to 25 read literally and nothing else.
 
+Both files have been opened by two netCDF-4 readers that share no
+code, netCDF-C and a pure-Python one, and by xarray through each of
+them; every dimension name below came back intact from both. Nothing
+here is a claim about what should work.
+
 The listings are what `h5dump -n` and `h5dump -A` show, condensed: the
 object list verbatim, then each object with its dtype, shape, chunk
 shape, the dimension scale on each axis, and its attributes with their
