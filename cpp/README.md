@@ -34,14 +34,18 @@ If the Python CMake picks up is not that one, name it:
     cmake --build cpp/build -j
     ctest --test-dir cpp/build --output-on-failure
 
-The suite has four tests. `unit` is pure C++ checks: the SHA-256
+The suite has five tests. `unit` is pure C++ checks: the SHA-256
 vectors and the three worked digests of section 24, the units parser,
 the dictionary codec's value types, the worked affine example of
 section 27, one dataset built from plain vectors and validated, and
 the conventions of `docs/api-conventions.md` one rule at a time.
 `corpus` runs every case of `vectors/cases` through `mestra-cli`.
-`shared_hostile` runs the corpus's own hostile subset and `hostile`
-this implementation's; both are described at the end of this file.
+`private_roundtrip` builds a file whose `/private` holds subgroups,
+datasets, filters, dimension scales and dtypes the public part
+forbids, and requires the round trip to be structurally equal, which
+no corpus case covers. `shared_hostile` runs the corpus's own hostile
+subset and `hostile` this implementation's; both are described at the
+end of this file.
 
 Two of the shared hostile files are generated rather than committed,
 so run
@@ -424,10 +428,27 @@ A reader that does not know a type may still copy its dictionary and
 must not interpret it, which is what `read_dict` and `write_dict` are
 for.
 
-One thing a round trip does not carry. Section 29 forbids a reader to
-interpret `/private`, so nothing of it is read and `write` does not
-reproduce it. `Dataset::has_private` says the file had one; a producer
-that needs to keep its private group copies that group itself.
+What a round trip does with `/private`. Sections 12 and 29 forbid a
+reader to interpret that group; they say nothing against copying it,
+and a producer that round-trips a file keeps its own records. A whole
+read therefore takes an opaque copy of it and `write` puts it back:
+the same objects, dtypes, shapes, chunks, filters, attributes,
+subgroups and dimension scales, including the encodings section 18
+forbids in the public part, because nothing here decides what any of
+it means. The copy is the HDF5 library's own object copy into an
+in-memory file, whose bytes `Dataset::private_group` carries;
+`Dataset::has_private` still says the file had one.
+
+    mestra::Dataset d = mestra::read("from_a_producer.mes");
+    mestra::write(d, "back_again.mes");   // /private and all
+
+Two things follow. `mestra::read_header` reads no array (section 29)
+and so takes no copy, and a dataset it returns writes no `/private`.
+And the group is copied whole, so it is held whole: a `/private`
+nested deeper than 64, holding more than 65,536 objects or more than
+one gibibyte is **E41**, the identifier for an object this reader
+cannot read, rather than a silent truncation or an allocation without
+bound.
 
 
 What this package does not do

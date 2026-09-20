@@ -139,6 +139,31 @@ struct CategoryTable {
   int index_of(const std::string& entry) const;   // -1 when absent
 };
 
+// A group carried from one file to another without being looked
+// into.  Sections 12 and 29 forbid a reader to interpret `/private`;
+// they do not forbid it to copy it, and a producer that round-trips a
+// file through this library keeps its own records.
+//
+// `image` is the bytes of an HDF5 file holding a copy of the group and
+// nothing else, made by the library's own object copy, so every dtype,
+// shape, chunk, filter, attribute and subgroup comes back as it was
+// without this code having decided what any of it means.  The one
+// thing that copy does not carry is a dimension scale attachment,
+// which is a pair of attributes holding object references: those are
+// recorded here by path and remade on the way out.
+struct OpaqueGroup {
+  struct Attachment {
+    std::string dataset;     // absolute path in the source file
+    std::size_t axis = 0;
+    std::string scale;       // absolute path; may be outside the group
+  };
+
+  std::vector<char> image;
+  std::vector<Attachment> attachments;
+
+  bool empty() const { return image.empty(); }
+};
+
 // A callable as the file stores it: a public `type`, an optional
 // one-line `repr`, and the dictionary the codec round-trips.
 struct StoredCallable {
@@ -174,11 +199,13 @@ struct Dataset {
   AttrMap notes;                 // /notes, free-form
   bool has_notes = false;
   // /private exists in the file this came from.  Section 29 forbids a
-  // reader to interpret it, so nothing of it is carried here and
-  // `write` does not reproduce it: a round trip through this library
-  // drops a producer's private group, and a producer that needs to
-  // keep one copies the group itself.
+  // reader to interpret it and this library does not: `private_group`
+  // holds an opaque copy of it, which `write` puts back, so that a
+  // round trip keeps a producer's own records without this code ever
+  // deciding what any of them means.  A whole read fills both; the
+  // header read of section 29 reads no array and fills neither.
   bool has_private = false;
+  OpaqueGroup private_group;
   AttrMap root_extra;            // root attributes this version does
                                  // not know (W11)
   std::vector<std::string> unknown_root_groups;

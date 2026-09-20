@@ -38,6 +38,7 @@ Id open_object(hid_t file, const std::string& path) {
 
 struct ScaleVisit {
   std::vector<std::string>* names;
+  std::vector<std::string>* paths;
   const File* file;
 };
 
@@ -61,6 +62,7 @@ herr_t collect_scale(hid_t /*did*/, unsigned /*dim*/, hid_t dsid,
   // never its NAME attribute (section 21).  It is looked up by object
   // token; see File::dataset_link_name for why not by H5Iget_name.
   visit->names->push_back(visit->file->dataset_link_name(dsid));
+  visit->paths->push_back(visit->file->dataset_path(dsid));
   return 0;
 }
 
@@ -444,9 +446,11 @@ DsetInfo File::dataset_info(const std::string& path) const {
 
   info.is_scale = H5DSis_scale(dset.get()) > 0;
   info.scales.resize(static_cast<std::size_t>(rank > 0 ? rank : 0));
+  info.scale_paths.resize(static_cast<std::size_t>(rank > 0 ? rank : 0));
   if (!info.is_scale) {
     for (int axis = 0; axis < rank; ++axis) {
-      ScaleVisit visit{&info.scales[static_cast<std::size_t>(axis)], this};
+      const std::size_t a = static_cast<std::size_t>(axis);
+      ScaleVisit visit{&info.scales[a], &info.scale_paths[a], this};
       int index = 0;
       H5DSiterate_scales(dset.get(), static_cast<unsigned>(axis), &index,
                          collect_scale, &visit);
@@ -809,7 +813,7 @@ void File::build_object_index() const {
     const std::pair<std::string, int> here = todo.back();
     todo.pop_back();
     if (here.second > kMaxGroupDepth) continue;
-    if (object_names_.size() >= kMaxIndexedObjects) return;
+    if (object_paths_.size() >= kMaxIndexedObjects) return;
     for (const Member& m : members(here.first)) {
       if (m.kind != LinkKind::Hard) continue;
       const std::string child =
@@ -825,20 +829,26 @@ void File::build_object_index() const {
         continue;
       }
       const std::string key = token_key(id_.get(), info.token);
-      if (!key.empty()) object_names_[key] = m.name;
-      if (object_names_.size() >= kMaxIndexedObjects) return;
+      if (!key.empty()) object_paths_[key] = child;
+      if (object_paths_.size() >= kMaxIndexedObjects) return;
     }
   }
 }
 
-std::string File::dataset_link_name(hid_t object) const {
+std::string File::dataset_path(hid_t object) const {
   if (!object_index_built_) build_object_index();
   H5O_info2_t info;
   if (H5Oget_info3(object, &info, H5O_INFO_BASIC) < 0) return std::string();
   const std::string key = token_key(id_.get(), info.token);
   if (key.empty()) return std::string();
-  const auto it = object_names_.find(key);
-  return it == object_names_.end() ? std::string() : it->second;
+  const auto it = object_paths_.find(key);
+  return it == object_paths_.end() ? std::string() : it->second;
+}
+
+std::string File::dataset_link_name(hid_t object) const {
+  const std::string path = dataset_path(object);
+  const std::size_t at = path.find_last_of('/');
+  return at == std::string::npos ? path : path.substr(at + 1);
 }
 
 void File::make_scale(const std::string& path, hsize_t length,
@@ -872,6 +882,152 @@ void File::attach_scale(const std::string& dataset, const std::string& scale,
   need(s.valid(), "cannot open the dimension scale \"" + scale + "\"");
   need(H5DSattach_scale(d.get(), s.get(), axis) >= 0,
        "cannot attach \"" + scale + "\" to \"" + dataset + "\"");
+}
+
+namespace {
+
+// Every object under `root`, by path, from a walk bounded in depth and
+// in count the way every other walk over file-controlled structure
+// here is.  A link that is not a hard link is recorded and not
+// followed, which is also what the library's own copy does with one.
+void walk_opaque(const File& f, const std::string& root,
+                 std::vector<std::string>* groups,
+                 std::vector<std::string>* datasets) {
+  std::vector<std::pair<std::string, int>> todo;
+  todo.emplace_back(root, 0);
+  groups->push_back(root);
+  while (!todo.empty()) {
+    const std::pair<std::string, int> here = todo.back();
+    todo.pop_back();
+    if (here.second >= kMaxGroupDepth) {
+      throw Error("E41", here.first +
+                             ": nested deeper than this reader walks (" +
+                             std::to_string(kMaxGroupDepth) + ")");
+    }
+    for (const Member& m : f.members(here.first)) {
+      if (groups->size() + datasets->size() >= kMaxOpaqueObjects) {
+        throw Error("E41", root + ": more objects than this reader copies (" +
+                               std::to_string(kMaxOpaqueObjects) + ")");
+      }
+      if (m.kind != LinkKind::Hard) continue;
+      const std::string child =
+          (here.first == "/" ? std::string("/") : here.first + "/") + m.name;
+      if (m.is_group) {
+        groups->push_back(child);
+        todo.emplace_back(child, here.second + 1);
+      } else if (m.is_dataset) {
+        datasets->push_back(child);
+      }
+    }
+  }
+}
+
+// The machinery attributes that hold object references.  The library's
+// object copy carries their bytes and not what they point at, so they
+// are dropped from the copy and the attachments they stood for are
+// remade from the record this file keeps beside the image.
+void drop_reference_attributes(hid_t file, const std::string& path) {
+  Id object(H5Oopen(file, path.c_str(), H5P_DEFAULT));
+  if (!object.valid()) return;
+  for (const char* name : {"DIMENSION_LIST", "REFERENCE_LIST"}) {
+    if (H5Aexists(object.get(), name) > 0) H5Adelete(object.get(), name);
+  }
+}
+
+}  // namespace
+
+OpaqueGroup capture_group(const File& f, const std::string& path) {
+  OpaqueGroup out;
+  if (!f.is_group(path)) return out;
+
+  // The walk first, so that the depth, the object count and the size
+  // are known before the library is asked to copy anything.  The copy
+  // itself recurses inside HDF5, where a stack overflow cannot be
+  // caught, which is the trap section 21 names in another place.
+  std::vector<std::string> groups;
+  std::vector<std::string> datasets;
+  walk_opaque(f, path, &groups, &datasets);
+
+  std::size_t bytes = 0;
+  for (const std::string& p : datasets) {
+    const DsetInfo info = f.dataset_info(p);
+    std::size_t elements = 1;
+    for (const hsize_t extent : info.shape) {
+      const std::size_t e = static_cast<std::size_t>(extent);
+      if (e != 0 && elements > kMaxOpaqueBytes / e) {
+        throw Error("E41", p + ": larger than this reader copies");
+      }
+      elements *= e;
+    }
+    const std::size_t size = info.type.size == 0 ? 1 : info.type.size;
+    if (elements > (kMaxOpaqueBytes - bytes) / size) {
+      throw Error("E41", path + ": more than this reader copies (" +
+                             std::to_string(kMaxOpaqueBytes) + " bytes)");
+    }
+    bytes += elements * size;
+    for (std::size_t axis = 0; axis < info.scale_paths.size(); ++axis) {
+      for (const std::string& scale : info.scale_paths[axis]) {
+        if (scale.empty()) continue;
+        OpaqueGroup::Attachment a;
+        a.dataset = p;
+        a.axis = axis;
+        a.scale = scale;
+        out.attachments.push_back(a);
+      }
+    }
+  }
+
+  // An HDF5 file that never reaches the disk, holding the copy and
+  // nothing else.  What goes into it is the library's own object copy,
+  // so no dtype, filter, chunk, attribute or subgroup here is decided
+  // by this code, which is what section 12 asks of a reader that
+  // carries a private group.
+  Id fapl(H5Pcreate(H5P_FILE_ACCESS));
+  need(fapl.valid(), "cannot make a file access property list");
+  need(H5Pset_fapl_core(fapl.get(), 1u << 16, 0) >= 0,
+       "cannot make an in-memory HDF5 file");
+  Id mem(H5Fcreate("mestra-opaque.mem", H5F_ACC_TRUNC, H5P_DEFAULT,
+                   fapl.get()));
+  need(mem.valid(), "cannot make an in-memory HDF5 file");
+  need(H5Ocopy(f.get(), path.c_str(), mem.get(), path.c_str(), H5P_DEFAULT,
+               H5P_DEFAULT) >= 0,
+       "cannot copy \"" + path + "\"");
+  for (const std::string& p : groups) drop_reference_attributes(mem.get(), p);
+  for (const std::string& p : datasets) drop_reference_attributes(mem.get(), p);
+  need(H5Fflush(mem.get(), H5F_SCOPE_GLOBAL) >= 0,
+       "cannot flush the copy of \"" + path + "\"");
+
+  const ssize_t size = H5Fget_file_image(mem.get(), nullptr, 0);
+  need(size > 0, "cannot take the copy of \"" + path + "\"");
+  if (static_cast<std::size_t>(size) > kMaxOpaqueBytes) {
+    throw Error("E41", path + ": more than this reader copies (" +
+                           std::to_string(kMaxOpaqueBytes) + " bytes)");
+  }
+  out.image.resize(static_cast<std::size_t>(size));
+  need(H5Fget_file_image(mem.get(), out.image.data(), out.image.size()) > 0,
+       "cannot take the copy of \"" + path + "\"");
+  return out;
+}
+
+void restore_group(File& f, const std::string& path, const OpaqueGroup& g) {
+  if (g.empty()) return;
+  // The image is this library's own, written by capture_group above.
+  // The library takes its own copy of the buffer, so nothing here
+  // depends on how long the caller keeps the dataset alive.
+  Id mem(H5LTopen_file_image(const_cast<char*>(g.image.data()),
+                             g.image.size(), 0));
+  need(mem.valid(), "cannot open the copy of \"" + path + "\"");
+  need(H5Ocopy(mem.get(), path.c_str(), f.get(), path.c_str(), H5P_DEFAULT,
+               H5P_DEFAULT) >= 0,
+       "cannot put \"" + path + "\" back");
+  // An attachment whose scale did not come with the group -- the
+  // file-level `row` scale, say -- is remade against the one this
+  // writer wrote, and one whose scale is nowhere in the new file is
+  // left undone rather than guessed at.
+  for (const OpaqueGroup::Attachment& a : g.attachments) {
+    if (!f.is_dataset(a.dataset) || !f.is_dataset(a.scale)) continue;
+    f.attach_scale(a.dataset, a.scale, static_cast<unsigned>(a.axis));
+  }
 }
 
 }  // namespace internal

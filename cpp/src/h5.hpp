@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "mestra/dataset.hpp"
 #include "mestra/value.hpp"
 
 namespace mestra {
@@ -62,6 +63,11 @@ const std::size_t kMaxDatasetElements = std::size_t(1) << 31;
 const std::size_t kMaxFilterParameters = 1024;
 // How many objects the dimension-scale index below will hold.
 const std::size_t kMaxIndexedObjects = 1u << 20;
+// An opaque group (section 12's /private) is copied whole, so what it
+// costs is what it holds.  Both are stated here rather than left to
+// whatever the machine allows.
+const std::size_t kMaxOpaqueObjects = 1u << 16;                // 65,536
+const std::size_t kMaxOpaqueBytes = std::size_t(1) << 30;      // 1 GiB
 const std::size_t kMaxDatasetBytes = std::size_t(1) << 33;     // 8 GiB
 // How deep any walk of the file's own group tree goes before it stops
 // and says so.  A stack overflow cannot be caught, so every recursive
@@ -109,6 +115,10 @@ struct DsetInfo {
   bool is_scale = false;                   // CLASS = DIMENSION_SCALE
   // For each axis, the link names of the dimension scales attached.
   std::vector<std::vector<std::string>> scales;
+  // The same attachments by path, which is what an opaque copy needs
+  // to remake them in another file; `scales` is what a dimension name
+  // comes from (section 21).
+  std::vector<std::vector<std::string>> scale_paths;
   bool has_fill_value_set = false;
 };
 
@@ -218,6 +228,10 @@ class File {
   // one walk, bounded in depth and in count, and answers by object
   // token instead.
   std::string dataset_link_name(hid_t object) const;
+  // The same index, answering with the whole path rather than the last
+  // component, which is what remaking an attachment in another file
+  // needs.
+  std::string dataset_path(hid_t object) const;
   void attach_scale(const std::string& dataset, const std::string& scale,
                     unsigned axis);
 
@@ -225,9 +239,21 @@ class File {
   void build_object_index() const;
 
   Id id_;
-  mutable std::map<std::string, std::string> object_names_;
+  // Object token to the object's path, built by one bounded walk.
+  mutable std::map<std::string, std::string> object_paths_;
   mutable bool object_index_built_ = false;
 };
+
+// Copies `path` and everything under it out of `f` without looking
+// into any of it: the result carries an HDF5 file image made by the
+// library's own object copy, and the dimension-scale attachments that
+// copy does not reproduce.  Throws E41 when the group is deeper, has
+// more objects, or holds more bytes than the stated maxima above.
+OpaqueGroup capture_group(const File& f, const std::string& path);
+
+// Puts one back at `path` in a file being written, and remakes every
+// attachment whose dataset and scale both landed in the new file.
+void restore_group(File& f, const std::string& path, const OpaqueGroup& g);
 
 // The 53-character sentence of section 21, followed by the length in
 // ten columns.

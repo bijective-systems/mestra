@@ -209,6 +209,12 @@ Dataset read_impl(const std::string& path, bool with_data) {
     const Attrs notes(f, "/notes");
     d.notes = notes.unknown([](const std::string&) { return false; });
   }
+  // Sections 12 and 29 forbid a reader to interpret /private and not to
+  // copy it, so a whole read takes an opaque copy and `write` puts it
+  // back.  A header read reads no array (section 29) and takes none.
+  if (d.has_private && with_data) {
+    d.private_group = internal::capture_group(f, "/private");
+  }
 
   // --- category tables ---------------------------------------------
   for (const Member& m : f.members("/categories")) {
