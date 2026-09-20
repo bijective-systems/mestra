@@ -663,6 +663,39 @@ end
     @test isempty(Mestra.structural_diff(path, again))
 end
 
+@testset "the hostile subset is refused with the ids it breaks (section 30)" begin
+    # Section 30, of the hostile subset: "Opening the file for its
+    # metadata alone, and any operation that reads a slot, must refuse
+    # with the same ids rather than return something."  So for each of
+    # the fifteen: the validator reports at least the required ids,
+    # and both the metadata open and the read refuse naming them.
+    hostile = joinpath(REPO, "vectors", "hostile")
+    dirs = [d for d in sort(readdir(hostile))
+            if isfile(joinpath(hostile, d, "case.mes"))]
+    @test length(dirs) == 15
+    for d in dirs
+        p = joinpath(hostile, d, "case.mes")
+        want = String.(JSON3.read(read(joinpath(hostile, d,
+                                               "expected.json"),
+                                       String)).required_errors)
+        @test !isempty(want)
+        r = Mestra.validate(p)
+        @test issubset(Set(want), Set(r.errors))
+        for lazy in (true, false)
+            e = refusal(() -> Mestra.read(p; lazy = lazy))
+            @test e !== nothing
+            said = sprint(showerror, e)
+            for id in want
+                @test occursin(id, said)
+            end
+        end
+        # `strict = false` is the documented way past the refusal, for
+        # a file you are inspecting rather than trusting, and it still
+        # opens every one of them
+        @test Mestra.read(p; strict = false) isa Mestra.Dataset
+    end
+end
+
 @testset "gzip and shuffle, the two portable filters (section 23)" begin
     ds = Mestra.Dataset(writer = "mestra.jl test 0",
                         created = "2026-09-19T00:00:00Z")

@@ -87,7 +87,7 @@ function read(path::AbstractString; lazy::Bool = true, strict::Bool = true,
     if strict
         r = validate(String(path); max_elements = max_elements,
                      structural = true)
-        isempty(r.findings) || refuse(first(r.findings), path)
+        isempty(r.findings) || refuse(r.findings, path)
     end
     f = try
         HDF5.h5open(String(path), "r")
@@ -103,13 +103,41 @@ function read(path::AbstractString; lazy::Bool = true, strict::Bool = true,
     end
 end
 
+"""How many structural findings a refusal names one by one before it
+says how many more there are."""
+const REFUSAL_FINDINGS = 8
+
 """How a strict read refuses: the first structural rule it found, the
-object it was about, and what it says."""
-refuse(f::Finding, path) = throw(MestraError(f.rule, f.path,
-    f.message * ". $(basename(String(path))) breaks a rule of section " *
-    "14 that says what a file is made of; `Mestra.report(\"$(path)\")` " *
-    "says what else it breaks, and `Mestra.read(path; strict = false)` " *
-    "opens it anyway"))
+object it was about, what it says, and then every other structural
+rule the file breaks.
+
+Section 30 asks a reader to refuse a hostile file "with the same ids
+rather than return something", and the ids a file must produce are not
+always the one a walk of it reaches first: `wrong_object_kinds` is
+required to name E41 and the first thing wrong with it is a key stored
+as a group (E30).  So the refusal names them all."""
+function refuse(findings::Vector{Finding}, path)
+    head = first(findings)
+    rules = sort(unique([f.rule for f in findings]))
+    base = basename(String(path))
+    said = if length(findings) == 1
+        "$(base) breaks a rule of section 14 that says what a file is " *
+        "made of"
+    else
+        listed = ["$(f.rule) $(f.path)"
+                  for f in findings[2:min(end, REFUSAL_FINDINGS + 1)]]
+        more = length(findings) - 1 - length(listed)
+        "$(base) breaks $(length(rules)) rule(s) of section 14 that say " *
+        "what a file is made of; it also breaks " * join(listed, ", ") *
+        (more > 0 ? ", and $(more) more" : "")
+    end
+    throw(MestraError(head.rule, head.path,
+        head.message * ". " * said *
+        "; `Mestra.report(\"$(path)\")` says what else it breaks, and " *
+        "`Mestra.read(path; strict = false)` opens it anyway"))
+end
+
+refuse(f::Finding, path) = refuse([f], path)
 
 note!(ds::Dataset, rule, path, msg) =
     push!(ds.findings, Finding(rule, String(path), String(msg)))
@@ -168,8 +196,20 @@ function read_dataset(f::HDF5.File, path::String, lazy::Bool,
             try
                 ti, recs = read_string_records(d;
                                                max_elements = max_elements)
-                ds.categories[name] = CategoryTable(
-                    name, [String(strip_nul(r)) for r in recs], ti.size)
+                # Section 25: "A reader that cannot recover the bytes
+                # of a string must say so rather than return something
+                # else."  An entry that is not valid UTF-8 is E26, and
+                # the table is not handed back at all, because a Julia
+                # String built from those bytes is something else.
+                if !all(check_string_bytes, recs)
+                    note!(ds, "E26", "/categories/$(name)",
+                          "an entry is not valid UTF-8 or holds a NUL " *
+                          "byte before its trailing padding; this reader " *
+                          "will not hand back a string it cannot recover")
+                else
+                    ds.categories[name] = CategoryTable(
+                        name, [String(strip_nul(r)) for r in recs], ti.size)
+                end
             catch e
                 note!(ds, rule_of(e), "/categories/$(name)", message_of(e))
             end

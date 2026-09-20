@@ -611,10 +611,21 @@ function read_string_records(d::HDF5.Dataset;
     return ti, recs
 end
 
-read_strings(d::HDF5.Dataset;
-             max_elements::Integer = DEFAULT_MAX_ELEMENTS) =
-    [String(strip_nul(r))
-     for r in read_string_records(d; max_elements = max_elements)[2]]
+"""A fixed-length string dataset as Julia strings.
+
+Section 25: "A reader that cannot recover the bytes of a string must
+say so rather than return something else."  A record that is not valid
+UTF-8, or that holds a NUL byte before its trailing padding, is E26
+here and not a Julia `String` built over the bytes anyway."""
+function read_strings(d::HDF5.Dataset;
+                      max_elements::Integer = DEFAULT_MAX_ELEMENTS)
+    recs = read_string_records(d; max_elements = max_elements)[2]
+    all(check_string_bytes, recs) || throw(MestraError("E26",
+        "a string here is not valid UTF-8 or holds a NUL byte before " *
+        "its trailing padding; this reader will not hand back a string " *
+        "it cannot recover"))
+    return [String(strip_nul(r)) for r in recs]
+end
 
 """
     safe_read(d; max_elements) -> Array
