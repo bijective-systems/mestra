@@ -40,19 +40,25 @@ struct ScaleVisit {
   std::vector<std::string>* names;
 };
 
+// The HDF5 name getters return the full length of the name, not how
+// much of it they wrote, so the length has to be asked for first and
+// the buffer sized to it.  Truncating into a fixed buffer and trusting
+// the return value reads past the end of it.
+std::string object_name(hid_t id) {
+  const ssize_t n = H5Iget_name(id, nullptr, 0);
+  if (n <= 0) return std::string();
+  std::string name(static_cast<std::size_t>(n) + 1, '\0');
+  if (H5Iget_name(id, &name[0], name.size()) < 0) return std::string();
+  name.resize(static_cast<std::size_t>(n));
+  return name;
+}
+
 herr_t collect_scale(hid_t /*did*/, unsigned /*dim*/, hid_t dsid,
                      void* data) {
   ScaleVisit* visit = static_cast<ScaleVisit*>(data);
-  char buffer[1024];
-  const ssize_t n = H5Iget_name(dsid, buffer, sizeof(buffer));
-  if (n > 0) {
-    // The dimension's name is the scale dataset's HDF5 link name and
-    // never its NAME attribute (section 21).
-    visit->names->push_back(basename(std::string(buffer,
-                                                 static_cast<std::size_t>(n))));
-  } else {
-    visit->names->push_back(std::string());
-  }
+  // The dimension's name is the scale dataset's HDF5 link name and
+  // never its NAME attribute (section 21).
+  visit->names->push_back(basename(object_name(dsid)));
   return 0;
 }
 
@@ -88,10 +94,14 @@ void Id::close() {
 }
 
 std::string scale_name_attribute(hsize_t length) {
+  // Section 21 gives the C format "%s%10d".  The conversion is done as
+  // a long long so that a dimension longer than INT_MAX is printed
+  // rather than converted out of range; for every length "%10d" can
+  // represent the two produce the same 63 characters.
   char buffer[128];
-  std::snprintf(buffer, sizeof(buffer), "%s%10d",
+  std::snprintf(buffer, sizeof(buffer), "%s%10lld",
                 "This is a netCDF dimension but not a netCDF variable.",
-                static_cast<int>(length));
+                static_cast<long long>(length));
   return std::string(buffer);
 }
 
@@ -219,13 +229,18 @@ std::vector<Member> File::members(const std::string& path) const {
   H5G_info_t info;
   if (H5Gget_info(group.get(), &info) < 0) return out;
   for (hsize_t i = 0; i < info.nlinks; ++i) {
-    char buffer[1024];
     const ssize_t n = H5Lget_name_by_idx(group.get(), ".", H5_INDEX_NAME,
-                                         H5_ITER_INC, i, buffer,
-                                         sizeof(buffer), H5P_DEFAULT);
+                                         H5_ITER_INC, i, nullptr, 0,
+                                         H5P_DEFAULT);
     if (n <= 0) continue;
+    std::string name(static_cast<std::size_t>(n) + 1, '\0');
+    if (H5Lget_name_by_idx(group.get(), ".", H5_INDEX_NAME, H5_ITER_INC, i,
+                           &name[0], name.size(), H5P_DEFAULT) < 0) {
+      continue;
+    }
+    name.resize(static_cast<std::size_t>(n));
     Member m;
-    m.name = std::string(buffer, static_cast<std::size_t>(n));
+    m.name = name;
     H5O_info2_t oinfo;
     if (H5Oget_info_by_name3(group.get(), m.name.c_str(), &oinfo,
                              H5O_INFO_BASIC, H5P_DEFAULT) >= 0) {
@@ -247,11 +262,15 @@ std::vector<RawAttr> File::attributes(const std::string& path) const {
     Id attr(H5Aopen_by_idx(object.get(), ".", H5_INDEX_NAME, H5_ITER_INC, i,
                            H5P_DEFAULT, H5P_DEFAULT));
     if (!attr.valid()) continue;
-    char buffer[1024];
-    const ssize_t len = H5Aget_name(attr.get(), sizeof(buffer), buffer);
+    const ssize_t len = H5Aget_name(attr.get(), 0, nullptr);
     if (len <= 0) continue;
+    std::string attr_name(static_cast<std::size_t>(len) + 1, '\0');
+    if (H5Aget_name(attr.get(), attr_name.size(), &attr_name[0]) < 0) {
+      continue;
+    }
+    attr_name.resize(static_cast<std::size_t>(len));
     RawAttr a;
-    a.name = std::string(buffer, static_cast<std::size_t>(len));
+    a.name = attr_name;
     Id type(H5Aget_type(attr.get()));
     Id space(H5Aget_space(attr.get()));
     a.type = type_of(type.get(), space.get());
