@@ -830,7 +830,7 @@ function unit_name(v::Validator, u)
     table === nothing && return string(u)
     entries = get(v.categories, table, String[])
     return (u isa Integer && 0 <= u < length(entries)) ?
-           "`" * entries[u + 1] * "`" : string(u)
+           entries[u + 1] : string(u)
 end
 
 function check_status!(v::Validator)
