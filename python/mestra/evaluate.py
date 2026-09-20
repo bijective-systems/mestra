@@ -46,8 +46,8 @@ def evaluate(dataset: Dataset, table: Any,
     missing = [n for n in dataset.key_names() if n not in columns]
     if missing:
         raise MestraError(
-            "section 26", "the keys table needs one column per key "
-            "the file declares; it has none for %s"
+            "", "the keys table needs one column per key the file "
+            "declares, in the file's key order; it has none for %s"
             % ", ".join(missing))
 
     out = Dataset(writer=dataset.writer, created=dataset.created,

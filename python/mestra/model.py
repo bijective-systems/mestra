@@ -882,10 +882,34 @@ class Support:
                          data=MemorySource(array), **rest)
         _check_array_attrs(slot, name)
         _check_categories(self.dataset, slot, array, name)
-        into[name] = slot
+        # The row count is checked before the slot goes in, so that a
+        # refused call leaves the support as it found it.
         if self.dataset is not None and varies == "row":
-            self.dataset._note_rows(int(array.shape[0]), name)
+            self._note_rows(int(array.shape[0]), name)
+        into[name] = slot
         return slot
+
+    def _note_rows(self, count: int, name: str) -> None:
+        """E16: the leading extent against the rows it must have.
+
+        Section 22: in an unaligned file a row-varying array on a
+        support holds one entry per row referencing *that support*,
+        and not one per row of the file.
+        """
+        dataset = self.dataset
+        if dataset is None:
+            return
+        if dataset.has_row_support and len(dataset.supports) > 1:
+            mine = len(dataset.rows_on(self))
+            if count != mine:
+                raise MestraError(
+                    "E16", "values holds %d entries where %d rows of "
+                    "this file are on support %s; a row-varying array "
+                    "on a support in an unaligned file holds one entry "
+                    "per row that references it (section 22)"
+                    % (count, mine, self.name), name)
+            return
+        dataset._note_rows(count, name)
 
     def __repr__(self) -> str:
         return "Support(%r, kind=%r, n_nodes=%d, n_cells=%d)" % (
@@ -1080,8 +1104,10 @@ class Dataset:
         key = Key(name, role, units=units, lower=lower, upper=upper,
                   category=category, trajectory_group=trajectory_group,
                   parent=parent, data=MemorySource(array))
-        self.keys[name] = key
+        # Before the key goes in, so that a refused call leaves the
+        # dataset as it found it.
         self._note_rows(int(array.shape[0]), name)
+        self.keys[name] = key
         if generalisation:
             self.set_generalisation_group(name)
         return key
@@ -1158,8 +1184,8 @@ class Dataset:
         slot = ScalarSlot(name, units=units, data=MemorySource(array),
                           statistic=statistic, of=of, quantile=quantile,
                           **rest)
-        self.scalars[name] = slot
         self._note_rows(int(array.shape[0]), name)
+        self.scalars[name] = slot
         return slot
 
     def add_callable_slot(self, name: str, *, units: str | None = None,
@@ -1288,8 +1314,8 @@ class Dataset:
             raise MestraError(
                 "E04", "/row_support has one dimension, row",
                 "/row_support")
-        self._row_support = MemorySource(array)
         self._note_rows(int(array.shape[0]), "/row_support")
+        self._row_support = MemorySource(array)
 
     def support_names(self) -> list[str]:
         """The file's support order: names sorted by UTF-8 bytes."""
@@ -1326,11 +1352,15 @@ class Dataset:
 
     # -- callables
 
-    def add_callable(self, identifier: str, obj: Any) -> Any:
-        """Store a callable under an id that slots may reference."""
+    def add_callable(self, identifier: str, callable: Any) -> Any:
+        """Store a callable under an id that slots may reference.
+
+        `add_callable(id, callable)`, and then `add_callable_slot`
+        for each slot it serves.
+        """
         _check_name(identifier)
-        self.callables[identifier] = obj
-        return obj
+        self.callables[identifier] = callable
+        return callable
 
     # -- everything at once
 

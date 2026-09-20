@@ -1481,18 +1481,16 @@ def _count(many: int, singular: str, plural: str) -> str:
     return singular if many == 1 else "%d %s" % (many, plural)
 
 
-def _at(dimension: str, indices: Any, total: int | None = None) -> str:
+def _at(dimension: str, indices: Any) -> str:
     """Where a per-row rule was broken: the first three, and a count.
 
     Section 5 of the conventions: a finding that could repeat per
     row reports once, with the count and the first three indices.
     """
     listed = [int(i) for i in list(indices)[:3]]
-    count = len(indices) if total is None else total
-    text = "at %s %s" % (dimension,
-                         ", ".join(str(i) for i in listed))
-    if count > len(listed):
-        text += " and %d more" % (count - len(listed))
+    text = "at %s %s" % (dimension, ", ".join(str(i) for i in listed))
+    if len(indices) > len(listed):
+        text += " and %d more" % (len(indices) - len(listed))
     return text
 
 

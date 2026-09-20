@@ -456,6 +456,31 @@ def test_two_supports_need_a_row_support(tmp_path):
     assert mestra.validate(path).warning_ids == ["W05"]
 
 
+def test_a_row_varying_array_in_an_unaligned_file(tmp_path):
+    """Section 22: one entry per row that references this support."""
+    ds = mestra.Dataset(writer="t")
+    ds.add_key("mach", [0.4, 0.5, 0.6], role="condition", units="1")
+    first = ds.add_support("s0", coordinates=XY, cells=CELLS)
+    second = ds.add_support("s1", coordinates=XY[:4],
+                            cells=(np.array([9]), np.array([0, 4]),
+                                   np.array([0, 1, 3, 2])))
+    ds.set_row_support([0, 1, 0])
+    first.add_node_array("p", np.zeros((2, 6)), units="Pa",
+                         dims=("row", "node"))
+    second.add_node_array("p", np.zeros((1, 4)), units="Pa",
+                          dims=("row", "node"))
+    with pytest.raises(MestraError) as caught:
+        first.add_node_array("q", np.zeros((3, 6)), units="Pa",
+                             dims=("row", "node"))
+    assert caught.value.rule == "E16"
+    assert "section 22" in str(caught.value)
+    # A refused call leaves the support as it found it.
+    assert "q" not in first.node_arrays
+    path = str(tmp_path / "two.mes")
+    mestra.write(ds, path)
+    assert mestra.validate(path).error_ids == []
+
+
 def test_a_dataset_validates_in_memory():
     ds = build_example()
     assert mestra.validate(ds).ok
