@@ -2422,7 +2422,8 @@ def deep_base(f, home):
 
 def hdeep(home, description):
     def build(f):
-        deep_base(f, home)
+        if f is not None:
+            deep_base(f, home)
         return hostile_expect(description, ["E41"])
     return build
 
@@ -2566,19 +2567,34 @@ HOSTILE = {
 # two deep files keep the default group layout.
 HOSTILE_LIBVER = {}
 
+# The two deep files are 31 MB each and are not committed. They are
+# generated on demand, with --hostile-deep, and their chain hangs
+# below the group named here. Their expected.json is committed like
+# every other one, so an implementation knows they exist and knows to
+# generate them before running the subset.
+DEEP = {
+    "deep_groups_callables": "callables/c0",
+    "deep_groups_keys": "keys",
+}
+
 
 # ------------------------------------------------------------- output
 
-def write_case(parent, name, builder, libver=None):
+def write_case(parent, name, builder, libver=None, data=True):
+    """Write one case. With data false only expected.json is written,
+    which is how the two deep hostile files stay out of the tree."""
     d = os.path.join(parent, name)
     if not os.path.isdir(d):
         os.makedirs(d)
-    kw = {} if libver is None else {"libver": libver}
-    f = h5py.File(os.path.join(d, "case.mes"), "w", **kw)
-    try:
-        exp = builder(f)
-    finally:
-        f.close()
+    if data:
+        kw = {} if libver is None else {"libver": libver}
+        f = h5py.File(os.path.join(d, "case.mes"), "w", **kw)
+        try:
+            exp = builder(f)
+        finally:
+            f.close()
+    else:
+        exp = builder(None)
     with open(os.path.join(d, "expected.json"), "w",
               encoding="utf-8", newline="\n") as fh:
         fh.write(canonical(exp))
@@ -2586,7 +2602,9 @@ def write_case(parent, name, builder, libver=None):
 
 
 def main(argv):
-    out = (argv[1] if len(argv) > 1
+    deep = "--hostile-deep" in argv
+    rest = [a for a in argv[1:] if not a.startswith("--")]
+    out = (rest[0] if rest
            else os.path.dirname(os.path.abspath(__file__)))
     entries = []
     for name in sorted(CASES):
@@ -2596,15 +2614,18 @@ def main(argv):
     hostile = []
     for name in sorted(HOSTILE):
         exp = write_case(os.path.join(out, "hostile"), name,
-                         HOSTILE[name], HOSTILE_LIBVER.get(name))
+                         HOSTILE[name], HOSTILE_LIBVER.get(name),
+                         data=(deep or name not in DEEP))
         hostile.append({"name": name,
                         "description": exp["description"]})
     with open(os.path.join(out, "manifest.json"), "w",
               encoding="utf-8", newline="\n") as fh:
         fh.write(canonical({"corpus": 0, "cases": entries,
                             "hostile": hostile}))
-    print("%d cases and %d hostile files written under %s"
-          % (len(entries), len(hostile), out))
+    print("%d cases and %d hostile files written under %s%s"
+          % (len(entries), len(hostile), out,
+             "" if deep else
+             " (the %d deep files need --hostile-deep)" % len(DEEP)))
     return 0
 
 

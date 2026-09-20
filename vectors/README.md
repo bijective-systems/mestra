@@ -66,9 +66,17 @@ bytes.
 Regenerating and checking
 -------------------------
 
-    python generate.py            # rewrite every case in place
-    python check.py               # compare the committed corpus with
-                                  # a fresh run, one line per case
+    python generate.py                   # rewrite every case
+    python generate.py --hostile-deep    # and the two deep files,
+                                         # which are not committed
+    python check.py                      # compare the committed
+                                         # corpus with a fresh run,
+                                         # one line per case
+
+Run the second command before running the hostile subset. The two
+deep files are 31 MB each and are generated on demand rather than
+committed; `check.py` writes them into place itself if they are
+missing.
 
 `check.py` regenerates everything into a temporary directory and
 compares. It compares bytes first. When the bytes differ it falls back
@@ -224,22 +232,30 @@ and a scale with CLASS but no NAME.
 
 Two things worth knowing before you run them.
 
-The two deep files are 31 MB each. That is thirty thousand HDF5
-groups in the default layout, which costs about a kilobyte apiece.
-The newer group layout costs a seventh of that, but it writes four
-timestamps into the root object header, and a file that records when
-it was written is not byte reproducible. The 31 MB is almost entirely
-repetition and git stores each in under 900 kB.
+`deep_groups_keys` and `deep_groups_callables` are not committed.
+They are 31 MB each, which is thirty thousand HDF5 groups in the
+default layout at about a kilobyte apiece. The newer group layout
+costs a seventh of that, but it writes four timestamps into the root
+object header, and a file that records when it was written is not
+byte reproducible. So they are generated on demand instead:
 
-`check.py` compares these files by their bytes and nothing else. It
-does not walk them and does not open them with a netCDF reader, and
-neither should any tool that is not deliberately testing itself
-against them. The reason is worth stating, because it cost a
-segmentation fault to find: asking HDF5 for the path of a dimension
-scale attached to a dataset makes it search the group hierarchy, and
-on a file with thirty thousand nested groups that search runs off the
-stack and takes the process with it. Dereferencing the scale and
-reading its object address is safe; the link name has to come from a
-map built while walking the tree, within the depth cap. A reader that
-resolves scale names the obvious way passes the whole corpus and dies
-on `deep_groups_keys`.
+    python generate.py --hostile-deep
+
+Their expected.json is committed like every other one, so an
+implementation knows they exist and knows to generate them first.
+Because two people's copies come from two libhdf5 versions, byte
+identity is not the comparison for them; `check.py` compares them
+structurally, and separately compares the length of the group chain,
+which the depth cap would otherwise hide.
+
+The second thing cost a segmentation fault to find, and section 21
+now names it. Asking HDF5 for the path of a dimension scale attached
+to a dataset makes it search the group hierarchy, and on a file with
+thirty thousand nested groups that search runs off the stack and
+takes the process with it. Dereferencing the scale and reading its
+object address is safe; the link name has to come from a map built
+while walking the tree, within the depth cap. A reader that resolves
+scale names the obvious way passes all seventy cases and dies on
+`deep_groups_keys`. `check.py` does it the safe way, and its walk is
+depth capped and follows hard links only, which is what section 29
+requires of anything reading a file it did not write.

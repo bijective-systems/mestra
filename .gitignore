@@ -14,3 +14,8 @@ build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# The two deep hostile files are 31 MB each and are generated on
+# demand: python vectors/generate.py --hostile-deep
+vectors/hostile/deep_groups_callables/case.mes
+vectors/hostile/deep_groups_keys/case.mes

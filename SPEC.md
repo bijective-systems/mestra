@@ -779,6 +779,12 @@ where all four had to invent the same missing rule:
      byte for byte; structural equality is the comparison and byte
      identity is not tested. Section 30.
 
+ 51. A reader resolves the link name of an attached dimension scale
+     from a map built during its own bounded walk, keyed by object
+     address or token, and never by asking the library for the scale
+     object's path: that search walks the group hierarchy and
+     overflows the stack on a deep file. Section 21.
+
 Still open: nothing.
 
 
@@ -1079,6 +1085,19 @@ must take the name from the link, because a reader that took it from
 NAME would find every dimension in the file called the same thing.
 H5DS API calls and library wrappers that report a "dimension label"
 return NAME, so this is worth checking early in each language.
+
+There is a second trap in the same place, and it is worse, because it
+does not return a wrong answer. Asking the library for the path of
+the scale object attached to an axis, which is the obvious way to
+recover the link name, makes HDF5 search the group hierarchy for a
+name that leads to it. On a file with a deep chain of groups that
+search runs off the stack and takes the process with it, and a reader
+that does this passes every well-formed file and dies on a malformed
+one. A reader must build a map from each scale's object address or
+token to its link name during its own bounded walk of the file
+(section 29), and resolve attached scales through that map.
+Dereferencing the scale and reading its address is safe; asking for
+its path is not.
 
 A dimension scale that is unlimited is chunked with chunk length 1,
 which is what netCDF-C writes; a scale that is not unlimited is
