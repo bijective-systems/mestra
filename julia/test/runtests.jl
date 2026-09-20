@@ -495,6 +495,35 @@ end
     @test bitequal(Mestra.values(out, out.scalars["cl"])[1], 1.45)
 end
 
+@testset "notes and private are carried, never interpreted" begin
+    ds = Mestra.read(case_file("mesh_two_rows"); lazy = false)
+    Mestra.set_notes!(ds, Dict("solver" => "a solver, version 3",
+                               "licence" => "CC-BY-4.0",
+                               "iterations" => 1200,
+                               "residual" => 1.0e-6,
+                               "converged" => true))
+    Mestra.set_private!(ds, Dict("our_own_record" => "kept, not read"))
+    @test_throws Mestra.MestraError Mestra.set_notes!(ds,
+        Dict("not a legal name" => 1))
+    path = joinpath(SCRATCH, "noted.mes")
+    Mestra.write(ds, path)
+    r = Mestra.validate(path)
+    @test r.errors == String[]
+    @test r.warnings == String[]
+    back = Mestra.read(path)
+    @test back.notes !== nothing
+    got = Dict(a.name => a.value for a in back.notes.attrs)
+    @test got["solver"] == "a solver, version 3"
+    @test got["iterations"] === Int64(1200)
+    @test got["residual"] === 1.0e-6
+    @test got["converged"] === true
+    @test back.private !== nothing
+    # a round trip keeps them unchanged
+    again = joinpath(SCRATCH, "noted2.mes")
+    Mestra.write(Mestra.read(path; lazy = false), again)
+    @test isempty(Mestra.structural_diff(path, again))
+end
+
 @testset "gzip and shuffle, the two portable filters (section 23)" begin
     ds = Mestra.Dataset(writer = "mestra.jl test 0",
                         created = "2026-09-19T00:00:00Z")

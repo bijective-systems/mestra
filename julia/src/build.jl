@@ -373,3 +373,71 @@ function set_row_support!(ds::Dataset, indices)
     ds.row_support = Int32.(collect(indices))
     return ds
 end
+
+# ------------------------------------------------- notes and private
+
+"""An attribute built for writing, in the encoding of section 18."""
+function raw_attr(name::AbstractString, value)
+    legal_name(name) || throw(MestraError("E33",
+        "attribute name `$(name)` is not a legal netCDF-4 name"))
+    reserved(name) && throw(MestraError("E33",
+        "attribute name `$(name)` begins with the reserved prefix"))
+    if value isa Bool
+        ti = TypeInfo(:int, 1, true, true, false, 0, 0)
+        return RawAttr(String(name), ti, UInt8[value ? 0x01 : 0x00], 1,
+                       value)
+    elseif value isa Integer
+        ti = TypeInfo(:int, 8, true, true, false, 0, 0)
+        return RawAttr(String(name), ti,
+                       collect(reinterpret(UInt8, [Int64(value)])), 1,
+                       Int64(value))
+    elseif value isa Real
+        ti = TypeInfo(:float, 8, true, true, false, 0, 0)
+        return RawAttr(String(name), ti,
+                       collect(reinterpret(UInt8, [Float64(value)])), 1,
+                       Float64(value))
+    elseif value isa AbstractString
+        bytes = Vector{UInt8}(codeunits(String(value)))
+        isempty(bytes) && (bytes = UInt8[0x00])
+        ti = TypeInfo(:string, length(bytes), false, true, false,
+                      Int(HDF5.API.H5T_CSET_UTF8),
+                      Int(HDF5.API.H5T_STR_NULLPAD))
+        return RawAttr(String(name), ti, bytes, 1, String(value))
+    end
+    throw(MestraError(nothing,
+        "an attribute of a type this format has no encoding for: " *
+        "$(typeof(value))"))
+end
+
+function attr_group(name::AbstractString, d::AbstractDict)
+    attrs = RawAttr[raw_attr(k, d[k])
+                    for k in sort(collect(keys(d)), by = codeunits)]
+    return RawGroupCopy(String(name), attrs, RawDatasetCopy[],
+                        RawGroupCopy[])
+end
+
+"""
+    set_notes!(ds, attributes)
+
+Free-form attributes under `/notes`: a solver name, a dataset licence,
+a comment.  Nothing in the format depends on them and no tool may
+require them (section 11).  Pass an empty dictionary to drop the
+group.
+"""
+function set_notes!(ds::Dataset, attributes::AbstractDict)
+    ds.notes = attr_group("notes", attributes)
+    return ds
+end
+
+"""
+    set_private!(ds, attributes)
+
+A producer's own records under `/private`.  A reader treats it as
+opaque and must not interpret it, and a writer must not put any public
+information only there (E18), so this is for lineage, validation and
+history and for nothing the format already carries.
+"""
+function set_private!(ds::Dataset, attributes::AbstractDict)
+    ds.private = attr_group("private", attributes)
+    return ds
+end
