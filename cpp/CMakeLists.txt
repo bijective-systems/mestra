@@ -38,6 +38,8 @@ add_library(mestra
   src/read.cpp
   src/write.cpp
   src/validate.cpp
+  src/weights.cpp
+  src/post.cpp
   src/callable.cpp
   src/affine.cpp
   src/evaluate.cpp

@@ -142,6 +142,40 @@ std::string callable_of_source(const std::string& source) {
   return std::string();
 }
 
+namespace {
+
+// A simple identifier takes an exponent straight after it: "m" to the
+// third is "m3".  Anything else -- a product, a quotient, or a name
+// that already carries an exponent -- is bracketed first, because
+// "m2" cubed is not "m23".  Both forms are in the grammar of the W10
+// parser.
+bool simple_identifier(const std::string& s) {
+  if (s.empty()) return false;
+  if (!std::isalpha(static_cast<unsigned char>(s[0]))) return false;
+  for (const char c : s) {
+    if (!std::isalpha(static_cast<unsigned char>(c)) && c != '_') {
+      return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
+std::string units_power(const std::string& units, int power) {
+  if (units.empty() || units == "1" || power == 1) return units;
+  if (power == 0) return "1";
+  const std::string exponent = format_i64(power);
+  if (simple_identifier(units)) return units + exponent;
+  return "(" + units + ")" + exponent;
+}
+
+std::string units_product(const std::string& a, const std::string& b) {
+  if (a.empty() || a == "1") return b;
+  if (b.empty() || b == "1") return a;
+  return a + " " + b;
+}
+
 std::vector<std::string> split_spaces(const std::string& s) {
   std::vector<std::string> out;
   std::size_t at = 0;
