@@ -591,6 +591,20 @@ Id make_dcpl(const std::vector<hsize_t>& chunk) {
   return dcpl;
 }
 
+// H5Dwrite reads as many elements as the dataspace declares, so a
+// caller that hands over fewer than the shape says would have it read
+// past the end of the vector.  Every write goes through here first.
+void need_elements(const std::string& path,
+                   const std::vector<hsize_t>& shape, std::size_t given) {
+  std::size_t want = 1;
+  for (const hsize_t e : shape) want *= static_cast<std::size_t>(e);
+  if (shape.empty()) want = 1;
+  if (given != want) {
+    throw Error("", "\"" + path + "\" declares " + std::to_string(want) +
+                        " elements and was given " + std::to_string(given));
+  }
+}
+
 Id make_space(const std::vector<hsize_t>& shape,
               const std::vector<hsize_t>& maxshape) {
   if (shape.empty()) return Id(H5Screate(H5S_SCALAR));
@@ -606,6 +620,7 @@ void File::write_f64(const std::string& path,
                      const std::vector<hsize_t>& maxshape,
                      const std::vector<hsize_t>& chunk,
                      const std::vector<double>& data) {
+  need_elements(path, shape, data.size());
   make_group(parent_of(path));
   Id space = make_space(shape, maxshape);
   Id dcpl = make_dcpl(chunk);
@@ -624,6 +639,7 @@ void File::write_ints(const std::string& path, DType dtype,
                       const std::vector<hsize_t>& maxshape,
                       const std::vector<hsize_t>& chunk,
                       const std::vector<std::int64_t>& data) {
+  need_elements(path, shape, data.size());
   make_group(parent_of(path));
   hid_t file_type = H5T_STD_I64LE;
   switch (dtype) {
@@ -649,6 +665,7 @@ void File::write_strings(const std::string& path, std::size_t item_size,
                          const std::vector<hsize_t>& maxshape,
                          const std::vector<hsize_t>& chunk,
                          const std::vector<std::string>& data) {
+  need_elements(path, shape, data.size());
   make_group(parent_of(path));
   const std::size_t item = item_size == 0 ? 1 : item_size;
   Id type = string_type(item);

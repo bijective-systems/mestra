@@ -293,6 +293,19 @@ void build_from_vectors() {
                std::size_t(1));
   check::equal("a lazy read returns the right value", one.f64.at(3), 204.0);
 
+  // A dataset whose values do not fill the shape it declares is
+  // refused rather than handed to HDF5, which would read past the end
+  // of the vector.
+  mestra::Dataset short_one = d;
+  short_one.scalar("cl")->values.pop_back();
+  bool refused = false;
+  try {
+    mestra::write(short_one, path);
+  } catch (const mestra::Error&) {
+    refused = true;
+  }
+  check::is_true("a short data vector is refused", refused);
+
   std::remove(path.c_str());
 }
 
