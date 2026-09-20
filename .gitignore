@@ -10,3 +10,7 @@ __pycache__/
 # C++ build trees
 cpp/build/
 build/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
