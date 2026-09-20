@@ -185,6 +185,7 @@ class OpaqueCallable:
             "%r, so it can copy it but not evaluate it" % self.type)
 
     def to_dict(self) -> dict[str, Any]:
+        """The dictionary as it was read, unchanged."""
         return dict(self._dict)
 
     @classmethod

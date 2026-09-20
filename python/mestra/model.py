@@ -341,10 +341,12 @@ class Key:
 
     @property
     def dims(self) -> tuple[str, ...]:
+        """A key column has one dimension, `row` (section 19)."""
         return ("row",)
 
     @property
     def dtype(self) -> np.dtype:
+        """The dtype the column is stored in (section 19)."""
         return self.data.dtype if self.data is not None else np.dtype("f8")
 
     @property
@@ -406,6 +408,7 @@ class ScalarSlot(Slot):
 
     @property
     def dims(self) -> tuple[str, ...]:
+        """A scalar has one dimension, `row` (section 19)."""
         return ("row",)
 
     def read(self, rows: slice | None = None) -> NamedArray:
@@ -418,6 +421,7 @@ class ScalarSlot(Slot):
 
     @property
     def values(self) -> NamedArray:
+        """The whole column, with its dimension name."""
         return self.read()
 
     def __repr__(self) -> str:
@@ -479,6 +483,7 @@ class ArraySlot(Slot):
 
     @property
     def values(self) -> NamedArray:
+        """The whole array, with the name of each of its axes."""
         return self.read()
 
     def __repr__(self) -> str:

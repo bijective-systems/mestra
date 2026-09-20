@@ -121,6 +121,7 @@ class Unit:
 
     @property
     def dimensionless(self) -> bool:
+        """True when nothing is left after reduction, as for "1"."""
         return not self.dimensions
 
     def __str__(self) -> str:

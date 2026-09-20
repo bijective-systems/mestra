@@ -115,14 +115,17 @@ def write_raw_string_attr(obj: Any, name: str, raw: bytes) -> None:
 
 
 def write_bool_attr(obj: Any, name: str, value: bool) -> None:
+    """A boolean attribute: int8, 0 or 1 and nothing else."""
     obj.attrs.create(name, np.int8(1 if value else 0))
 
 
 def write_int_attr(obj: Any, name: str, value: int) -> None:
+    """An integer attribute: int64, scalar dataspace."""
     obj.attrs.create(name, np.int64(value))
 
 
 def write_float_attr(obj: Any, name: str, value: float) -> None:
+    """A float attribute: float64, and finite when it is a bound."""
     obj.attrs.create(name, np.float64(value))
 
 
