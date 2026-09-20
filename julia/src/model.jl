@@ -242,6 +242,17 @@ CallableRef(id, type; repr = nothing, dict = Dict{String,Any}()) =
 
 # An object this reader does not own, kept so that a round trip does
 # not lose it: /notes, /private, and anything section 28 adds later.
+"""One dataset of a group this reader does not own, copied rather than
+interpreted (sections 12 and 29).
+
+The last four fields are what makes the copy structurally equal to
+what it came from (section 30): its filters, whether it is a dimension
+scale and the NAME it carries as one, whether its creation property
+list tracked attribute creation order, and, for each axis, the scale
+attached to it named by its path within the copied subtree.  A
+producer's private part may hold a dimension scale of its own, and a
+round trip that dropped the attachment would write a different file
+back."""
 struct RawDatasetCopy
     name::String
     ti::TypeInfo
@@ -250,7 +261,17 @@ struct RawDatasetCopy
     chunk::Union{Nothing,Vector{Int}}
     raw::Vector{UInt8}
     attrs::Vector{RawAttr}
+    deflate::Union{Nothing,Int}
+    shuffle::Bool
+    scale_name::Union{Nothing,String}
+    attr_order::Bool
+    attached::Vector{Union{Nothing,String}}
 end
+
+RawDatasetCopy(name, ti, cdims, cmax, chunk, raw, attrs) =
+    RawDatasetCopy(name, ti, cdims, cmax, chunk, raw, attrs, nothing,
+                   false, nothing, false,
+                   Union{Nothing,String}[nothing for _ in cdims])
 
 struct RawGroupCopy
     name::String

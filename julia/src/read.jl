@@ -22,26 +22,34 @@ is resolved through it (section 21), so resolving one costs a lookup
 and not a scan of the scale's REFERENCE_LIST."""
 struct ScaleIndex
     all::Vector{Pair{String,HDF5.Dataset}}
+    paths::Vector{String}
     byref::Dict{HDF5.Reference,Int}
 end
 
 function ScaleIndex(f::HDF5.File)
     found = collect_scales(f)
-    all = Pair{String,HDF5.Dataset}[name => d for (name, d, _) in found]
+    all = Pair{String,HDF5.Dataset}[name => d for (name, _, d, _) in found]
+    paths = String[p for (_, p, _, _) in found]
     byref = Dict{HDF5.Reference,Int}()
-    for (i, (_, _, ref)) in enumerate(found)
+    for (i, (_, _, _, ref)) in enumerate(found)
         ref === nothing && continue
         haskey(byref, ref) || (byref[ref] = i)
     end
-    return ScaleIndex(all, byref)
+    return ScaleIndex(all, paths, byref)
 end
 
 """For each C-order axis of `d`: how many dimension scales are
 attached, the link name of the one scale when exactly one is and this
-file holds it, and that scale's dataset.  A count of -1 says the
-library would not give the dataset's DIMENSION_LIST at all."""
+file holds it, that scale's dataset, and its path.  A count of -1 says
+the library would not give the dataset's DIMENSION_LIST at all.
+
+Every one of those comes from the dataset's own DIMENSION_LIST and the
+map of section 21, and none of it from the scale's REFERENCE_LIST,
+which section 21 calls informational: a scale whose REFERENCE_LIST is
+missing, short or stale still names the axes that point at it."""
 function axis_scales(d::HDF5.Dataset, idx::ScaleIndex)
-    T = Tuple{Int,Union{String,Nothing},Union{Nothing,HDF5.Dataset}}
+    T = Tuple{Int,Union{String,Nothing},Union{Nothing,HDF5.Dataset},
+              Union{String,Nothing}}
     cdims, _ = try
         disk_shape(d)
     catch
@@ -52,16 +60,16 @@ function axis_scales(d::HDF5.Dataset, idx::ScaleIndex)
     out = T[]
     for axis in 0:(length(cdims) - 1)
         if bad
-            push!(out, (-1, nothing, nothing))
+            push!(out, (-1, nothing, nothing, nothing))
             continue
         end
         refs = axis_refs(dl, axis)
         if length(refs) == 1
             i = get(idx.byref, refs[1], 0)
-            push!(out, i == 0 ? (1, nothing, nothing) :
-                       (1, idx.all[i].first, idx.all[i].second))
+            push!(out, i == 0 ? (1, nothing, nothing, nothing) :
+                       (1, idx.all[i].first, idx.all[i].second, idx.paths[i]))
         else
-            push!(out, (length(refs), nothing, nothing))
+            push!(out, (length(refs), nothing, nothing, nothing))
         end
     end
     return out
@@ -363,7 +371,8 @@ function read_dataset(f::HDF5.File, path::String, lazy::Bool,
         g = hard_child(f, name)
         g isa HDF5.Group || continue
         try
-            setfield!(ds, field, snapshot_group(ds, g, name, "/" * name, 0))
+            setfield!(ds, field,
+                      snapshot_group(ds, g, name, "/" * name, 0, idx))
         catch e
             note!(ds, rule_of(e), "/" * name, message_of(e))
         end
@@ -374,7 +383,7 @@ function read_dataset(f::HDF5.File, path::String, lazy::Bool,
         obj isa HDF5.Group || continue
         try
             push!(ds.extra_root_groups,
-                  snapshot_group(ds, obj, name, "/" * name, 0))
+                  snapshot_group(ds, obj, name, "/" * name, 0, idx))
         catch e
             note!(ds, rule_of(e), "/" * name, message_of(e))
         end
@@ -529,8 +538,15 @@ end
 
 # An object this reader does not own is copied, never interpreted.
 # The depth is capped because the file chooses it.
+#
+# `root` is the path the copy hangs from, so that a dimension scale a
+# producer keeps inside its own group can be attached again by a path
+# within the copy.  A scale outside the copied subtree is not carried:
+# nothing this format defines attaches across one.
 function snapshot_group(ds::Dataset, g::HDF5.Group, name::String,
-                        path::String, depth::Int)
+                        path::String, depth::Int,
+                        idx::Union{Nothing,ScaleIndex} = nothing,
+                        root::String = path)
     attrs = RawAttr[a for a in raw_attrs(g)
                     if !(a.name in MACHINERY_ATTRS) && a.readable]
     dsets = RawDatasetCopy[]
@@ -546,22 +562,61 @@ function snapshot_group(ds::Dataset, g::HDF5.Group, name::String,
         obj === nothing && continue
         if obj isa HDF5.Group
             push!(groups, snapshot_group(ds, obj, n, "$(path)/$(n)",
-                                         depth + 1))
+                                         depth + 1, idx, root))
         else
             try
                 ti, raw, _ = read_raw_dataset(obj;
                                               max_elements = ds.max_elements)
                 cdims, cmax = disk_shape(obj)
-                _, chunk, _ = dataset_layout(obj)
+                _, chunk, filters = dataset_layout(obj)
+                deflate = nothing
+                shuffle = false
+                for (fid, cd) in filters
+                    fid == 1 && (deflate = isempty(cd) ? 1 : cd[1])
+                    fid == 2 && (shuffle = true)
+                end
                 push!(dsets, RawDatasetCopy(n, ti, cdims, cmax, chunk, raw,
                     RawAttr[a for a in raw_attrs(obj)
-                            if !(a.name in MACHINERY_ATTRS) && a.readable]))
+                            if !(a.name in MACHINERY_ATTRS) && a.readable],
+                    deflate, shuffle, copied_scale_name(obj),
+                    scale_order_tracked(obj),
+                    copied_attachments(obj, idx, root, length(cdims))))
             catch e
                 note!(ds, rule_of(e), "$(path)/$(n)", message_of(e))
             end
         end
     end
     return RawGroupCopy(name, attrs, dsets, groups)
+end
+
+"""The NAME a copied dataset carries as a dimension scale, or nothing
+when it is not one.  A scale with no NAME is copied as a scale with an
+empty one, which is what it was."""
+function copied_scale_name(d::HDF5.Dataset)
+    is_scale(d) || return nothing
+    a = try
+        haskey(HDF5.attributes(d), "NAME") ? read_raw_attr(d, "NAME") : nothing
+    catch
+        nothing
+    end
+    return a !== nothing && a.value isa AbstractString ? String(a.value) : ""
+end
+
+"""For each C-order axis of a copied dataset, the path within the
+copied subtree of the scale attached to it, or nothing."""
+function copied_attachments(d::HDF5.Dataset, idx::Union{Nothing,ScaleIndex},
+                            root::String, naxes::Int)
+    out = Union{Nothing,String}[nothing for _ in 1:naxes]
+    idx === nothing && return out
+    prefix = root * "/"
+    for (axis, t) in pairs(axis_scales(d, idx))
+        axis <= naxes || break
+        p = t[4]
+        p === nothing && continue
+        startswith(p, prefix) || continue
+        out[axis] = p[(length(prefix) + 1):end]
+    end
+    return out
 end
 
 # ------------------------------------------------------ reading values
