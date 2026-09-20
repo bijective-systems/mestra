@@ -368,6 +368,57 @@ classdef PostTest < matlab.unittest.TestCase
                 'the seed reaches every split of three units into 2 and 1');
         end
 
+        function groupedSplitReproducesTheWorkedExample(testCase)
+        %groupedSplitReproducesTheWorkedExample  Section 31 ends in a
+        %   table: five rotors whose category table is written in an
+        %   order that is not their name order, seed 0, 0.8 train and
+        %   0.2 test, and test is rotor_c.  An implementation that
+        %   reproduces that table reproduces every split, because
+        %   nothing else in the algorithm depends on the file.
+            d = PostTest.rotors();
+            s = mestra.groupedSplit(d, struct('train', 0.8, 'test', 0.2), ...
+                                    'Seed', 0);
+            testCase.verifyEqual(s.test, [4 9], ...
+                'test is rotor_c, whose rows are 4 and 9');
+            testCase.verifyEqual(s.train, [1 2 3 5 6 7 8 10]);
+            testCase.verifyEqual(reshape(fieldnames(s), 1, []), ...
+                {'test', 'train'}, ...
+                'the parts come back in part-name order, not the caller''s');
+        end
+
+        function groupedSplitSortsTheUnitsByTheirDraws(testCase)
+        %groupedSplitSortsTheUnitsByTheirDraws  The same five units
+        %   into five parts of one unit each, which makes the order
+        %   the draws put them in visible: section 31 sorts them
+        %   rotor_c, rotor_e, rotor_b, rotor_a, rotor_d, and the
+        %   parts are filled in name order.  This is the splitmix64
+        %   stream of the section's draw table, unit by unit.
+            d = PostTest.rotors();
+            s = mestra.groupedSplit(d, struct('a', 1, 'b', 1, 'c', 1, ...
+                                              'd', 1, 'e', 1), 'Seed', 0);
+            % rotor_b is id 0, rotor_a is 1, rotor_d is 2, rotor_c is 3
+            % and rotor_e is 4; each holds rows id + 1 and id + 6.
+            testCase.verifyEqual({s.a, s.b, s.c, s.d, s.e}, ...
+                {[4 9], [5 10], [1 6], [2 7], [3 8]});
+        end
+
+        function groupedSplitIgnoresTheOrderTheTableWasWrittenIn(testCase)
+        %groupedSplitIgnoresTheOrderTheTableWasWrittenIn  Section 31:
+        %   two files that hold the same units in tables written in
+        %   two orders must split the same way, so the unit order is
+        %   the entries' and never the ids'.
+            d = PostTest.rotors();
+            e = mestra.Dataset();
+            e.addCategoryTable('rotor', {'rotor_a', 'rotor_b', 'rotor_c', ...
+                                         'rotor_d', 'rotor_e'});
+            e.addKey('rotor', int32([1 0 3 2 4 1 0 3 2 4]), 'group', ...
+                     'Category', 'rotor');
+            e.setGeneralisationGroup('rotor');
+            f = struct('train', 0.8, 'test', 0.2);
+            testCase.verifyEqual(mestra.groupedSplit(e, f), ...
+                                 mestra.groupedSplit(d, f));
+        end
+
         function fractionsComeInThreeShapes(testCase)
             d = mestra.read(fullfile(corpusRoot(), 'scalars_only', ...
                                      'case.mes'));
@@ -381,6 +432,21 @@ classdef PostTest < matlab.unittest.TestCase
     end
 
     methods (Static)
+
+        function d = rotors()
+        %rotors  The file of the worked example in section 31: five
+        %   units, two rows each, whose category table is written in
+        %   an order that is not their name order, so that a reading
+        %   of the algorithm that orders by id gives another answer.
+            d = mestra.Dataset();
+            d.writer = 'mestra matlab tests';
+            d.created = '2026-09-19T00:00:00Z';
+            d.addCategoryTable('rotor', {'rotor_b', 'rotor_a', 'rotor_d', ...
+                                         'rotor_c', 'rotor_e'});
+            d.addKey('rotor', int32([0 1 2 3 4 0 1 2 3 4]), 'group', ...
+                     'Category', 'rotor');
+            d.setGeneralisationGroup('rotor');
+        end
 
         function d = family()
         %family  Two members, six nodes, two quadrilateral cells.
