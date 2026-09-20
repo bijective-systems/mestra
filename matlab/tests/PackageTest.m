@@ -48,6 +48,74 @@ classdef PackageTest < matlab.unittest.TestCase
             end
         end
 
+        function recursiveRoutinesAreCapped(testCase)
+        %recursiveRoutinesAreCapped  Nothing recurses on a file's say-so.
+        %   The units parser is the one recursive routine that runs on
+        %   text rather than on structure, so it is capped the same way
+        %   the walks are: a string nested past the cap does not parse,
+        %   which is W10, and W10 is what an unparseable string is.
+            deep = [repmat('(', 1, 2000) 'm' repmat(')', 1, 2000)];
+            testCase.verifyFalse(mestra.internal.Units.parses(deep), ...
+                'deeply nested parentheses do not parse');
+            testCase.verifyTrue(mestra.internal.Units.parses('((m))'), ...
+                'but a reasonable nesting still does');
+            testCase.verifyFalse( ...
+                mestra.internal.Units.parses(repmat('m', 1, 100000)), ...
+                'and an absurdly long string is refused outright');
+        end
+
+        function limitsAreSettable(testCase)
+        %limitsAreSettable  A real file may need more than the default.
+            old = mestra.limits();
+            restore = onCleanup(@() mestra.limits(old));
+            testCase.verifyEqual(old.maxDepth, 64);
+            previous = mestra.limits('maxDepth', 8);
+            testCase.verifyEqual(previous.maxDepth, 64);
+            testCase.verifyEqual(mestra.internal.Limits.get('maxDepth'), 8);
+            mestra.limits(previous);
+            testCase.verifyEqual(mestra.internal.Limits.get('maxDepth'), 64);
+            testCase.verifyError(@() mestra.limits('nonesuch', 1), ...
+                                 'mestra:limits');
+            testCase.verifyError(@() mestra.limits('maxDepth', -1), ...
+                                 'mestra:limits');
+        end
+
+        function affineOrderIsLoopsAndNotAProduct(testCase)
+        %affineOrderIsLoopsAndNotAProduct  How the order is guaranteed.
+        %   Section 27 fixes the summation: accumulate over the keys in
+        %   the declared order, add b last, no fused multiply-add.  The
+        %   guarantee is structural, not documentary: mestra.Affine.call
+        %   writes the sum out as three nested loops over rows, outputs
+        %   and keys, and the only arithmetic on the path is a scalar
+        %   multiply and a scalar add.  A matrix product would be free
+        %   to reassociate and is therefore never used; this checks the
+        %   source says so, and then checks a case where the orders
+        %   disagree in the last bit.
+            source = fileread(which('mestra.Affine'));
+            body = extractAfter(source, 'function out = call(obj');
+            body = extractBefore(body, 'function d = toDict');
+            testCase.verifyEmpty(regexp(body, 'A\s*\*', 'once'), ...
+                'call must not multiply a matrix by anything');
+            testCase.verifyEmpty(regexp(body, "\*\s*x\b(?!\()", 'once'), ...
+                'nor a vector');
+            testCase.verifySubstring(body, 'acc = acc + A(j, k) * x(r, k)');
+            testCase.verifySubstring(body, 'y(r, j) = acc + b(j)');
+
+            % Adding b first instead of last changes the last bit here.
+            a = mestra.Affine({'mach', 'alpha'}, struct('cl', ...
+                struct('A', [2.0 0.1], 'b', 0.05, 'shape', [])));
+            t = table(0.5, 4.0, 'VariableNames', {'mach', 'alpha'});
+            out = a.call(t);
+            bLast = out('cl').data(1);
+            bFirst = 0.05 + 2.0 * 0.5 + 0.1 * 4.0;
+            testCase.verifyEqual(typecast(bLast, 'uint64'), ...
+                                 typecast(1.45, 'uint64'), ...
+                                 'b added last gives exactly 1.45');
+            testCase.verifyNotEqual(typecast(bFirst, 'uint64'), ...
+                                    typecast(1.45, 'uint64'), ...
+                                    'and the other order does not');
+        end
+
         function permuteByName(testCase)
         %permuteByName  The idiom sections 4 and 29 require.
             a = reshape(1:24, [2 3 4]);       % component node row
