@@ -17,7 +17,37 @@ by those names.
     p  = Mestra.permute(v, (:row, :node, :component))
     p[2, 4, 1]                                     # row 2, node 4, comp 1
 
-See `julia/README.md` for a five-minute tour.
+The public API, each name with a docstring of its own:
+
+    Reading    read, values, rows, materialise!, materialised, info
+    Rules      STRUCTURAL_RULES, the ones a strict read refuses with
+    Writing    write
+    Checking   validate, report, structural_diff, structurally_equal
+    Axes       DimArray, dimnames, permute, at
+    Model      Dataset, KeyColumn, Slot, Support, CategoryTable,
+               CallableRef, support_id, support_order, key_order,
+               array_slots, all_slots
+    Building   Dataset(...), add_key!, add_scalar!, add_category_table!,
+               set_generalisation_group!, add_mesh_support!,
+               add_axis_support!, add_none_support!, add_node_array!,
+               add_cell_array!, add_callable!, add_callable_slot!,
+               add_callable_scalar!, set_callable!, set_row_support!,
+               set_notes!, set_private!
+    Weights    compute_weights, compute_weights!
+    Callables  Callable, to_dict, from_dict, register_callable!,
+               callable, build_callable, Affine, affine, evaluate
+    Codec      read_dict, write_dict
+    After      field_statistics, integrate, time_series, grouped_split,
+               split_leaks
+    Errors     MestraError, ValidationReport, Finding
+    Limits     DEFAULT_MAX_ELEMENTS, MAX_READ_BYTES, MAX_DEPTH
+
+`DimArray`, `dimnames`, `permute`, `at` and `MestraError` are
+exported; everything else is reached as `Mestra.name`, because `read`,
+`write` and `values` would otherwise shadow the ones in Base.
+
+See `julia/README.md` for the way in, `../docs/guide.md` for what the
+format means and `../SPEC.md` for the rules.
 """
 module Mestra
 

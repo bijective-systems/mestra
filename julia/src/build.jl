@@ -197,12 +197,20 @@ default_key_eltype(role::Symbol, vals) =
 """
     add_scalar!(ds, name, values; units, ...)
 
-A per-row quantity of interest.  `units` is required (E11).
+A per-row quantity of interest: the name and the values, then the
+units, which every scalar carries (E11) and which the builder refuses
+to guess at.
+
+    add_scalar!(ds, "cl", [0.21, 0.25]; units = "1")
 """
 function add_scalar!(ds::Dataset, name::AbstractString, values;
-                     units::AbstractString, statistic = nothing,
+                     units = nothing, statistic = nothing,
                      of = nothing, quantile = nothing, deflate = nothing,
                      shuffle::Bool = false)
+    units isa AbstractString || throw(MestraError("E11",
+        "/scalars/" * String(name),
+        "a scalar carries units; pass units = \"1\" for a dimensionless " *
+        "one"))
     vals = convert(Vector{Float64}, collect(values))
     if isempty(ds.keys) && isempty(ds.scalars)
         ds.nrows = length(vals)
@@ -344,6 +352,10 @@ function make_array_slot(ds::Dataset, sup::Support, name::AbstractString,
     role in ARRAY_ROLES || throw(MestraError("E02", path,
         "`$(role)` is not an array role of section 3; pass `role` as one " *
         "of " * join(string.(ARRAY_ROLES), ", ")))
+    role === :field && !(units isa AbstractString) &&
+        throw(MestraError("E11", path,
+            "a field carries units; pass units = \"1\" for a " *
+            "dimensionless one"))
     nsite = location === :cell ? sup.n_cells : sup.n_nodes
     dims === nothing && (dims = default_dims(data, nsite, location, path))
     dims = Symbol[Symbol(d) for d in dims]

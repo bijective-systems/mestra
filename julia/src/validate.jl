@@ -24,7 +24,17 @@
     ValidationReport
 
 `errors` and `warnings` are the rule identifiers of section 14, sorted
-and without duplicates; `findings` says where each came from.
+and without duplicates; `findings` says where each came from, one
+`Finding` a rule an object breaks.  `isvalid(report)` is true when
+`errors` is empty, which is the whole of what conforming means: a
+warning is reported and the file is still accepted.
+
+A rule that could fire on every row of a long file -- W02 on the
+status, W03 on a non-finite value, W04 on a key outside its bounds --
+fires once, and its message carries how many rows it is about and the
+first three of them.  Row indices in a finding count from zero, as the
+file's own rows do.  The rules are E01 to E43 and W01 to W15, of which
+E07 and W09 are retired and never emitted.
 """
 struct ValidationReport
     errors::Vector{String}
@@ -216,6 +226,14 @@ and nothing else, as the conformance corpus does.
 pass a strict `Mestra.read` refuses a file with.  Everything a value
 decides, from a support id to a non-finite number, is left to the full
 pass.
+
+`Mestra.report` prints the findings as `<id> <path>: <message>` and
+ends on `<n> error(s), <m> warning(s)`, which is the output every
+language prints.  Where two rules are easy to confuse -- units as E11
+or E39, a length as E16, a dimension name as E25, a missing public
+attribute beside `/private` as E18, a scale's creation order as E42,
+an unlimited dimension as E43 -- SPEC.md section 14 is what this
+follows, word for word, and this package adds nothing to it.
 """
 function validate(path::AbstractString;
                   max_elements::Integer = DEFAULT_MAX_ELEMENTS,
@@ -830,7 +848,7 @@ function unit_name(v::Validator, u)
     table === nothing && return string(u)
     entries = get(v.categories, table, String[])
     return (u isa Integer && 0 <= u < length(entries)) ?
-           "`" * entries[u + 1] * "`" : string(u)
+           entries[u + 1] : string(u)
 end
 
 function check_status!(v::Validator)

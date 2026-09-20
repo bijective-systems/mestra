@@ -157,6 +157,24 @@ and a file that was already there is untouched.  `check = false`
 writes it anyway, which is for making a file that breaks a rule on
 purpose.  This is `docs/api-conventions.md` section 2, and it is why a
 writer cannot hand you a file its own validator rejects.
+
+What comes out is a conforming netCDF-4 file: fixed-length NUL-padded
+UTF-8 strings, dimension scales created and attached with the H5DS
+API, chunking along an unlimited `row`, no filter but gzip and
+shuffle, and no fill value, so `ncdump -h` lists `row`, `node`,
+`component_1` and the rest by name.
+
+Two runs of it produce the same bytes.  That takes object time
+tracking off on every object this writer creates, and the libver
+bounds `Mestra.WRITER_LIBVER`, whose docstring is why; the one
+exception is each dimension scale, which section 21 requires to be
+created with attribute creation order tracked and indexed, and which
+`Mestra.make_dcpl` explains.  A group this format does not own --
+`/notes`, `/private`, or one a later version adds -- is copied out
+again exactly as it came in, dtypes, filters, chunking and any
+dimension scale of the producer's own included, because section 29
+forbids interpreting it and a round trip that widened a dtype would be
+interpreting it.
 """
 function write(ds::Dataset, path::AbstractString; check::Bool = true)
     prepare_for_write!(ds)

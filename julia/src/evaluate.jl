@@ -11,7 +11,13 @@ for table row i.  A `NamedTuple` of columns and a `(matrix, names)`
 pair are accepted too.
 
 Distillation is this operation on a grid.  The result has no file
-behind it until it is written.
+behind it until it is written, and what it carries is settled by
+`docs/api-conventions.md` section 7: every callable slot is now a
+stored slot, so there is no `/callables` group at all; `/notes` is
+carried, because the content is the same; `/private` is not, because a
+producer's records describe the file they were written into.  The
+support id is unchanged, so a tool knows the evaluated file and the
+model file are about the same mesh after reading one attribute.
 """
 function evaluate(ds::Dataset, table)
     t = normalise_keys(table)
