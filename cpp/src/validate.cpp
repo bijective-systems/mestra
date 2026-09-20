@@ -98,6 +98,44 @@ class Validator {
              const std::string& message) {
     r_->errors.push_back({id, where, message});
   }
+
+  // One object at a time.  A file is untrusted input and a validator
+  // that stops at the first object it cannot read tells a caller
+  // almost nothing about the rest of the file, so a failure is
+  // recorded against the path it happened at and the pass goes on.
+  template <typename Body>
+  void guarded(const std::string& path, Body body) {
+    try {
+      body();
+    } catch (const Error& e) {
+      error(e.rule(), path, e.what());
+    } catch (const std::exception& e) {
+      error(std::string(), path, e.what());
+    }
+  }
+
+  // True when a member is an object this reader will look at: a hard
+  // link to a group or a dataset.  Anything else is said out loud and
+  // left alone -- a soft link is not resolved and an external link is
+  // never opened, because opening one would make a crafted file read
+  // another file on this machine.
+  bool usable(const std::string& parent, const Member& m) {
+    const std::string path =
+        (parent == "/" ? std::string("/") : parent + "/") + m.name;
+    if (m.kind != internal::LinkKind::Hard) {
+      error(std::string(), path,
+            std::string("this name is ") + internal::link_kind_name(m.kind) +
+                "; this reader follows a hard link and nothing else, and "
+                "never opens an external one");
+      return false;
+    }
+    if (!m.is_group && !m.is_dataset) {
+      error(std::string(), path,
+            "this name is neither a group nor a dataset");
+      return false;
+    }
+    return true;
+  }
   void warn(const std::string& id, const std::string& where,
             const std::string& message) {
     r_->warnings.push_back({id, where, message});
@@ -163,7 +201,7 @@ class Validator {
   void row_support_dataset();
   void supports();
   void callables();
-  void check_dict(const std::string& path, bool top_level);
+  void check_dict(const std::string& path, bool top_level, int depth);
   void slot(const std::string& path, const std::string& support_kind,
             std::int64_t n_nodes, std::int64_t n_cells,
             std::size_t support_index, bool is_coordinates);
@@ -313,14 +351,18 @@ void Validator::check_dataset_storage(const std::string& path,
 
 void Validator::run() {
   for (const Member& m : f_.members("/supports")) {
-    if (m.is_group) support_names_.push_back(m.name);
+    if (m.kind == internal::LinkKind::Hard && m.is_group) {
+      support_names_.push_back(m.name);
+    }
   }
   // Section 22: the support order is the group names sorted by their
   // UTF-8 bytes, which is the one ordering every language produces
   // identically.
   std::sort(support_names_.begin(), support_names_.end(), bytes_less);
   for (const Member& m : f_.members("/callables")) {
-    if (m.is_group) callable_ids_.insert(m.name);
+    if (m.kind == internal::LinkKind::Hard && m.is_group) {
+      callable_ids_.insert(m.name);
+    }
   }
   root();
   categories();
@@ -384,6 +426,10 @@ void Validator::root() {
     }
   }
   for (const Member& m : f_.members("/")) {
+    if (m.kind != internal::LinkKind::Hard) {
+      usable("/", m);
+      continue;
+    }
     if (m.is_group && !internal::known_root_group(m.name)) {
       warn("W11", "/" + m.name,
            "a root group this version does not know; it is ignored");
@@ -412,8 +458,13 @@ void Validator::root() {
 
 void Validator::categories() {
   for (const Member& m : f_.members("/categories")) {
-    if (!m.is_dataset) continue;
+    if (!usable("/categories", m)) continue;
     const std::string p = "/categories/" + m.name;
+    if (!m.is_dataset) {
+      error(std::string(), p, "a category table must be a dataset");
+      continue;
+    }
+    guarded(p, [&] {
     const DsetInfo info = f_.dataset_info(p);
     if (!internal::legal_netcdf_name(m.name)) {
       error("E33", p, "\"" + m.name + "\" is not a legal netCDF-4 name");
@@ -424,7 +475,7 @@ void Validator::categories() {
     }
     if (info.type.klass != H5T_STRING) {
       error("E20", p, "a category table that is not a string dataset");
-      continue;
+      return;
     }
     check_string_dataset(p, info, true);
     category_tables_[m.name] = texts(p);
@@ -436,6 +487,7 @@ void Validator::categories() {
                 "`");
     }
     check_dataset_storage(p, info, false, kNoChunkCheck);
+    });
   }
 }
 
@@ -465,8 +517,15 @@ void Validator::keys() {
   std::vector<KeyInfo> infos;
 
   for (const Member& m : f_.members("/keys")) {
-    if (!m.is_dataset) continue;
+    if (!usable("/keys", m)) continue;
     const std::string p = "/keys/" + m.name;
+    if (!m.is_dataset) {
+      error(std::string(), p, "a key must be a dataset");
+      continue;
+    }
+    bool read_failed = false;
+    KeyInfo scratch;
+    guarded(p, [&] {
     const DsetInfo info = f_.dataset_info(p);
     const std::vector<RawAttr> attrs = f_.attributes(p);
     check_attribute_encodings(p, attrs);
@@ -579,7 +638,9 @@ void Validator::keys() {
     } else if (dtype != DType::String) {
       k.i64 = integers(p);
     }
-    infos.push_back(std::move(k));
+    scratch = std::move(k);
+    });
+    if (!read_failed) infos.push_back(std::move(scratch));
   }
 
   for (const char* role : {"time", "split", "id", "status"}) {
@@ -749,7 +810,9 @@ void Validator::keys() {
 
 void Validator::scalars() {
   for (const Member& m : f_.members("/scalars")) {
+    if (!usable("/scalars", m)) continue;
     const std::string p = "/scalars/" + m.name;
+    guarded(p, [&] {
     const std::vector<RawAttr> attrs = f_.attributes(p);
     check_attribute_encodings(p, attrs);
     if (!internal::legal_netcdf_name(m.name)) {
@@ -814,7 +877,7 @@ void Validator::scalars() {
       }
     }
 
-    if (!m.is_dataset) continue;
+    if (!m.is_dataset) return;
     const DsetInfo info = f_.dataset_info(p);
     DType dtype = DType::Float64;
     if (!internal::dtype_of(info.type, &dtype) || dtype != DType::Float64) {
@@ -845,6 +908,7 @@ void Validator::scalars() {
         }
       }
     }
+    });
   }
 }
 
@@ -911,6 +975,7 @@ void Validator::supports() {
   for (std::size_t index = 0; index < support_names_.size(); ++index) {
     const std::string name = support_names_[index];
     const std::string sp = "/supports/" + name;
+    guarded(sp, [&] {
     const std::vector<RawAttr> attrs = f_.attributes(sp);
     check_attribute_encodings(sp, attrs);
     if (!internal::legal_netcdf_name(name)) {
@@ -929,6 +994,10 @@ void Validator::supports() {
       }
     }
     for (const Member& g : f_.members(sp)) {
+      if (g.kind != internal::LinkKind::Hard) {
+        usable(sp, g);
+        continue;
+      }
       if (g.is_group && !internal::known_support_group(g.name)) {
         warn("W11", sp + "/" + g.name,
              "a group inside a support this version does not know");
@@ -1073,13 +1142,16 @@ void Validator::supports() {
       error("E03", sp, "a " + kind + " support with no coordinates array");
     }
     if (has_coordinates) {
-      slot(sp + "/coordinates", kind, n_nodes, n_cells, index, true);
+      const std::string cp = sp + "/coordinates";
+      guarded(cp, [&] { slot(cp, kind, n_nodes, n_cells, index, true); });
     }
     for (int which = 0; which < 2; ++which) {
       const std::string gp =
           sp + (which == 0 ? "/node_arrays" : "/cell_arrays");
       for (const Member& a : f_.members(gp)) {
-        slot(gp + "/" + a.name, kind, n_nodes, n_cells, index, false);
+        if (!usable(gp, a)) continue;
+        const std::string ap = gp + "/" + a.name;
+        guarded(ap, [&] { slot(ap, kind, n_nodes, n_cells, index, false); });
       }
     }
 
@@ -1105,6 +1177,7 @@ void Validator::supports() {
               "the stored support_id does not match the stored arrays");
       }
     }
+    });
   }
 }
 
@@ -1352,8 +1425,13 @@ void Validator::slot(const std::string& path,
 
 void Validator::callables() {
   for (const Member& m : f_.members("/callables")) {
-    if (!m.is_group) continue;
+    if (!usable("/callables", m)) continue;
     const std::string p = "/callables/" + m.name;
+    if (!m.is_group) {
+      error(std::string(), p, "a callable must be a group");
+      continue;
+    }
+    guarded(p, [&] {
     const std::vector<RawAttr> attrs = f_.attributes(p);
     if (!internal::legal_netcdf_name(m.name)) {
       error("E33", p, "\"" + m.name + "\" is not a legal netCDF-4 name");
@@ -1365,11 +1443,18 @@ void Validator::callables() {
     if (find(attrs, "type") == nullptr) {
       error("E15", p, "a callable group with no `type`");
     }
-    check_dict(p, true);
+    check_dict(p, true, 0);
+    });
   }
 }
 
-void Validator::check_dict(const std::string& path, bool top_level) {
+void Validator::check_dict(const std::string& path, bool top_level,
+                           int depth) {
+  if (depth >= kMaxDictDepth) {
+    error("E32", path,
+          "a dictionary nested deeper than this reader will walk");
+    return;
+  }
   // A callable's dictionary is opaque to a reader that does not own its
   // type, so nothing here interprets it: these are the rules of
   // section 25 about what is representable at all.
@@ -1427,8 +1512,9 @@ void Validator::check_dict(const std::string& path, bool top_level) {
             "the dictionary key \"" + m.name +
                 "\" is not a legal netCDF-4 name");
     }
+    if (!usable(path, m)) continue;
     if (m.is_group) {
-      check_dict(child, false);
+      check_dict(child, false, depth + 1);
       continue;
     }
     if (!m.is_dataset) continue;

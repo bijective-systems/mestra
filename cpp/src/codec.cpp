@@ -43,8 +43,12 @@ std::string scale_name(const std::string& dataset, std::size_t axis) {
 
 }  // namespace
 
-Dict read_dict_group(const File& f, const std::string& path,
-                     bool top_level) {
+Dict read_dict_group(const File& f, const std::string& path, bool top_level,
+                     int depth) {
+  if (depth >= kMaxDictDepth) {
+    throw Error("E32", "\"" + path + "\" is nested deeper than this reader "
+                                      "will walk");
+  }
   Dict d;
   for (const RawAttr& a : f.attributes(path)) {
     if (machinery_attribute(a.name)) continue;
@@ -72,8 +76,16 @@ Dict read_dict_group(const File& f, const std::string& path,
   for (const Member& m : f.members(path)) {
     if (reserved_name(m.name)) continue;
     const std::string child = path + "/" + m.name;
+    if (m.kind != LinkKind::Hard) {
+      // A dictionary is data, and this reader follows a hard link and
+      // nothing else.
+      throw Error("E32", "\"" + child + "\" is " +
+                             link_kind_name(m.kind) +
+                             " and not an object of the dictionary");
+    }
     if (m.is_group) {
-      d.set(m.name, Value::dict(read_dict_group(f, child, false)));
+      d.set(m.name,
+            Value::dict(read_dict_group(f, child, false, depth + 1)));
       continue;
     }
     if (!m.is_dataset) continue;
@@ -111,7 +123,11 @@ Dict read_dict_group(const File& f, const std::string& path,
 }
 
 void write_dict_group(File& f, const std::string& path, const Dict& d,
-                      const ChunkOverrides* chunks) {
+                      const ChunkOverrides* chunks, int depth) {
+  if (depth >= kMaxDictDepth) {
+    throw Error("E32", "\"" + path + "\" is nested deeper than this writer "
+                                      "will walk");
+  }
   auto scale_chunk = [chunks](const std::string& p) {
     std::vector<hsize_t> out;
     if (chunks == nullptr) return out;
@@ -206,7 +222,7 @@ void write_dict_group(File& f, const std::string& path, const Dict& d,
       }
       case Value::Kind::Dict:
         f.make_group(child);
-        write_dict_group(f, child, v.as_dict(), chunks);
+        write_dict_group(f, child, v.as_dict(), chunks, depth + 1);
         break;
     }
   }

@@ -396,13 +396,15 @@ Dataset read_impl(const std::string& path, bool with_data) {
   // is 1.  A file that stores one another way is recorded here so
   // that a round trip reproduces it rather than silently restoring
   // the default.
-  std::function<void(const std::string&)> note_scales =
-      [&](const std::string& group) {
+  std::function<void(const std::string&, int)> note_scales =
+      [&](const std::string& group, int depth) {
+        if (depth > internal::kMaxGroupDepth) return;
         for (const Member& m : f.members(group)) {
+          if (m.kind != internal::LinkKind::Hard) continue;
           const std::string p =
               (group == "/" ? std::string("/") : group + "/") + m.name;
           if (m.is_group) {
-            note_scales(p);
+            note_scales(p, depth + 1);
             continue;
           }
           if (!m.is_dataset) continue;
@@ -421,7 +423,7 @@ Dataset read_impl(const std::string& path, bool with_data) {
           }
         }
       };
-  note_scales("/");
+  note_scales("/", 0);
 
   // The support order is the group names sorted by their UTF-8 bytes
   // (section 22); HDF5 link order is not it.

@@ -10,6 +10,19 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(MESTRA_BUILD_TESTS "Build the mestra test suite" ON)
+# A file is untrusted input, so the suite is meant to be run under the
+# sanitizers from time to time as well as plain.
+option(MESTRA_SANITIZE "Build with the address and undefined sanitizers" OFF)
+
+set(MESTRA_WARNINGS -Wall -Wextra -Wpedantic -Wshadow -Wconversion
+                    -Wsign-conversion)
+set(MESTRA_SANITIZER_FLAGS "")
+if(MESTRA_SANITIZE)
+  set(MESTRA_SANITIZER_FLAGS
+      -fsanitize=address,undefined -fno-omit-frame-pointer
+      -fno-sanitize-recover=undefined)
+  add_link_options(-fsanitize=address,undefined)
+endif()
 
 find_package(HDF5 REQUIRED COMPONENTS C HL)
 
@@ -51,14 +64,12 @@ endif()
 # callable and the corpus compares float64 results bit for bit, so no
 # multiply and add may be fused into a single rounding step.
 target_compile_options(mestra PRIVATE
-  -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion
-  -ffp-contract=off)
+  ${MESTRA_WARNINGS} -ffp-contract=off ${MESTRA_SANITIZER_FLAGS})
 
 add_executable(mestra-cli tools/mestra_cli.cpp)
 target_link_libraries(mestra-cli PRIVATE mestra)
 target_compile_options(mestra-cli PRIVATE
-  -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion
-  -ffp-contract=off)
+  ${MESTRA_WARNINGS} -ffp-contract=off ${MESTRA_SANITIZER_FLAGS})
 
 if(MESTRA_BUILD_TESTS)
   enable_testing()
@@ -68,8 +79,7 @@ if(MESTRA_BUILD_TESTS)
   target_include_directories(mestra-unit PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_compile_options(mestra-unit PRIVATE
-    -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion
-    -ffp-contract=off)
+    ${MESTRA_WARNINGS} -ffp-contract=off ${MESTRA_SANITIZER_FLAGS})
   add_test(NAME unit COMMAND mestra-unit)
 
   find_package(Python3 COMPONENTS Interpreter)

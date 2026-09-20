@@ -17,7 +17,9 @@ int usage() {
   std::cout <<
       "mestra-cli COMMAND ARGUMENTS\n"
       "\n"
-      "  validate FILE                    rule ids, one per line\n"
+      "  validate FILE                    rule ids, one per line;\n"
+      "                                   \"! path: why\" for a fault no\n"
+      "                                   rule of section 14 covers\n"
       "  info FILE                        what the file holds\n"
       "  probe FILE SLOT ROW NODE COMPONENT [DRAW]\n"
       "                                   one stored value\n"
@@ -77,10 +79,12 @@ int cmd_validate(const std::string& path) {
     std::cout << "W " << id << "\n";
   }
   // A failure no rule of section 14 covers still has to be said out
-  // loud rather than leaving the file looking clean.
+  // loud rather than leaving the file looking clean.  It is printed
+  // as "! " so that a caller reading rule identifiers off the "E "
+  // and "W " lines is not confused by one.
   for (const mestra::Finding& f : r.errors) {
     if (f.id.empty()) {
-      std::cerr << "mestra-cli: " << f.where << ": " << f.message << "\n";
+      std::cout << "! " << f.where << ": " << f.message << "\n";
     }
   }
   // Exit 1 when the file is rejected, so that a shell can tell.

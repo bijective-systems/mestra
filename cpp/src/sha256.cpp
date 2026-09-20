@@ -2,6 +2,8 @@
 
 #include <cstring>
 
+#include "mestra/io.hpp"
+
 namespace mestra {
 namespace {
 
@@ -82,6 +84,9 @@ void Sha256::block(const std::uint8_t* p) {
 }
 
 void Sha256::update(const void* data, std::size_t length) {
+  if (!digest_.empty()) {
+    throw Error("", "this SHA-256 has been finished and cannot be added to");
+  }
   const std::uint8_t* p = static_cast<const std::uint8_t*>(data);
   total_bits_ += static_cast<std::uint64_t>(length) * 8u;
   while (length > 0) {
@@ -99,6 +104,10 @@ void Sha256::update(const void* data, std::size_t length) {
 }
 
 std::string Sha256::hex() {
+  // Idempotent: the padding is hashed once and the digest kept, so a
+  // second call answers with the same 64 characters instead of
+  // padding the padding.
+  if (!digest_.empty()) return digest_;
   // The padded tail is at most 63 + 1 + 55 + 8 = 127 bytes.
   const std::uint64_t bits = total_bits_;
   std::uint8_t tail[128];
@@ -124,6 +133,7 @@ std::string Sha256::hex() {
       out.push_back(digits[byte & 0x0fu]);
     }
   }
+  digest_ = out;
   return out;
 }
 
