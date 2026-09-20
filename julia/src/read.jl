@@ -121,11 +121,14 @@ With `lazy = false` every stored array is read at once.
 A strict read, which is the default, refuses a file that breaks one of
 the structural rules of `docs/api-conventions.md` section 2 --
 `Mestra.STRUCTURAL_RULES`, which is E01, E16, E19, E25, E26, E29, E30,
-E40 and E41 -- with a `MestraError` naming the first it finds.  Those
-are what a file is made of rather than what it means, so deciding them
-costs attributes, dataspaces, link types and dimension scales and not
-one array element: a strict read still opens a file that declares a
-trillion numbers it does not hold.
+E40 and E41 -- with a `MestraError` carrying the first it found and
+naming every other one in its message.  Those are what a file is made
+of rather than what it means, so deciding them costs attributes,
+dataspaces, link types, dimension-scale structure and the file's
+category tables, and not one array element: a strict read still opens
+a file that declares a trillion numbers it does not hold.  A slot is
+never read to decide them, so this read and `lazy = false` refuse the
+same file with the same rule (`docs/api-conventions.md` section 7).
 
 A semantic fault never stops a read, strict or not: a missing unit, a
 bad split, a support id that does not match its cells are all things a
