@@ -186,6 +186,11 @@ ArraySlot& compute_weights(Support& s, Location where,
            "computed from coordinates and connectivity");
   }
   const ArraySlot& xyz = *s.coordinates;
+  if (xyz.is_callable() || xyz.data.f64.empty()) {
+    refuse(path,
+           "the support's coordinates hold no values, and a measure is "
+           "computed from coordinates and connectivity");
+  }
   const std::int64_t components = xyz.components;
   const std::size_t nodes = static_cast<std::size_t>(s.n_nodes);
   const std::size_t cells = static_cast<std::size_t>(s.n_cells);
@@ -249,10 +254,20 @@ ArraySlot& compute_weights(Support& s, Location where,
     if (s.kind == "axis") {
       // No cells: the node's share is half of each segment it touches,
       // which is the trapezoid rule and the lumped measure of a line.
+      // An axis support's coordinates have one component (section 6),
+      // but the stride is taken from the slot rather than assumed.
+      const std::size_t stride =
+          components < 1 ? 1 : static_cast<std::size_t>(components);
+      auto position = [&block, stride](std::size_t n) {
+        const std::size_t at = n * stride;
+        return at < block.size() ? block[at] : 0.0;
+      };
       for (std::size_t n = 0; n < nodes; ++n) {
         double w = 0.0;
-        if (n + 1 < nodes) w += 0.5 * std::fabs(block[n + 1] - block[n]);
-        if (n > 0) w += 0.5 * std::fabs(block[n] - block[n - 1]);
+        if (n + 1 < nodes) {
+          w += 0.5 * std::fabs(position(n + 1) - position(n));
+        }
+        if (n > 0) w += 0.5 * std::fabs(position(n) - position(n - 1));
         out[n] = w;
       }
       continue;
