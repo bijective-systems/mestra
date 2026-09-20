@@ -247,7 +247,20 @@ is how a test makes a file to be refused.
 Everything a file said about its own layout survives being read and
 written again: a chunk shape that is not the default, a compression
 filter, a string column wider than its longest entry, an attribute
-this version does not know, and a group it must not interpret.
+this version does not know, and a group it must not interpret, with
+its own dimension scales and the attachments between them.
+
+Every dimension scale is created with attribute creation order
+tracked and indexed and with object time tracking off, which is the
+one place in this format where a property list rather than a byte
+position decides something (section 21). It is what lets a scale
+carry more than 4085 attachments: without it the 4086th fails after
+deleting the REFERENCE_LIST it was extending, and leaves a file
+every reader and every validator still accepts. `cases/wide_keys`,
+4200 row-dimensioned datasets on one `row` scale, is the corpus
+case that could not be written at all before the rule. Nothing else
+about the file changes: the library version bounds stay at the
+default for every object.
 
 
 Callables
@@ -465,6 +478,20 @@ trajectory - is reported once with the count and the first three:
         3's words are converged, failed, partial, and a row that is
         not converged is left out of modelling unless it is asked for
 
+Two rules are about how an object was made rather than about what it
+now says, and both are new in the third reconciliation. **E42** is a
+dimension scale created without attribute creation order tracked and
+indexed, read back from the file's own dataset creation property
+list: such a scale takes at most 4085 attachments and the 4086th
+destroys its REFERENCE_LIST on the way to failing, so the file is
+correct until it is wide. **E43** is an unlimited dimension other
+than `row`, file-level or support-local, on a scale or on any axis
+attached to one; every other dimension carries its length in its
+name, so one that grows makes its own name false. The one exception
+is the zero-length axis of a dataset inside a callable's dictionary,
+which section 25 requires to be unlimited. Neither is visible in a
+dataset that is only in memory, because both are byte-level rules.
+
 `mestra.validate` also takes a dataset that is already in memory. It
 then checks everything except the byte-level rules, which are about a
 file and not about a dataset. It reads the key and scalar columns, so
@@ -551,7 +578,10 @@ What it refuses, and what it says:
     the size case for an eager read;
   - it reads filters from the file's own creation property list, so
     a filter with more client-data values than a library expects, or
-    an identifier no library has, is E29 and not silence;
+    an identifier no library has, is E29 and not silence, and it
+    reads a dimension scale's creation order from the same list, so
+    a scale that cannot carry more than 4085 attachments is E42 and
+    not a file that fails when somebody widens it;
   - an attribute stored as an array where the format has a scalar,
     or a string that is not UTF-8, is a rule (E19, E26) and the file
     still reads;
@@ -593,9 +623,20 @@ raise them.
 `vectors/hostile` is the shared subset of section 30, fifteen files
 with a looser contract: at least the required ids, inside ten
 seconds, with every entry point refusing rather than returning.
-Generate its two deep files first, as vectors/README.md says:
 
-    python vectors/generate.py --hostile-deep
+Three golden files are too large to commit and are generated on
+demand instead: `cases/wide_keys` at 16 MB and the two deep hostile
+files at 31 MB each. Write all three before running the suite, as
+vectors/README.md says:
+
+    python vectors/generate.py --wide --hostile-deep
+
+The flags are separate because they are separate costs, and either
+may be given alone. Every test that wants one of the three skips
+with the flag that writes it when it is missing, so a suite run
+without them is honest rather than red. Do not run the generator
+while a test run is reading vectors/: it rewrites every committed
+case as well.
 
 `python/tests/hostile/` holds this package's own files as well, and
 the script that made them. Each is driven in a subprocess with a
@@ -610,14 +651,20 @@ Tests
 
     python -m pytest python/tests
 
-The suite runs the whole conformance corpus: the validator's
-outcomes by rule identifier for every case, every probe compared bit
-for bit, every support id, every codec round trip, every worked
-evaluation, a read-write-compare of every valid case under the
-structural equality rule, and an open of everything this package
-writes with a netCDF-4 reader. Plus the builder, the weights against
-shapes whose measure is known by hand, the post-processing, the
-validator's own output shape, the command line and the units parser.
+The suite runs the whole conformance corpus, seventy-five cases of
+which thirty-three are valid files: the validator's outcomes by rule
+identifier for every case, every probe compared bit for bit, every
+support id, every codec round trip, every worked evaluation, a
+read-write-compare of every valid case under the structural equality
+rule, and an open of everything this package writes with a netCDF-4
+reader. Plus the builder, the weights against shapes whose measure
+is known by hand, the post-processing, the validator's own output
+shape, the command line and the units parser.
+
+`tests/test_open_cost.py` is the cost of an open, which section 29
+puts a requirement on: an absolute bar at a thousand key columns and
+at `wide_keys`'s 4200 datasets, and the ratio between them, which is
+the statement that does not care how busy the machine is.
 
     ruff check python
     mypy --config-file python/pyproject.toml
