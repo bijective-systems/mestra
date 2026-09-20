@@ -398,24 +398,38 @@ Dataset read_impl(const std::string& path, bool with_data) {
     d.callables.push_back(std::move(c));
   }
 
-  // Dimension scale storage.  Sections 21 and 23 make a scale
-  // contiguous unless it is unlimited, in which case its chunk length
-  // is 1.  A file that stores one another way is recorded here so
-  // that a round trip reproduces it rather than silently restoring
-  // the default.
-  std::function<void(const std::string&, int)> note_scales =
+  // What the file chose about its own storage, for the objects whose
+  // choice is not decided elsewhere: a dimension scale's chunk, and
+  // every dataset's filters.
+  //
+  // Sections 21 and 23 make a scale contiguous unless it is
+  // unlimited, in which case its chunk length is 1.  A file that
+  // stores one another way is recorded so that a round trip
+  // reproduces it rather than silently restoring the default.
+  //
+  // Filters are recorded for every dataset, because section 23 leaves
+  // compression to the writer and a round trip that dropped gzip
+  // would grow a real dataset by a sixth.  The chunk of a data
+  // dataset is recorded by note_chunk beside the slot it belongs to;
+  // one walk decides the two things that walk can see.  /private is
+  // copied whole and is never rewritten object by object, so it is
+  // not walked here.
+  std::function<void(const std::string&, int)> note_storage =
       [&](const std::string& group, int depth) {
         if (depth > internal::kMaxGroupDepth) return;
         for (const Member& m : f.members(group)) {
           if (m.kind != internal::LinkKind::Hard) continue;
           const std::string p =
               (group == "/" ? std::string("/") : group + "/") + m.name;
+          if (p == "/private") continue;
           if (m.is_group) {
-            note_scales(p, depth + 1);
+            note_storage(p, depth + 1);
             continue;
           }
           if (!m.is_dataset) continue;
           const DsetInfo info = f.dataset_info(p);
+          const FilterPipeline pipeline = internal::pipeline_of(info);
+          if (!pipeline.empty()) d.filters[p] = pipeline;
           if (!info.is_scale || info.shape.empty()) continue;
           const bool unlimited =
               !info.maxshape.empty() && info.maxshape[0] == H5S_UNLIMITED;
@@ -432,7 +446,7 @@ Dataset read_impl(const std::string& path, bool with_data) {
           }
         }
       };
-  note_scales("/", 0);
+  note_storage("/", 0);
 
   // The support order is the group names sorted by their UTF-8 bytes
   // (section 22); HDF5 link order is not it.

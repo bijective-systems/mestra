@@ -112,6 +112,11 @@ struct DsetInfo {
   // Filters, as (id, parameters).  gzip is H5Z_FILTER_DEFLATE and
   // shuffle is H5Z_FILTER_SHUFFLE.
   std::vector<std::pair<int, std::vector<unsigned>>> filters;
+  // The creation-order properties of section 21, read back off the
+  // dataset creation property list.  A dimension scale must have both
+  // (E42); no other object in this format says anything about them.
+  bool attr_order_tracked = false;
+  bool attr_order_indexed = false;
   bool is_scale = false;                   // CLASS = DIMENSION_SCALE
   // For each axis, the link names of the dimension scales attached.
   std::vector<std::vector<std::string>> scales;
@@ -196,22 +201,27 @@ class File {
 
   // `maxshape` empty means the same as `shape`; `chunk` empty means
   // contiguous.  Every dataset is written with object time tracking
-  // off (section 30).
+  // off (section 30).  `filters` is the pipeline of section 23, in
+  // order; empty is no compression.  HDF5 filters a chunked dataset
+  // only, so a caller that asks for one gives a chunk as well.
   void write_f64(const std::string& path,
                  const std::vector<hsize_t>& shape,
                  const std::vector<hsize_t>& maxshape,
                  const std::vector<hsize_t>& chunk,
-                 const std::vector<double>& data);
+                 const std::vector<double>& data,
+                 const FilterPipeline& filters = {});
   void write_ints(const std::string& path, DType dtype,
                   const std::vector<hsize_t>& shape,
                   const std::vector<hsize_t>& maxshape,
                   const std::vector<hsize_t>& chunk,
-                  const std::vector<std::int64_t>& data);
+                  const std::vector<std::int64_t>& data,
+                  const FilterPipeline& filters = {});
   void write_strings(const std::string& path, std::size_t item_size,
                      const std::vector<hsize_t>& shape,
                      const std::vector<hsize_t>& maxshape,
                      const std::vector<hsize_t>& chunk,
-                     const std::vector<std::string>& data);
+                     const std::vector<std::string>& data,
+                     const FilterPipeline& filters = {});
 
   // A dimension scale written as netCDF-C writes one (section 21).
   // `chunk` empty means the rule of sections 21 and 23: chunk length 1
@@ -264,6 +274,12 @@ void restore_group(File& f, const std::string& path, const OpaqueGroup& g);
 // The 53-character sentence of section 21, followed by the length in
 // ten columns.
 std::string scale_name_attribute(hsize_t length);
+
+// The filters of section 23 a dataset carries, in pipeline order.  A
+// filter this format does not allow is left out rather than carried:
+// the validator reports it (E29), a strict read refuses the file, and
+// a writer never puts one back.
+FilterPipeline pipeline_of(const DsetInfo& info);
 
 // A fixed-length UTF-8 NUL-padded string type of `size` bytes.
 Id string_type(std::size_t size);
