@@ -66,6 +66,45 @@ herr_t collect_scale(hid_t /*did*/, unsigned /*dim*/, hid_t dsid,
   return 0;
 }
 
+// One member of a group, as H5Literate2 hands it over.  The link's own
+// type is read from the link and nothing is resolved: a soft link is
+// not followed and an external link is never opened, so neither can
+// make this reader touch anything the caller did not name.
+herr_t collect_member(hid_t group, const char* name,
+                      const H5L_info2_t* linfo, void* data) {
+  std::vector<Member>* out = static_cast<std::vector<Member>*>(data);
+  Member m;
+  m.name = name == nullptr ? std::string() : std::string(name);
+  if (linfo == nullptr) {
+    m.kind = LinkKind::Missing;
+    out->push_back(m);
+    return 0;
+  }
+  switch (linfo->type) {
+    case H5L_TYPE_HARD: m.kind = LinkKind::Hard; break;
+    case H5L_TYPE_SOFT: m.kind = LinkKind::Soft; break;
+    case H5L_TYPE_EXTERNAL: m.kind = LinkKind::External; break;
+    default: m.kind = LinkKind::Other; break;
+  }
+  if (m.kind == LinkKind::Hard) {
+    H5O_info2_t oinfo;
+    if (H5Oget_info_by_name3(group, m.name.c_str(), &oinfo, H5O_INFO_BASIC,
+                             H5P_DEFAULT) >= 0) {
+      m.is_group = oinfo.type == H5O_TYPE_GROUP;
+      m.is_dataset = oinfo.type == H5O_TYPE_DATASET;
+    }
+  }
+  out->push_back(m);
+  return 0;
+}
+
+herr_t collect_attr_name(hid_t /*object*/, const char* name,
+                         const H5A_info_t* /*info*/, void* data) {
+  std::vector<std::string>* out = static_cast<std::vector<std::string>*>(data);
+  if (name != nullptr) out->push_back(name);
+  return 0;
+}
+
 AttrType type_of(hid_t type_id, hid_t space_id) {
   AttrType t;
   t.klass = H5Tget_class(type_id);
@@ -259,47 +298,18 @@ std::vector<Member> File::members(const std::string& path) const {
   if (!is_group(path)) return out;
   Id group(H5Gopen2(id_.get(), path.c_str(), H5P_DEFAULT));
   need(group.valid(), "cannot open the group \"" + path + "\"");
-  H5G_info_t info;
-  if (H5Gget_info(group.get(), &info) < 0) return out;
-  for (hsize_t i = 0; i < info.nlinks; ++i) {
-    const ssize_t n = H5Lget_name_by_idx(group.get(), ".", H5_INDEX_NAME,
-                                         H5_ITER_INC, i, nullptr, 0,
-                                         H5P_DEFAULT);
-    if (n <= 0) continue;
-    std::string name(static_cast<std::size_t>(n) + 1, '\0');
-    if (H5Lget_name_by_idx(group.get(), ".", H5_INDEX_NAME, H5_ITER_INC, i,
-                           &name[0], name.size(), H5P_DEFAULT) < 0) {
-      continue;
-    }
-    name.resize(static_cast<std::size_t>(n));
-    Member m;
-    m.name = name;
-    // The link's own type first: a soft link is not resolved and an
-    // external link is not opened, so neither can make this reader
-    // touch anything the caller did not name.
-    H5L_info2_t linfo;
-    if (H5Lget_info_by_idx2(group.get(), ".", H5_INDEX_NAME, H5_ITER_INC, i,
-                            &linfo, H5P_DEFAULT) < 0) {
-      m.kind = LinkKind::Missing;
-      out.push_back(m);
-      continue;
-    }
-    switch (linfo.type) {
-      case H5L_TYPE_HARD: m.kind = LinkKind::Hard; break;
-      case H5L_TYPE_SOFT: m.kind = LinkKind::Soft; break;
-      case H5L_TYPE_EXTERNAL: m.kind = LinkKind::External; break;
-      default: m.kind = LinkKind::Other; break;
-    }
-    if (m.kind == LinkKind::Hard) {
-      H5O_info2_t oinfo;
-      if (H5Oget_info_by_name3(group.get(), m.name.c_str(), &oinfo,
-                               H5O_INFO_BASIC, H5P_DEFAULT) >= 0) {
-        m.is_group = oinfo.type == H5O_TYPE_GROUP;
-        m.is_dataset = oinfo.type == H5O_TYPE_DATASET;
-      }
-    }
-    out.push_back(m);
-  }
+  // One iteration over the links rather than one lookup per index.
+  // Asking for the i-th link by index makes HDF5 order the group's
+  // links, and a group whose links are in the newer dense storage --
+  // which is what a writer using the newer object header layout
+  // leaves behind -- is ordered by building the whole table again for
+  // every index.  That is linear work per member and quadratic per
+  // group, and it is what made a file written that way cost the
+  // square of its column count to read.  H5Literate2 orders the group
+  // once and hands back every link, which is linear in both layouts.
+  hsize_t at = 0;
+  H5Literate2(group.get(), H5_INDEX_NAME, H5_ITER_INC, &at, collect_member,
+              &out);
   return out;
 }
 
@@ -307,19 +317,18 @@ std::vector<RawAttr> File::attributes(const std::string& path) const {
   std::vector<RawAttr> out;
   if (link_kind(path) != LinkKind::Hard) return out;
   Id object = open_object(id_.get(), path);
-  H5O_info2_t oinfo;
-  if (H5Oget_info3(object.get(), &oinfo, H5O_INFO_NUM_ATTRS) < 0) return out;
-  for (hsize_t i = 0; i < oinfo.num_attrs; ++i) {
-    Id attr(H5Aopen_by_idx(object.get(), ".", H5_INDEX_NAME, H5_ITER_INC, i,
-                           H5P_DEFAULT, H5P_DEFAULT));
+  // The names in one ordered pass, and then each attribute by name.
+  // Opening the i-th attribute makes HDF5 order the object's
+  // attributes again for every index, which is quadratic on an object
+  // carrying many of them in the newer layout's dense storage; this is
+  // the same trap as File::members and the same way out of it.
+  std::vector<std::string> names;
+  hsize_t at = 0;
+  H5Aiterate2(object.get(), H5_INDEX_NAME, H5_ITER_INC, &at, collect_attr_name,
+              &names);
+  for (const std::string& attr_name : names) {
+    Id attr(H5Aopen(object.get(), attr_name.c_str(), H5P_DEFAULT));
     if (!attr.valid()) continue;
-    const ssize_t len = H5Aget_name(attr.get(), 0, nullptr);
-    if (len <= 0) continue;
-    std::string attr_name(static_cast<std::size_t>(len) + 1, '\0');
-    if (H5Aget_name(attr.get(), attr_name.size(), &attr_name[0]) < 0) {
-      continue;
-    }
-    attr_name.resize(static_cast<std::size_t>(len));
     RawAttr a;
     a.name = attr_name;
     Id type(H5Aget_type(attr.get()));
