@@ -25,16 +25,16 @@ function out = validate(path)
 %
 %   A file is untrusted input, so the pass is per object: an object
 %   that will not open or will not read stops that object and nothing
-%   else, and leaves an unclassified finding with its path.  Those
-%   findings are in OUT.UNCLASSIFIED and never in OUT.ERRORS or
-%   OUT.WARNINGS, so they cannot be mistaken for a rule of section 14.
-%   Their identifiers are
+%   else, and the pass carries on to the end of the file.  Two rules
+%   of section 14 cover what is found that way:
 %
-%       U01   an object this reader could not read
-%       U02   a link this reader does not follow: soft, external or
-%             dangling.  Section 13 gives the format no links, and an
-%             external link names another file, which is never opened
-%       U03   a limit of this reader was reached; see mestra.limits
+%       E40   a link in the public tree that is not a hard link: a
+%             soft link, whether it resolves, dangles or loops, or an
+%             external link.  It is reported and never followed
+%       E41   an object the reader could not read, with its path: a
+%             malformed header or attribute, nesting deeper than the
+%             cap of mestra.limits, or a dataset above the stated
+%             maximum element count
 %
 %   A file that is not HDF5 at all, or that is truncated, raises
 %   mestra:reader rather than a library error.
@@ -60,6 +60,9 @@ function out = validate(path)
     ctx.rep = rep;
     ctx.fid = fid;
     ctx.root = root;
+    % Section 21, decision 51: scale names come from a map built by a
+    % bounded walk of our own and never from a path lookup.
+    ctx.scales = mestra.internal.H5.scaleMap(fid);
 
     if ~checkFormat(ctx)
         out = rep.result();
@@ -85,8 +88,8 @@ end
 
 function out = guard(ctx, path, fn, fallback)
 %guard  Run one check; a failure is a finding and not the end.
-%   A limit of this reader is U03, anything else is U01.  Both carry
-%   the path, so a caller knows which object was passed over.
+%   Whatever went wrong, the object is E41 and carries its path, so a
+%   caller knows which one was passed over and the pass continues.
     if nargin < 4, fallback = []; end
     try
         if nargout > 0
@@ -97,33 +100,28 @@ function out = guard(ctx, path, fn, fallback)
         end
     catch err
         out = fallback;
-        if strcmp(err.identifier, 'mestra:reader') && ...
-           ~isempty(strfind(err.message, 'this reader')) %#ok<STREMP>
-            id = 'U03';
-        else
-            id = 'U01';
-        end
-        ctx.rep.add(id, path, '%s', ...
+        ctx.rep.add('E41', path, '%s', ...
                     regexprep(strtrim(err.message), '\s+', ' '));
     end
 end
 
 function tf = followable(ctx, gid, name, path)
-%followable  True for a hard link; anything else is U02 and skipped.
+%followable  True for a hard link; anything else is E40 or E41.
     kind = mestra.internal.H5.childType(gid, name);
     tf = any(strcmp(kind, {'group', 'dataset', 'other'}));
     if ~tf
         switch kind
             case 'soft'
-                why = ['a soft link, which this format does not define ' ...
-                       'and this reader does not follow'];
+                ctx.rep.add('E40', path, ...
+                    ['a soft link, which this format does not define ' ...
+                     'and this reader does not follow']);
             case 'external'
-                why = ['an external link, which names another file; ' ...
-                       'this reader never opens one'];
+                ctx.rep.add('E40', path, ...
+                    ['an external link, which names another file; ' ...
+                     'this reader never opens one']);
             otherwise
-                why = 'an object that would not open';
+                ctx.rep.add('E41', path, 'an object that would not open');
         end
-        ctx.rep.add('U02', path, '%s', why);
     end
 end
 
@@ -362,6 +360,8 @@ function checkCategories(ctx)
         if ~followable(ctx, g, name{1}, path), continue, end
         if ~strcmp(H5.childType(g, name{1}), 'dataset')
             ctx.rep.add('E20', path, 'a category table must be a dataset');
+            ctx.rep.add('E41', path, ...
+                'a category table that is not a dataset cannot be read');
             continue
         end
         guard(ctx, path, @() checkOneCategory(ctx, g, name{1}, path));
@@ -385,20 +385,41 @@ end
 
 function checkStringDataset(ctx, did, info, path)
 %checkStringDataset  E26 and W13 over the stored bytes.
-%   A string whose bytes MATLAB will not hand over is an unclassified
-%   finding and not a guess: MATLAB's HDF5 interface decodes a
-%   fixed-length string to text before this package sees it, so a
-%   file that is not ASCII cannot be told from one that is not valid
-%   UTF-8 at all, and saying E26 either way would be a fabrication.
+%   MATLAB's HDF5 interface decodes a fixed-length string to text
+%   before this package sees it, so the stored bytes are not always
+%   recoverable.  What can still be decided, and how:
+%
+%     the characters came back one per stored byte  everything is
+%       decidable: the UTF-8 check and the NUL check run on the real
+%       bytes and E26 means what it says;
+%     the count is right and characters above 255 came back  MATLAB
+%       substituted one replacement character per byte it could not
+%       decode, so the bytes were not valid UTF-8: that is E26;
+%     the count changed  MATLAB decoded valid multi-byte UTF-8 and the
+%       bytes are gone. Nothing about them is decidable, so this is
+%       E41 and not a guess at E26.
     H5 = mestra.internal.H5;
     try
-        raw = H5.readRawStrings(did, info);
+        out = H5.decodeStrings(did, info);
     catch err
-        ctx.rep.add('U01', path, ...
-            'the strings could not be read as bytes: %s', ...
+        ctx.rep.add('E41', path, ...
+            'the strings could not be read: %s', ...
             regexprep(strtrim(err.message), '\s+', ' '));
         return
     end
+    switch out.verdict
+        case 'replaced'
+            ctx.rep.add('E26', path, ...
+                ['a stored byte is not valid UTF-8; this binding ' ...
+                 'returned a replacement character for it']);
+            return
+        case 'decoded'
+            ctx.rep.add('E41', path, ...
+                ['this binding decoded the strings to text, so the ' ...
+                 'stored bytes cannot be checked']);
+            return
+    end
+    raw = out.bytes;
     longest = 0;
     for i = 1:size(raw, 2)
         [ok, why] = mestra.internal.Text.checkStringBytes(raw(:, i)');
@@ -432,6 +453,8 @@ function checkKeys(ctx)
         if ~followable(ctx, g, name{1}, path), continue, end
         if ~strcmp(H5.childType(g, name{1}), 'dataset')
             rep.add('E39', path, 'a key must be a dataset');
+            rep.add('E41', path, ...
+                'a key that is not a dataset cannot be read as one');
             continue
         end
         role = guard(ctx, path, @() checkOneKey(ctx, g, name{1}, path), '');
@@ -493,6 +516,11 @@ function role = checkOneKey(ctx, g, name, path)
     end
 
     checkKeyDtype(ctx, role, info.type, path);
+    if numel(info.dims) ~= 1
+        rep.add('E16', path, ...
+            'a key has %d dimensions where it must have exactly one', ...
+            numel(info.dims));
+    end
     if ~isempty(info.dims) && info.dims(1) ~= ctx.rowCount
         rep.add('E16', path, ...
             'the key holds %d values where the file has %d rows', ...
@@ -503,7 +531,7 @@ function role = checkOneKey(ctx, g, name, path)
     try
         values = H5.readData(did, info);
     catch err
-        rep.add('U01', path, 'the values would not read: %s', ...
+        rep.add('E41', path, 'the values would not read: %s', ...
                 regexprep(strtrim(err.message), '\s+', ' '));
     end
     checkKeyValues(ctx, did, path, role, values);
@@ -556,9 +584,14 @@ function checkKeyValues(ctx, did, path, role, values)
     if outside
         rep.add('W04', path, 'a value is outside the declared bounds');
     elseif ~isempty(lower) && ~isempty(upper) && ~isempty(values)
-        observed = max(double(values)) - min(double(values));
+        finite = double(values(isfinite(double(values))));
+        if isempty(finite), return, end
+        observed = max(finite) - min(finite);
         declared = upper - lower;
-        if declared > 4 * observed
+        % Decision 36: the rule does not apply when the observed width
+        % is zero, which covers a file with no rows, a key with one
+        % distinct value, and a key with no finite value at all.
+        if observed > 0 && declared > 4 * observed
             rep.add('W08', path, ...
                 ['the declared width %g is more than four times the ' ...
                  'observed width %g'], declared, observed);
@@ -660,6 +693,7 @@ function checkOneScalar(ctx, g, name, path)
         oid = H5.openDataset(g, name);
     else
         ctx.rep.add('E39', path, 'a scalar must be a dataset or a group');
+        ctx.rep.add('E41', path, 'this scalar cannot be read');
         return
     end
     checkAttrEncodings(ctx, oid, path);
@@ -686,6 +720,11 @@ function checkOneScalar(ctx, g, name, path)
             'a scalar is stored as %s where float64 is required', ...
             info.type);
     end
+    if numel(info.dims) ~= 1
+        ctx.rep.add('E16', path, ...
+            'a scalar has %d dimensions where it must have exactly one', ...
+            numel(info.dims));
+    end
     if ~isempty(info.dims) && info.dims(1) ~= ctx.rowCount
         ctx.rep.add('E16', path, ...
             'the scalar holds %d values where the file has %d rows', ...
@@ -699,7 +738,7 @@ function checkOneScalar(ctx, g, name, path)
             ctx.rep.add('W03', path, 'a non-finite value');
         end
     catch err
-        ctx.rep.add('U01', path, 'the values would not read: %s', ...
+        ctx.rep.add('E41', path, 'the values would not read: %s', ...
                     regexprep(strtrim(err.message), '\s+', ' '));
     end
     H5D.close(oid);
@@ -749,6 +788,8 @@ function checkSupports(ctx)
         if ~followable(ctx, g, name, path), continue, end
         if ~strcmp(H5.childType(g, name), 'group')
             ctx.rep.add('E39', path, 'a support must be a group');
+            ctx.rep.add('E41', path, ...
+                'a support that is not a group cannot be read as one');
             continue
         end
         index = i - 1;
@@ -829,7 +870,7 @@ function checkOneSupport(ctx, parent, name, index)
                     'the support_id does not match the stored arrays');
             end
         catch err
-            rep.add('U01', path, ...
+            rep.add('E41', path, ...
                 'the support_id could not be computed: %s', ...
                 regexprep(strtrim(err.message), '\s+', ' '));
         end
@@ -850,6 +891,8 @@ function checkOneSupport(ctx, parent, name, index)
         groupPath = [path '/' pairs{p, 1}];
         if ~strcmp(H5.childType(sid, pairs{p, 1}), 'group')
             rep.add('E39', groupPath, '%s must be a group', pairs{p, 1});
+            rep.add('E41', groupPath, ...
+                '%s is not a group and cannot be read as one', pairs{p, 1});
             continue
         end
         ag = H5.openGroup(sid, pairs{p, 1});
@@ -954,6 +997,7 @@ function checkSlot(ctx, parent, name, path, location, nNodes, nCells, ...
         oid = H5D.open(parent, name);
     else
         rep.add('E39', path, 'a slot must be a dataset or a group');
+        rep.add('E41', path, 'this slot cannot be read');
         return
     end
     checkAttrEncodings(ctx, oid, path);
@@ -1008,7 +1052,17 @@ function checkSlot(ctx, parent, name, path, location, nNodes, nCells, ...
     info = H5.dsetInfo(oid);
     checkArrayDtype(ctx, role, info.type, path);
     checkScales(ctx, oid, info, path);
-    names = mestra.internal.Reader.axisNames(oid, numel(info.dims));
+    names = mestra.internal.Reader.axisNames(oid, numel(info.dims), ...
+                                             ctx.scales);
+
+    % ---- E04: a varies naming a group key the file does not declare
+    if numel(varies) > 6 && strncmp(varies, 'group:', 6)
+        if ~ismember(varies(7:end), ctx.groupKeys)
+            rep.add('E04', path, ...
+                ['varies names the group key "%s", which the file ' ...
+                 'does not declare'], varies(7:end));
+        end
+    end
 
     % ---- E04: the leading dimension against `varies`
     if ~any(cellfun(@isempty, names))
@@ -1072,14 +1126,14 @@ function checkSlot(ctx, parent, name, path, location, nNodes, nCells, ...
 
     if strcmp(role, 'label')
         checkLabelValues(ctx, oid, info, path);
-    elseif strcmp(role, 'field')
+    elseif any(strcmp(role, {'field', 'derived'}))
         try
             values = mestra.internal.H5.readData(oid, info);
             if isnumeric(values) && any(~isfinite(double(values(:))))
                 rep.add('W03', path, 'a non-finite value');
             end
         catch err
-            rep.add('U01', path, 'the values would not read: %s', ...
+            rep.add('E41', path, 'the values would not read: %s', ...
                     regexprep(strtrim(err.message), '\s+', ' '));
         end
     end
@@ -1132,6 +1186,8 @@ function checkCallables(ctx)
         if ~followable(ctx, g, name{1}, path), continue, end
         if ~strcmp(H5.childType(g, name{1}), 'group')
             ctx.rep.add('E15', path, 'a callable must be a group');
+            ctx.rep.add('E41', path, ...
+                'a callable that is not a group cannot be read as one');
             continue
         end
         guard(ctx, path, @() checkOneCallable(ctx, g, name{1}, path));
@@ -1148,7 +1204,7 @@ function checkOneCallable(ctx, g, name, path)
     [~, problems] = mestra.internal.Codec.read(cid, true);
     for i = 1:numel(problems)
         if numel(problems{i}) > 4 && strcmp(problems{i}(1:4), 'U03 ')
-            ctx.rep.add('U03', path, '%s', problems{i}(5:end));
+            ctx.rep.add('E41', path, '%s', problems{i}(5:end));
         else
             ctx.rep.add('E32', path, '%s', problems{i});
         end
@@ -1215,7 +1271,7 @@ function checkAttrEncodings(ctx, oid, path)
         try
             info = H5.attrInfo(oid, name{1});
         catch err
-            ctx.rep.add('U01', path, ...
+            ctx.rep.add('E41', path, ...
                 'the attribute %s would not be described: %s', name{1}, ...
                 regexprep(strtrim(err.message), '\s+', ' '));
             continue
@@ -1265,7 +1321,7 @@ function checkAttrEncodings(ctx, oid, path)
                                 name{1}, why);
                 end
             catch err
-                ctx.rep.add('U01', path, ...
+                ctx.rep.add('E41', path, ...
                     'the attribute %s could not be read as bytes: %s', ...
                     name{1}, regexprep(strtrim(err.message), '\s+', ' '));
             end
@@ -1286,20 +1342,38 @@ end
 
 function checkScales(ctx, did, info, path)
 %checkScales  E25 for every axis of a dataset.
+%   A dimension scale is not itself subject to this rule and carries
+%   no scale on its own axis (decision 33), so this is called only on
+%   the datasets the format defines.
     H5 = mestra.internal.H5;
     for axis = 1:numel(info.dims)
-        names = H5.scaleNames(did, axis - 1);
-        if isempty(names)
+        found = H5.scaleNames(did, axis - 1, ctx.scales);
+        if isempty(found)
             ctx.rep.add('E25', path, ...
                 'axis %d carries no dimension scale', axis - 1);
             continue
         end
-        if numel(names) > 1
+        if numel(found) > 1
             ctx.rep.add('E25', path, ...
-                'axis %d carries %d dimension scales', axis - 1, numel(names));
+                'axis %d carries %d dimension scales', axis - 1, ...
+                numel(found));
             continue
         end
-        why = scaleNameProblem(names{1}, info.dims(axis));
+        if isempty(found(1).name)
+            ctx.rep.add('E25', path, ...
+                ['axis %d is attached to something this reader could ' ...
+                 'not resolve to a dimension'], axis - 1);
+            continue
+        end
+        if ~found(1).hasName
+            % CLASS without NAME is half a scale: netCDF-C writes both
+            % and a reader that needs the sentence would find nothing.
+            ctx.rep.add('E25', path, ...
+                'axis %d names the scale "%s", which has no NAME attribute', ...
+                axis - 1, found(1).name);
+            continue
+        end
+        why = scaleNameProblem(found(1).name, info.dims(axis));
         if ~isempty(why)
             ctx.rep.add('E25', path, 'axis %d: %s', axis - 1, why);
         end
@@ -1353,6 +1427,13 @@ function checkChunking(ctx, did, info, path, nRows)
     rest = info.dims(2:end);
     itemsize = mestra.internal.Writer.itemSize(info.type);
     if strcmp(info.type, 'string'), itemsize = info.strSize; end
+    % Decision 35: the row count in the default is the length of the
+    % row dimension the leading axis is attached to, and not the
+    % dataset's own leading extent.
+    attached = mestra.internal.H5.scaleNames(did, 0, ctx.scales);
+    if ~isempty(attached) && attached(1).length >= 0
+        nRows = attached(1).length;
+    end
     c = mestra.internal.Writer.rowChunk(itemsize, rest, nRows);
     want = [c rest];
     if numel(want) ~= numel(info.chunk) || any(want ~= info.chunk)
@@ -1393,17 +1474,20 @@ function checkUnknown(ctx)
 end
 
 function checkPrivate(ctx)
-%checkPrivate  E18, as far as a validator may see it.
-%   Section 18 makes E18 a rule for a writer, and section 29 forbids a
-%   reader to interpret /private.  What a validator can see is a
-%   public attribute that should be there and is not, in a file that
-%   also carries a private group; that is the only decidable reading,
-%   and it is the one the corpus case err_e18 is built on.
+%checkPrivate  E18, as decision 32 makes it decidable.
+%   A required public attribute or object absent, by any of E02, E11,
+%   E13, E15, E17, E31 or E39, in a file that also carries a
+%   `/private` group.  It is reported beside that rule and never by
+%   interpreting `/private`, which section 29 forbids.
     if ~mestra.internal.H5.exists(ctx.fid, '/private'), return, end
-    if ctx.rep.has('E39')
-        ctx.rep.add('E18', '/private', ...
-            ['a required public attribute is missing from a file that ' ...
-             'carries a private group']);
+    triggers = {'E02', 'E11', 'E13', 'E15', 'E17', 'E31', 'E39'};
+    for i = 1:numel(triggers)
+        if ctx.rep.has(triggers{i})
+            ctx.rep.add('E18', '/private', ...
+                ['%s found a required public thing missing in a file ' ...
+                 'that also carries a private group'], triggers{i});
+            return
+        end
     end
 end
 

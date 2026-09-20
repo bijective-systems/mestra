@@ -144,10 +144,12 @@ classdef CorpusTest < matlab.unittest.TestCase
             file = CorpusTest.caseFile(caseName);
             fid = H5F.open(file, 'H5F_ACC_RDONLY', 'H5P_DEFAULT');
             closer = onCleanup(@() H5F.close(fid)); %#ok<NASGU>
+            map = mestra.internal.H5.scaleMap(fid);
             g = H5G.open(fid, '/supports');
             for i = 1:numel(names)
                 name = names{i};
-                record = mestra.internal.Reader.readSupport(g, name, true);
+                record = mestra.internal.Reader.readSupport(g, name, true, ...
+                                                            map);
                 got = mestra.supportId(record);
                 testCase.verifyEqual(got, e.support_ids.(name), ...
                     sprintf('%s: the support id of %s', caseName, name));

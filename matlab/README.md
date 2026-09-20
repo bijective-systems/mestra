@@ -221,52 +221,85 @@ The reader assumes nothing about a file it did not write. Its shapes,
 its nesting, its links and its string sizes are numbers someone else
 chose, and a reader that follows them wherever they lead can be made
 to exhaust memory or run forever on a file of fifteen kilobytes.
+Specification section 29 makes that a requirement on readers, and
+section 14 gives it two rules of its own:
 
-What the reader refuses:
+    E40   a link in the public tree that is not a hard link: a soft
+          link, whether it resolves, dangles or loops, or an external
+          link, which names another file. None is ever followed
+    E41   an object the reader could not read, reported with its
+          path: a malformed header or attribute, nesting deeper than
+          the cap, or, on an eager read only, a dataset above the
+          maximum element count
 
-  * any link but a hard link. A soft link is not resolved, a dangling
-    one is not an error, a cycle of them cannot start, and an external
-    link never opens the file it names. Each one is reported;
-  * an attribute this format names whose dataspace is not scalar. An
-    array where a number belongs is E19, and its value is not used;
+What the reader refuses, and under which rule:
+
+  * any link but a hard link, E40. A soft link is not resolved, a
+    dangling one is not an error, a cycle of them cannot start, and
+    an external link never opens the file it names;
+  * an attribute this format names whose dataspace is not scalar,
+    E19. An array where a number belongs is not used;
   * nesting past `maxDepth` levels, and a group already visited in
-    this walk, which is how a cycle of hard links ends;
-  * a read of more than `maxElements`, whether that is a whole dataset
-    or one row range, and a fixed-length string wider than
-    `maxStringSize`. `mestra.limits` reads and changes all four, so a
-    genuinely large file is a decision you make and not a crash you
-    get;
-  * a member of the wrong kind: a key that is a group, a support that
-    is a dataset, a callable that is not a group.
+    this walk, which is how a cycle of hard links ends: E41;
+  * an eager read of more than `maxElements`, E41. A lazy read and a
+    row-range read are not subject to it, so `mestra.open` and
+    `readRows` still work on a file `mestra.read` refuses; a
+    fixed-length string wider than `maxStringSize` is E41 too;
+  * a filter that is not gzip or shuffle, E29, which section 23 tells
+    a reader to refuse;
+  * an axis with no dimension scale, more than one, or one this
+    reader cannot name, E25;
+  * a string whose stored bytes are not valid UTF-8, E26;
+  * a member of the wrong kind, E41: a key that is a group, a support
+    that is a dataset, a callable that is not a group.
 
-`mestra.read`, `mestra.open` and `readRows` raise `mestra:E01` or
-`mestra:reader`, and nothing else; a library message becomes the
-sentence of one of those. Every dataset carries `skipped`, one line
-for everything the reader passed over, empty for a conforming file.
+`mestra.limits` reads and changes the four numbers, so a genuinely
+large or deeply nested file is a decision you make and not a crash
+you get.
+
+By default `mestra.read` and `mestra.open` REFUSE such a file rather
+than return it half read, and the error identifier is `mestra:`
+followed by the rule above, or `mestra:E01` for another major version
+and `mestra:reader` for a file that will not open at all:
+
+    try
+        d = mestra.read('from_somewhere_else.mes');
+    catch err
+        err.identifier      % 'mestra:E40'
+    end
+
+    d = mestra.read('from_somewhere_else.mes', 'Strict', false);
+    d.skipped               % one line per thing passed over, each
+                            % beginning with the rule it breaks
 
 `mestra.validate` always returns. Each pass and each object runs
 inside its own guard, so an object that will not read stops that
-object and the rest of the file is still checked. Such a failure
-becomes an unclassified finding with that object's path, in its own
-list:
+object and the rest of the file is still checked; the failure is E41
+with that object's path, and a link is E40.
 
-    r = mestra.validate('from_somewhere_else.mes');
-    r.errors          % rules of section 14
-    r.warnings        % rules of section 14
-    r.unclassified    % U01 unreadable, U02 a link, U03 a limit
+Dimension names are resolved through a map this package builds during
+its own bounded walk of the file, keyed by object address. Asking the
+library for the path of a scale attached to an axis, which is the
+obvious way, makes HDF5 search the group hierarchy and run off the
+stack on a deeply nested file; section 21 forbids it and nothing here
+does it.
 
-The U identifiers are this reader's own and are never mixed with the
-specification's, so a caller cannot mistake one for the other.
+Two hostile suites are run. `vectors/hostile` is the corpus's own,
+fifteen files shared by every language, whose contract is that the
+required rules must be reported within ten seconds and that reading
+must refuse rather than return. Two of its files are thirty-one
+megabytes of nested groups and are generated rather than committed:
 
-The suite under `tests/hostile/` is twenty files built to break all of
-this: array-valued attributes, filters no build can run, thirty
-thousand levels of nesting, links that dangle, loop and point
-elsewhere, members of the wrong kind, a declared shape of ten to the
-twelve elements, strings that are not valid UTF-8, a scale attached
-twice, and an object whose read fails in the middle of a group that
-must still be checked to the end. `tests/hostile/make_hostile.py`
-builds them with h5py, which can say things MATLAB's HDF5 interface
-cannot say at all.
+    python vectors/generate.py --hostile-deep
+
+Without them those two cases are skipped and say so. `tests/hostile/`
+is this package's own set of twenty, which goes further in places:
+array-valued attributes in three encodings, thirty thousand levels of
+nesting built at run time, a cycle of hard links, a declared shape of
+ten to the twelve elements, and an object whose read fails in the
+middle of a group that must still be checked to the end.
+`tests/hostile/make_hostile.py` builds them with h5py, which can say
+things MATLAB's HDF5 interface cannot say at all.
 
 
 One limitation: strings are ASCII here

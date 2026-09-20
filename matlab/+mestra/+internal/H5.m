@@ -605,34 +605,117 @@ classdef H5
             end
         end
 
-        function names = scaleNames(did, axis)
-        %scaleNames  The link names of the scales attached to one axis.
-        %   `axis` is zero based and in FILE order.  The name comes
-        %   from the link and never from the NAME attribute, which
-        %   holds the same sentence in every scale in the file
-        %   (specification section 21).
-        %   DIMENSION_LIST is read directly rather than through
-        %   H5DS.iterate_scales, which in MATLAB refuses a handle to a
-        %   function inside a package.  The attribute holds one list of
-        %   object references per axis, in file axis order, and each
-        %   reference is eight bytes.
-            names = {};
+        function map = scaleMap(fid)
+        %scaleMap  Every dimension scale in a file, by object address.
+        %   Specification section 21, decision 51.  Asking the library
+        %   for the path of a scale attached to an axis makes it search
+        %   the group hierarchy for a name that leads there, and on a
+        %   file with a deep chain of groups that search runs off the
+        %   stack and takes the process with it.  A reader must build
+        %   its own map during its own bounded walk and resolve
+        %   attached scales through that.
+        %
+        %   The key is the object's address, which is exactly what the
+        %   eight bytes of an H5R_OBJECT reference hold, so resolving a
+        %   scale needs no dereference either.  The value carries the
+        %   link name and the length, because the chunk default of
+        %   section 23 is judged against the dimension's length and not
+        %   the dataset's own extent (decision 35).
+            map = containers.Map('KeyType', 'double', 'ValueType', 'any');
+            limits = mestra.internal.Limits.get();
+            budget = limits.maxObjects;
+            pending = {'/'};
+            depths = 0;
+            while ~isempty(pending) && budget > 0
+                here = pending{1};
+                depth = depths(1);
+                pending(1) = [];
+                depths(1) = [];
+                if depth > limits.maxDepth, continue, end
+                try
+                    gid = H5G.open(fid, here);
+                catch
+                    continue
+                end
+                for name = mestra.internal.H5.children(gid)
+                    budget = budget - 1;
+                    if budget <= 0, break, end
+                    if ~strcmp(mestra.internal.H5.linkKind(gid, name{1}), ...
+                               'hard')
+                        continue    % a link this reader never follows
+                    end
+                    if strcmp(here, '/')
+                        path = ['/' name{1}];
+                    else
+                        path = [here '/' name{1}];
+                    end
+                    kind = mestra.internal.H5.childType(gid, name{1});
+                    if strcmp(kind, 'group')
+                        pending{end + 1} = path; %#ok<AGROW>
+                        depths(end + 1) = depth + 1; %#ok<AGROW>
+                    elseif strcmp(kind, 'dataset')
+                        address = mestra.internal.H5.linkAddress(gid, name{1});
+                        if isempty(address) || map.isKey(address), continue, end
+                        try
+                            did = H5D.open(gid, name{1});
+                        catch
+                            continue
+                        end
+                        try
+                            if H5DS.is_scale(did) > 0
+                                sid = H5D.get_space(did);
+                                [~, dims] = H5S.get_simple_extent_dims(sid);
+                                H5S.close(sid);
+                                length_ = 0;
+                                if ~isempty(dims)
+                                    length_ = double(dims(1));
+                                end
+                                map(address) = struct( ...
+                                    'name', name{1}, 'length', length_, ...
+                                    'hasName', ...
+                                    mestra.internal.H5.hasAttr(did, 'NAME'));
+                            end
+                        catch
+                        end
+                        H5D.close(did);
+                    end
+                end
+                H5G.close(gid);
+            end
+        end
+
+        function found = scaleNames(did, axis, map)
+        %scaleNames  The scales attached to one axis, as link names.
+        %   `axis` is zero based and in FILE order.  `map` comes from
+        %   scaleMap; without it nothing can be resolved and the axis
+        %   reads as unattached, which is E25.  The result is a struct
+        %   array with fields name, length and hasName, one per scale.
+        %
+        %   The name comes from the link and never from the NAME
+        %   attribute, which holds the same sentence in every scale in
+        %   the file, and never from a path lookup, which section 21
+        %   forbids.
+            found = struct('name', {}, 'length', {}, 'hasName', {});
+            if nargin < 3 || isempty(map), return, end
             if ~mestra.internal.H5.hasAttr(did, 'DIMENSION_LIST')
                 return
             end
-            aid = H5A.open(did, 'DIMENSION_LIST');
-            list = H5A.read(aid);
-            H5A.close(aid);
-            if ~iscell(list) || axis + 1 > numel(list)
+            try
+                aid = H5A.open(did, 'DIMENSION_LIST');
+                list = H5A.read(aid);
+                H5A.close(aid);
+            catch
                 return
             end
+            if ~iscell(list) || axis + 1 > numel(list), return, end
             refs = uint8(list{axis + 1}(:));
-            for k = 1:8:numel(refs)
-                try
-                    full = H5R.get_name(did, 'H5R_OBJECT', refs(k:k + 7));
-                    parts = strsplit(full, '/');
-                    names{end + 1} = parts{end}; %#ok<AGROW>
-                catch
+            for k = 1:8:numel(refs) - 7
+                address = double(typecast(refs(k:k + 7)', 'uint64'));
+                if map.isKey(address)
+                    found(end + 1) = map(address); %#ok<AGROW>
+                else
+                    found(end + 1) = struct('name', '', 'length', -1, ...
+                                            'hasName', false); %#ok<AGROW>
                 end
             end
         end
@@ -678,7 +761,7 @@ classdef H5
                 if strcmp(err.identifier, 'mestra:matlabAscii')
                     rethrow(err);
                 end
-                error('mestra:reader', ...
+                error('mestra:E41', ...
                       'the data would not read: %s', ...
                       regexprep(strtrim(err.message), '\s+', ' '));
             end
@@ -688,7 +771,7 @@ classdef H5
         %checkStringSize  Refuse an absurd fixed-length string width.
             limit = mestra.internal.Limits.get('maxStringSize');
             if size > limit
-                error('mestra:reader', ...
+                error('mestra:E41', ...
                       ['a fixed-length string of %d bytes an element is ' ...
                        'past the %d this reader accepts'], size, limit);
             end
@@ -711,28 +794,65 @@ classdef H5
             end
         end
 
+        function out = decodeStrings(did, info)
+        %decodeStrings  A fixed-length string dataset, and how it fared.
+        %   MATLAB decodes a fixed-length string to text before this
+        %   package sees it, so the stored bytes are not always
+        %   recoverable.  The verdict says which of three things
+        %   happened:
+        %
+        %     'bytes'     the characters came back one per stored byte,
+        %                 so out.bytes is exactly what the file holds
+        %                 and every rule about those bytes is decidable
+        %     'replaced'  the count is right but characters above 255
+        %                 came back, which is MATLAB substituting one
+        %                 replacement character per byte it could not
+        %                 decode: the bytes were not valid UTF-8
+        %     'decoded'   the count changed, so MATLAB decoded valid
+        %                 multi-byte UTF-8 and the bytes are gone
+            out.verdict = 'bytes';
+            out.bytes = zeros(info.strSize, 0, 'uint8');
+            n = prod(max(info.dims, 0));
+            mestra.internal.H5.checkStringSize(info.strSize);
+            mestra.internal.Limits.checkElements( ...
+                n * max(info.strSize, 1), 'this string dataset');
+            if n == 0, return, end
+            buf = mestra.internal.H5.guardedRead(did);
+            if iscell(buf)
+                out.bytes = zeros(info.strSize, n, 'uint8');
+                for i = 1:n
+                    b = uint8(buf{i});
+                    m = min(numel(b), info.strSize);
+                    out.bytes(1:m, i) = b(1:m)';
+                end
+                return
+            end
+            codes = double(buf(:));
+            if numel(codes) ~= info.strSize * n
+                out.verdict = 'decoded';
+                return
+            end
+            if any(codes > 255)
+                out.verdict = 'replaced';
+                return
+            end
+            out.bytes = reshape(uint8(codes), info.strSize, n);
+        end
+
         function raw = readRawStrings(did, info)
         %readRawStrings  A fixed-length string dataset as its bytes.
         %   Returns a size-by-count uint8 matrix, padding and all, so
         %   that a validator can see a NUL where it should not be.
-            n = prod(max(info.dims, 0));
-            mestra.internal.H5.checkStringSize(info.strSize);
-            mestra.internal.Limits.checkElements(n * max(info.strSize, 1), ...
-                                                 'this string dataset');
-            raw = zeros(info.strSize, n, 'uint8');
-            if n == 0, return, end
-            buf = mestra.internal.H5.guardedRead(did);
-            mestra.internal.H5.checkAsciiRead(buf, info.strSize * n, ...
-                'a fixed-length string dataset');
-            if iscell(buf)
-                for i = 1:n
-                    b = uint8(buf{i});
-                    raw(1:min(numel(b), info.strSize), i) = ...
-                        b(1:min(numel(b), info.strSize))';
-                end
-            else
-                raw = reshape(uint8(buf), info.strSize, n);
+            out = mestra.internal.H5.decodeStrings(did, info);
+            if ~strcmp(out.verdict, 'bytes')
+                error('mestra:matlabAscii', ...
+                      ['a fixed-length string dataset came back %s. ' ...
+                       'MATLAB''s HDF5 interface decodes a fixed-length ' ...
+                       'string before this package sees it, so the ' ...
+                       'stored bytes cannot always be recovered.'], ...
+                      out.verdict);
             end
+            raw = out.bytes;
         end
 
         function data = readRows(did, info, first, count)
@@ -862,7 +982,7 @@ classdef H5
 
         % --------------------------------------- whole subtree copies
 
-        function tree = captureTree(gid, depth, seen)
+        function tree = captureTree(gid, map, depth, seen)
         %captureTree  Everything under a group, kept as it stands.
         %   Used for /notes, for /private, which section 29 forbids a
         %   reader to interpret, and for any group this version does
@@ -878,8 +998,9 @@ classdef H5
         %   what it has, rather than descending until the stack gives
         %   out.
             H5 = mestra.internal.H5;
-            if nargin < 2, depth = 0; end
-            if nargin < 3, seen = []; end
+            if nargin < 2, map = []; end
+            if nargin < 3, depth = 0; end
+            if nargin < 4, seen = []; end
             tree.stopped = {};
             tree.attrs = struct('name', {}, 'type', {}, 'bytes', {}, ...
                                 'value', {});
@@ -918,7 +1039,7 @@ classdef H5
                             continue
                         end
                         sub = H5G.open(gid, name{1});
-                        subTree = H5.captureTree(sub, depth + 1, ...
+                        subTree = H5.captureTree(sub, map, depth + 1, ...
                                                  [seen address]);
                         H5G.close(sub);
                         tree.groups(end + 1) = struct('name', name{1}, ...
@@ -930,7 +1051,7 @@ classdef H5
                     case 'dataset'
                         did = H5D.open(gid, name{1});
                         try
-                            rec = H5.captureDataset(did, name{1});
+                            rec = H5.captureDataset(did, name{1}, map);
                             tree.datasets(end + 1) = rec;
                         catch err
                             tree.stopped{end + 1} = sprintf( ...
@@ -947,9 +1068,10 @@ classdef H5
             end
         end
 
-        function rec = captureDataset(did, name)
+        function rec = captureDataset(did, name, map)
         %captureDataset  One dataset of a captured subtree.
             H5 = mestra.internal.H5;
+            if nargin < 3, map = []; end
             info = H5.dsetInfo(did);
             rec.name = name;
             rec.info = info;
@@ -959,11 +1081,11 @@ classdef H5
             end
             rec.scales = cell(1, numel(info.dims));
             for axis = 1:numel(info.dims)
-                found = H5.scaleNames(did, axis - 1);
+                found = H5.scaleNames(did, axis - 1, map);
                 if isempty(found)
                     rec.scales{axis} = '';
                 else
-                    rec.scales{axis} = found{1};
+                    rec.scales{axis} = found(1).name;
                 end
             end
             rec.label = '';
