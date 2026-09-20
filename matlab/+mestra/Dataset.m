@@ -176,9 +176,14 @@ classdef Dataset < handle
         %slots  Every slot in the file, as a struct array with fields
         %   path, kind ('scalar', 'coordinates', 'node' or 'cell'),
         %   support and slot.
-            out = struct('path', {}, 'kind', {}, 'support', {}, 'slot', {});
+        %
+        %   Collected and joined once.  Appending one entry at a time
+        %   copies the whole array every time, and each entry carries
+        %   a slot record, so a file with four thousand scalars spent
+        %   longer here than it did reading them.
+            parts = {};
             for i = 1:numel(obj.scalars)
-                out(end + 1) = struct('path', ...
+                parts{end + 1} = struct('path', ...
                     ['/scalars/' obj.scalars(i).name], 'kind', 'scalar', ...
                     'support', '', 'slot', obj.scalars(i)); %#ok<AGROW>
             end
@@ -186,23 +191,25 @@ classdef Dataset < handle
                 s = obj.supports(i);
                 base = ['/supports/' s.name];
                 if ~isempty(s.coordinates)
-                    out(end + 1) = struct('path', [base '/coordinates'], ...
+                    parts{end + 1} = struct('path', [base '/coordinates'], ...
                         'kind', 'coordinates', 'support', s.name, ...
                         'slot', s.coordinates); %#ok<AGROW>
                 end
                 for j = 1:numel(s.nodeArrays)
-                    out(end + 1) = struct('path', ...
+                    parts{end + 1} = struct('path', ...
                         [base '/node_arrays/' s.nodeArrays(j).name], ...
                         'kind', 'node', 'support', s.name, ...
                         'slot', s.nodeArrays(j)); %#ok<AGROW>
                 end
                 for j = 1:numel(s.cellArrays)
-                    out(end + 1) = struct('path', ...
+                    parts{end + 1} = struct('path', ...
                         [base '/cell_arrays/' s.cellArrays(j).name], ...
                         'kind', 'cell', 'support', s.name, ...
                         'slot', s.cellArrays(j)); %#ok<AGROW>
                 end
             end
+            out = struct('path', {}, 'kind', {}, 'support', {}, 'slot', {});
+            if ~isempty(parts), out = [out parts{:}]; end
         end
 
         function t = keysTable(obj)
@@ -265,6 +272,7 @@ classdef Dataset < handle
             end
             fid = mestra.internal.Reader.openFile(obj.path);
             cleanup = onCleanup(@() H5F.close(fid));
+            closePass = mestra.internal.H5.pass(); %#ok<NASGU>
             did = mestra.Dataset.openSlot(fid, slotPath);
             closeSlot = onCleanup(@() H5D.close(did)); %#ok<NASGU>
             info = mestra.internal.H5.dsetInfo(did);

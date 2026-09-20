@@ -172,11 +172,82 @@ classdef H5
             end
         end
 
+        % --------------------------------------------------- a pass
+
+        function token = pass()
+        %pass  Begin one reading pass over one file.
+        %
+        %   Within a pass an object's attribute names are listed once
+        %   and every later question about them is answered from that
+        %   list.  A reader asks nine of those questions of each
+        %   dataset -- what it is, its role, its units, its source, its
+        %   statistic, whether it has a DIMENSION_LIST -- and listing
+        %   the names opens and closes one HDF5 identifier per
+        %   attribute, so listing nine times over is most of what an
+        %   open of a wide file costs.
+        %
+        %   The scope is the caller's, and it is what makes this safe:
+        %   nothing writes an attribute inside a read, so the list
+        %   cannot go stale while the token is alive.
+        %
+        %       closer = mestra.internal.H5.pass();  %#ok<NASGU>
+        %
+        %   The token clears the table when it goes out of scope.
+        %   Passes nest: an inner one does not clear the outer one's
+        %   table, which is what lets a read inside a validation share
+        %   it.
+            mestra.internal.H5.attrTable(+1);
+            token = onCleanup(@() mestra.internal.H5.attrTable(-1));
+        end
+
+        function table = attrTable(delta)
+        %attrTable  The pass-scoped table of attribute names, keyed by
+        %   object address, or [] outside a pass.  pass() is how a
+        %   caller opens and closes one; nothing else should call this.
+            persistent depth store
+            if isempty(depth), depth = 0; end
+            if nargin >= 1
+                if delta > 0
+                    depth = depth + 1;
+                    if depth == 1
+                        store = containers.Map('KeyType', 'double', ...
+                                               'ValueType', 'any');
+                    end
+                else
+                    depth = max(0, depth - 1);
+                    if depth == 0, store = []; end
+                end
+            end
+            table = store;
+        end
+
         % ---------------------------------------------- attributes
 
         function names = attrNames(oid)
         %attrNames  Every attribute name on an object, in name order.
+        %   Inside a pass (see pass) the answer for one object is
+        %   found once and kept.  The key is the object's address,
+        %   checked against the file number it came from, so two files
+        %   open at once cannot be confused for one another.
             info = H5O.get_info(oid);
+            table = mestra.internal.H5.attrTable();
+            % A containers.Map calls itself empty when it holds
+            % nothing, so the question here is whether there is a
+            % table at all.  A build that cannot be asked where an
+            % object is cannot have one either.
+            keeping = isa(table, 'containers.Map') && ...
+                      isfield(info, 'addr') && isfield(info, 'fileno');
+            if keeping
+                key = double(info.addr);
+                fileno = double(info.fileno);
+                if table.isKey(key)
+                    kept = table(key);
+                    if kept.fileno == fileno
+                        names = kept.names;
+                        return
+                    end
+                end
+            end
             n = double(info.num_attrs);
             names = cell(1, n);
             for i = 1:n
@@ -185,6 +256,9 @@ classdef H5
                                       'H5P_DEFAULT', 'H5P_DEFAULT');
                 names{i} = H5A.get_name(aid);
                 H5A.close(aid);
+            end
+            if keeping
+                table(key) = struct('fileno', fileno, 'names', {names});
             end
         end
 
@@ -235,16 +309,74 @@ classdef H5
                 if ~mestra.internal.H5.hasAttr(oid, name)
                     return
                 end
-                info = mestra.internal.H5.attrInfo(oid, name);
-                if ~info.scalar
-                    return
-                end
-                v = mestra.internal.H5.readAttr(oid, name);
-                ok = true;
+                [v, ok] = mestra.internal.H5.readIfScalar(oid, name);
             catch
                 v = [];
                 ok = false;
             end
+        end
+
+        function detail = attrDetail(oid, name)
+        %attrDetail  How an attribute is encoded and what it holds,
+        %   from one open of it.  The fields attrInfo gives, plus
+        %   `raw`, the value exactly as H5A.read returns it.
+        %
+        %   Asking the two questions separately opened the attribute,
+        %   its datatype and its dataspace two or three times over,
+        %   and both a reader and the validator ask both of every
+        %   attribute of every object in the file.
+        %
+        %   Nothing is read until the dataspace has been seen to be
+        %   the scalar section 18 requires, which is what keeps an
+        %   attribute declaring a large array from being materialised
+        %   by a reader that was only asking what it is (section 29).
+        %   `raw` is empty when nothing was read.
+            aid = H5A.open(oid, name);
+            closer = onCleanup(@() H5A.close(aid)); %#ok<NASGU>
+            tid = H5A.get_type(aid);
+            sid = H5A.get_space(aid);
+            detail.type = mestra.internal.H5.typeName(tid);
+            detail.size = H5T.get_size(tid);
+            detail.cset = -1;
+            detail.strpad = -1;
+            if strcmp(detail.type, 'string')
+                detail.cset = H5T.get_cset(tid);
+                detail.strpad = H5T.get_strpad(tid);
+            end
+            detail.scalar = H5S.get_simple_extent_type(sid) == ...
+                            H5ML.get_constant_value('H5S_SCALAR');
+            H5S.close(sid);
+            H5T.close(tid);
+            detail.raw = [];
+            if detail.scalar
+                detail.raw = H5A.read(aid);
+            end
+        end
+
+        function [v, ok] = readIfScalar(oid, name)
+        %readIfScalar  An attribute's value, only when its dataspace
+        %   is the scalar section 18 requires, from one open.
+            v = [];
+            ok = false;
+            detail = mestra.internal.H5.attrDetail(oid, name);
+            if ~detail.scalar, return, end
+            if any(strcmp(detail.type, {'string', 'vlstring'}))
+                mestra.internal.H5.checkAsciiRead(detail.raw, 0, ...
+                    sprintf('the attribute %s', name));
+                v = mestra.internal.H5.toText(detail.raw);
+            else
+                v = detail.raw;
+            end
+            ok = true;
+        end
+
+        function bytes = stringBytes(raw, name)
+        %stringBytes  A string attribute's stored bytes, from what
+        %   H5A.read gave back.
+            if iscell(raw), raw = raw{1}; end
+            mestra.internal.H5.checkAsciiRead(raw, 0, ...
+                sprintf('the attribute %s', name));
+            bytes = uint8(raw(:)');
         end
 
         function v = readAttr(oid, name)
@@ -328,10 +460,7 @@ classdef H5
             aid = H5A.open(oid, name);
             raw = H5A.read(aid);
             H5A.close(aid);
-            if iscell(raw), raw = raw{1}; end
-            mestra.internal.H5.checkAsciiRead(raw, 0, ...
-                sprintf('the attribute %s', name));
-            bytes = uint8(raw(:)');
+            bytes = mestra.internal.H5.stringBytes(raw, name);
         end
 
         function writeNumAttr(oid, name, value, typeName)
@@ -451,22 +580,27 @@ classdef H5
         %   A walk wants all three of those for every child, and
         %   asking them separately is three lookups per link where one
         %   H5L.get_info answers two of them.
-            out = struct('name', {}, 'kind', {}, 'address', {});
             names = mestra.internal.H5.children(gid);
-            for i = 1:numel(names)
+            n = numel(names);
+            out = struct('name', {}, 'kind', {}, 'address', {});
+            if n == 0, return, end
+            % Grown one element at a time this would copy the whole
+            % array n times, which on a group of four thousand links
+            % costs more than every HDF5 call in the loop.
+            out(n).name = '';
+            for i = 1:n
                 link = mestra.internal.H5.linkInfo(gid, names{i});
-                rec.name = names{i};
-                rec.address = link.address;
+                out(i).name = names{i};
+                out(i).address = link.address;
                 switch link.kind
                     case 'hard'
-                        rec.kind = mestra.internal.H5.objectKind(gid, ...
-                                                                 names{i});
+                        out(i).kind = mestra.internal.H5.objectKind(gid, ...
+                                                                    names{i});
                     case 'unknown'
-                        rec.kind = 'unreadable';
+                        out(i).kind = 'unreadable';
                     otherwise
-                        rec.kind = link.kind;
+                        out(i).kind = link.kind;
                 end
-                out(end + 1) = rec; %#ok<AGROW>
             end
         end
 
@@ -774,13 +908,14 @@ classdef H5
                             continue
                         end
                         try
-                            names = mestra.internal.H5.attrNames(did);
-                            % Every scale carries CLASS, so a dataset
-                            % without it is not one and needs no
-                            % further reading.  That is most of the
-                            % datasets in a wide file.
-                            if any(strcmp(names, 'CLASS')) && ...
-                               H5DS.is_scale(did) > 0
+                            % The question that settles it first, and
+                            % the reading only for the few datasets
+                            % that answer yes: most of the datasets in
+                            % a wide file are not scales, and this walk
+                            % is what a lazy read of one row range pays
+                            % before it can name the slot's axes.
+                            if H5DS.is_scale(did) > 0
+                                names = mestra.internal.H5.attrNames(did);
                                 info = mestra.internal.H5.dsetInfo(did);
                                 length_ = 0;
                                 unlimited = false;

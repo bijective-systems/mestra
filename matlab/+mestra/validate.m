@@ -53,6 +53,9 @@ function out = validate(path)
     rep = mestra.internal.Report();
     fid = mestra.internal.Reader.openFile(path);
     closeFile = onCleanup(@() H5F.close(fid)); %#ok<NASGU>
+    % One pass over one file: every object's attribute names are
+    % listed once and answered from that list afterwards.
+    closePass = mestra.internal.H5.pass(); %#ok<NASGU>
     root = H5G.open(fid, '/');
     closeRoot = onCleanup(@() H5G.close(root)); %#ok<NASGU>
 
