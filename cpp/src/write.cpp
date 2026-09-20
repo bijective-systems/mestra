@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cstdio>
 #include <map>
 #include <set>
 
@@ -7,6 +8,7 @@
 #include "layout.hpp"
 #include "mestra/io.hpp"
 #include "mestra/mestra.hpp"
+#include "mestra/validate.hpp"
 #include "names.hpp"
 
 namespace mestra {
@@ -460,13 +462,110 @@ void check_names(const Dataset& d) {
   }
 }
 
-}  // namespace
+// The one thing a caller cannot say in a Dataset and mean: a slot
+// whose `varies` or `components` disagrees with the shape it was
+// built with.  The builders derive both from `dims`, so the only way
+// to get here is to have assigned to the member afterwards and
+// expected the array to be reshaped.  It is refused before anything is
+// opened, with the rule the validator would give the file, because a
+// writable field that is read only at construction time is a trap
+// (conventions section 1).
+void check_shapes(const Dataset& d) {
+  for (const Support& s : d.supports) {
+    std::vector<const ArraySlot*> slots;
+    if (s.coordinates.has_value()) slots.push_back(&*s.coordinates);
+    for (const ArraySlot& a : s.node_arrays) slots.push_back(&a);
+    for (const ArraySlot& a : s.cell_arrays) slots.push_back(&a);
+    for (const ArraySlot* a : slots) {
+      if (a->is_callable() || a->data.dims.empty()) continue;
+      const std::string axis =
+          a->location == Location::Node ? "node" : "cell";
+      const std::string path = "/supports/" + s.name +
+                               (a->role == "coordinates"
+                                    ? "/"
+                                    : (a->location == Location::Node
+                                           ? "/node_arrays/"
+                                           : "/cell_arrays/")) +
+                               a->name;
+      const std::string want = a->varies == "none" ? axis : a->varies;
+      if (a->data.dims.front() != want) {
+        throw Error(
+            "E04",
+            path + ": `varies` is \"" + a->varies +
+                "\" and the array was built with a leading \"" +
+                a->data.dims.front() +
+                "\" axis; a slot's shape is fixed when it is built, so "
+                "build it again with the `dims` you mean rather than "
+                "assigning to `varies`");
+      }
+      for (std::size_t i = 0; i < a->data.dims.size(); ++i) {
+        if (a->data.dims[i] != "component") continue;
+        if (static_cast<std::int64_t>(a->data.shape[i]) != a->components) {
+          throw Error(
+              "E31",
+              path + ": `components` is " +
+                  internal::format_i64(a->components) +
+                  " and the array was built with a component axis of " +
+                  internal::format_i64(
+                      static_cast<std::int64_t>(a->data.shape[i])) +
+                  "; build it again with the `dims` you mean rather than "
+                  "assigning to `components`");
+        }
+      }
+    }
+  }
+}
 
-void write(const Dataset& d, const std::string& path) {
-  check_names(d);
+std::string findings_text(const std::string& path, const Report& r) {
+  std::string out = "mestra::write refused \"" + path + "\": " +
+                    internal::format_i64(
+                        static_cast<std::int64_t>(r.errors.size())) +
+                    " error(s)";
+  for (const Finding& f : r.errors) {
+    out += "\n  " + (f.id.empty() ? std::string("!") : f.id) + " " +
+           f.where + ": " + f.message;
+  }
+  return out;
+}
+
+void write_file(const Dataset& d, const std::string& path) {
   File f = File::create(path);
   Writer w(d, f);
   w.run();
+}
+
+}  // namespace
+
+void write(const Dataset& d, const std::string& path,
+           const WriteOptions& options) {
+  check_names(d);
+  check_shapes(d);
+  if (!options.check) {
+    write_file(d, path);
+    return;
+  }
+  // Conventions section 2: validate first and refuse on any error.
+  // The file is built beside the name the caller gave and moved into
+  // place only once it validates, so a refusal never leaves a file
+  // the validator would reject where the caller asked for one.
+  const std::string beside = path + ".mestra-writing";
+  std::remove(beside.c_str());
+  try {
+    write_file(d, beside);
+  } catch (...) {
+    std::remove(beside.c_str());
+    throw;
+  }
+  const Report r = validate(beside);
+  if (!r.ok()) {
+    std::remove(beside.c_str());
+    throw Error(r.errors.front().id, findings_text(path, r));
+  }
+  if (std::rename(beside.c_str(), path.c_str()) != 0) {
+    std::remove(beside.c_str());
+    throw Error("", "cannot move the written file into place at \"" + path +
+                        "\"");
+  }
 }
 
 void write_dict(const Dict& dict, const std::string& type,

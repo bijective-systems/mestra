@@ -5,6 +5,7 @@
 #include "h5.hpp"
 #include "layout.hpp"
 #include "mestra/io.hpp"
+#include "mestra/validate.hpp"
 #include "names.hpp"
 
 namespace mestra {
@@ -454,7 +455,41 @@ Dataset read_impl(const std::string& path, bool with_data) {
 
 }  // namespace
 
-Dataset read(const std::string& path) { return read_impl(path, true); }
+namespace {
+
+// The structural rules of the reading convention: the ones that say a
+// file is not this format, rather than that what it says is wrong.
+bool structural(const std::string& id) {
+  if (id.empty()) return true;    // a fault no rule of section 14 covers
+  for (const char* rule : {"E01", "E16", "E19", "E25", "E26", "E29",
+                           "E30", "E40", "E41"}) {
+    if (id == rule) return true;
+  }
+  return false;
+}
+
+}  // namespace
+
+Dataset read(const std::string& path, const ReadOptions& options) {
+  std::vector<Finding> refused;
+  for (const Finding& f : validate(path).errors) {
+    if (structural(f.id)) refused.push_back(f);
+  }
+  if (options.strict && !refused.empty()) {
+    std::string message = "mestra::read refused \"" + path + "\": " +
+                          internal::format_i64(static_cast<std::int64_t>(
+                              refused.size())) +
+                          " structural error(s)";
+    for (const Finding& f : refused) {
+      message += "\n  " + (f.id.empty() ? std::string("!") : f.id) + " " +
+                 f.where + ": " + f.message;
+    }
+    throw Error(refused.front().id, message);
+  }
+  Dataset d = read_impl(path, true);
+  d.not_read = std::move(refused);
+  return d;
+}
 
 Dataset read_header(const std::string& path) {
   return read_impl(path, false);
