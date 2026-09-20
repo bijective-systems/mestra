@@ -117,8 +117,8 @@ do. A builder error says which argument to change. The models are the
 Python E04 and W01 messages.
 
 
-7. Two decisions from the verification round
---------------------------------------------
+7. Decisions from the verification round
+-----------------------------------------
 
 What an evaluated file carries. Evaluating a file turns every callable
 slot into a stored slot, so the result has no callable to keep: the
@@ -134,3 +134,34 @@ read names them on. An open never reads a slot's data and never reads
 a dataset inside a callable's dictionary; those wait for the read.
 The nine structural rules of section 2 are decided from exactly this
 much, so the open and the read name the same rule for the same file.
+
+`/row_support` is the one other dataset an open reads. It is a
+column of the file and not a slot: it says which support each row is
+on, it is the length of the row count, and E16 in an unaligned file
+is decided from it and from nothing else. So an open reads it in
+full, as it reads a category table, and the list of what an open
+reads is: attributes, dataspaces, link types, dimension-scale
+structure, category tables and `/row_support`. Nothing else, and no
+slot.
+
+What an evaluated file does not carry. The `/private` group of the
+file that was evaluated is not copied into the result. Evaluation
+produces a new dataset, whose rows are the keys table it was given
+and whose slots hold values that were not in the source; a producer's
+private records describe the file they were written into, and
+carrying them forward would attach them to numbers they are not
+about. A producer that wants records on the result attaches its own
+at write time. `/notes` is carried, because it is the format's own
+optional text about the content, and the content is the same.
+
+An unknown dataset inside a known group. Section 14 leaves it
+outside the byte-level rules, and a reader does not know what it
+means, so a rewrite does not carry it: the reader lists its path
+among the dataset's lossy paths, and `write` refuses a dataset with
+a lossy path unless the caller passes `check=false`, in which case
+the path is dropped and the refusal is the caller's to own. This is
+the same treatment an external link gets. The alternative, copying
+bytes a reader cannot describe, would make every writer responsible
+for a shape no rule constrains; the one thing that is not allowed is
+dropping it in silence. An unknown *group* is untouched under W11
+and section 28, which is unchanged.
