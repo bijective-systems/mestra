@@ -118,8 +118,14 @@ classdef H5
 
         function v = cast(name, data)
         %cast  Convert a MATLAB array to the class a type name names.
+        %   float32 is forbidden in the public part of a file
+        %   (section 19), but /private and any group this version does
+        %   not know are copied through as they stand, and MATLAB
+        %   refuses to write a double into an H5T_IEEE_F32LE dataset,
+        %   so the name has to mean `single` here.
             switch name
-                case {'float64', 'float32'}, v = double(data);
+                case 'float64', v = double(data);
+                case 'float32', v = single(data);
                 case 'int64',  v = int64(data);
                 case 'int32',  v = int32(data);
                 case 'int8',   v = int8(data);
@@ -143,6 +149,26 @@ classdef H5
             catch
                 % An HDF5 build without that property keeps the times;
                 % nothing else in this package depends on it.
+            end
+        end
+
+        function n = crtOrderTrackedIndexed()
+        %crtOrderTrackedIndexed  H5P_CRT_ORDER_TRACKED | _INDEXED.
+        %   The one creation property this format requires, on the
+        %   dataset creation property list of every dimension scale
+        %   (specification section 21, decision 52).
+            n = bitor(H5ML.get_constant_value('H5P_CRT_ORDER_TRACKED'), ...
+                      H5ML.get_constant_value('H5P_CRT_ORDER_INDEXED'));
+        end
+
+        function order = attrCreationOrder(dcpl)
+        %attrCreationOrder  The attribute creation order flags of a
+        %   dataset creation property list, or 0 when the build cannot
+        %   be asked.  This is what E42 is decided on.
+            order = 0;
+            try
+                order = double(H5P.get_attr_creation_order(dcpl));
+            catch
             end
         end
 
@@ -539,7 +565,9 @@ classdef H5
         %dsetInfo  Shape, storage and type of a dataset, in FILE order.
         %   Fields: type, dims, maxdims (-1 for unlimited), chunk ([]
         %   when contiguous), filters (an n-by-2 matrix of filter id
-        %   and first parameter), strSize, cset, strpad, isScale.
+        %   and first parameter), attrOrder (the attribute creation
+        %   order flags E42 is decided on), strSize, cset, strpad,
+        %   isScale.
             sid = H5D.get_space(did);
             [~, dims, maxdims] = H5S.get_simple_extent_dims(sid);
             H5S.close(sid);
@@ -557,6 +585,7 @@ classdef H5
             info.elements = prod(max(info.dims, 0));
             info.chunk = [];
             info.filters = zeros(0, 2);
+            info.attrOrder = 0;
             % A creation property list is the file's word for how the
             % data is stored, including filters this build may not have
             % and client data longer than any reader expects. Every
@@ -593,6 +622,8 @@ classdef H5
                     rows(end + 1, :) = [double(id) p]; %#ok<AGROW>
                 end
                 info.filters = rows;
+                info.attrOrder = ...
+                    mestra.internal.H5.attrCreationOrder(dcpl);
                 try
                     H5P.close(dcpl);
                 catch
@@ -895,14 +926,18 @@ classdef H5
         % --------------------------------------------------- writing
 
         function did = createDataset(gid, name, typeName, dims, maxdims, ...
-                                     chunk, filters, strSize)
+                                     chunk, filters, strSize, attrOrder)
         %createDataset  Create one dataset, in FILE axis order.
         %   `maxdims` uses -1 for an unlimited extent, `chunk` is []
         %   for contiguous storage, `filters` is an n-by-2 matrix of
-        %   filter id and first parameter, and `strSize` is the byte
-        %   size of a fixed-length string type.
+        %   filter id and first parameter, `strSize` is the byte size
+        %   of a fixed-length string type, and `attrOrder` is the
+        %   attribute creation order flags of section 21, which only a
+        %   dimension scale needs and which defaults to the library's
+        %   own (none).
             if nargin < 7 || isempty(filters), filters = zeros(0, 2); end
             if nargin < 8, strSize = 0; end
+            if nargin < 9 || isempty(attrOrder), attrOrder = 0; end
             rank = numel(dims);
             hmax = maxdims;
             hmax(maxdims < 0) = H5ML.get_constant_value('H5S_UNLIMITED');
@@ -910,6 +945,9 @@ classdef H5
             dcpl = mestra.internal.H5.plist('H5P_DATASET_CREATE');
             if ~isempty(chunk)
                 H5P.set_chunk(dcpl, chunk);
+            end
+            if attrOrder ~= 0
+                H5P.set_attr_creation_order(dcpl, attrOrder);
             end
             for i = 1:size(filters, 1)
                 switch filters(i, 1)
@@ -963,6 +1001,20 @@ classdef H5
         %   CLASS and NAME as section 21 requires.  An unlimited scale
         %   is chunked with chunk length one; a fixed one is chunked
         %   over its whole length, which is what the corpus carries.
+        %
+        %   The creation property list is the point of decision 52.
+        %   Attribute creation order tracked and indexed gives the
+        %   scale a version 2 object header, which is what lets its
+        %   REFERENCE_LIST live in the file's heap instead of in an
+        %   object header message that may not exceed 64 KiB.  Without
+        %   it a scale takes at most 4085 attachments and the 4086th
+        %   fails after it has already deleted the attribute it was
+        %   extending.  Object time tracking has to go off in the same
+        %   list, which plist already does, because a version 2 header
+        %   records four timestamps unless it is told not to and a file
+        %   that records when it was written is not byte reproducible.
+        %   No other object's property list is touched, so the
+        %   superblock and every non-scale object are as they were.
             if unlimited
                 maxd = H5ML.get_constant_value('H5S_UNLIMITED');
                 chunk = 1;
@@ -973,6 +1025,8 @@ classdef H5
             sid = H5S.create_simple(1, len, maxd);
             dcpl = mestra.internal.H5.plist('H5P_DATASET_CREATE');
             H5P.set_chunk(dcpl, chunk);
+            H5P.set_attr_creation_order(dcpl, ...
+                mestra.internal.H5.crtOrderTrackedIndexed());
             did = H5D.create(gid, name, 'H5T_IEEE_F32BE', sid, ...
                              'H5P_DEFAULT', dcpl, 'H5P_DEFAULT');
             H5P.close(dcpl); H5S.close(sid);
@@ -1109,9 +1163,18 @@ classdef H5
             made = containers.Map('KeyType', 'char', 'ValueType', 'any');
             for i = 1:numel(tree.datasets)
                 ds = tree.datasets(i);
+                order = 0;
+                if isfield(ds.info, 'attrOrder'), order = ds.info.attrOrder; end
+                if ds.info.isScale
+                    % A scale is a scale wherever it is kept, so one
+                    % replayed into /notes or /private is created with
+                    % the property list section 21 gives it, whatever
+                    % the file it came from used.
+                    order = mestra.internal.H5.crtOrderTrackedIndexed();
+                end
                 did = H5.createDataset(gid, ds.name, ds.info.type, ...
                     ds.info.dims, ds.info.maxdims, ds.info.chunk, ...
-                    ds.info.filters, ds.info.strSize);
+                    ds.info.filters, ds.info.strSize, order);
                 if ds.info.isScale
                     % A scale whose NAME attribute was missing is
                     % written back with the sentence section 21 gives

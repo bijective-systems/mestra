@@ -576,6 +576,7 @@ classdef Reader
             rec(1).upper = R().num(did, 'upper');
             rec(1).dtype = info.type;
             rec(1).chunk = info.chunk;
+            rec(1).filters = info.filters;
             rec(1).strSize = info.strSize;
             mestra.internal.Reader.inspect(did, info, d, path, map);
             if eager
@@ -626,6 +627,7 @@ classdef Reader
             rec(1).quantile = R().num(did, 'quantile');
             rec(1).dtype = info.type;
             rec(1).chunk = info.chunk;
+            rec(1).filters = info.filters;
             mestra.internal.Reader.checkSlotKind(rec(1).source, false, d, path);
             mestra.internal.Reader.inspect(did, info, d, path, map);
             if eager
@@ -754,6 +756,7 @@ classdef Reader
                 rec(1).shape = [];
                 rec(1).dtype = '';
                 rec(1).chunk = [];
+                rec(1).filters = zeros(0, 2);
                 H5G.close(oid);
                 return
             end
@@ -766,6 +769,7 @@ classdef Reader
             rec(1).shape = reshape(double(info.dims), 1, []);
             rec(1).dtype = info.type;
             rec(1).chunk = info.chunk;
+            rec(1).filters = info.filters;
             R().inspect(oid, info, d, path, map);
             if eager
                 values = R().readValues(oid, info, d, path);

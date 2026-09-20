@@ -354,6 +354,13 @@ classdef Dataset < handle
         %
         %   The dtype follows the role (section 19) unless Dtype says
         %   otherwise.
+        %
+        %   LAYOUT.  'Chunk' and 'Filters' say how the column is
+        %   stored.  Both default to what section 23 prescribes, both
+        %   survive a read and a write again, and 'Filters' is an
+        %   n-by-2 matrix of HDF5 filter id and parameter in pipeline
+        %   order: [2 0] for shuffle, [1 4] for gzip at level 4,
+        %   [2 0; 1 4] for the two together.
             p = inputParser();
             p.addParameter('Role', '');
             p.addParameter('Units', '');
@@ -364,6 +371,7 @@ classdef Dataset < handle
             p.addParameter('Parent', '');
             p.addParameter('Dtype', '');
             p.addParameter('Chunk', []);
+            p.addParameter('Filters', []);
             mestra.Dataset.refuseOldOrder('addKey', name, values, ...
                 @mestra.internal.Args.isKeyRole, ...
                 'addKey(name, values, role, units)');
@@ -405,6 +413,7 @@ classdef Dataset < handle
             rec(1).trajectoryGroup = r.TrajectoryGroup;
             rec(1).parent = r.Parent;
             rec(1).chunk = r.Chunk;
+            rec(1).filters = mestra.Dataset.filterMatrix(r.Filters);
             if iscell(values) || isstring(values)
                 rec(1).values = reshape(cellstr(values), 1, []);
                 rec(1).dtype = 'string';
@@ -472,6 +481,7 @@ classdef Dataset < handle
             p.addParameter('Of', '');
             p.addParameter('Quantile', []);
             p.addParameter('Chunk', []);
+            p.addParameter('Filters', []);
             [pos, rest] = mestra.internal.Args.positional(varargin, ...
                 {{'', @mestra.internal.Args.isText}}, ...
                 mestra.internal.Args.parameterNames(p));
@@ -497,6 +507,7 @@ classdef Dataset < handle
             rec(1).of = r.Of;
             rec(1).quantile = r.Quantile;
             rec(1).chunk = r.Chunk;
+            rec(1).filters = mestra.Dataset.filterMatrix(r.Filters);
             rec(1).dtype = 'float64';
             rec(1).values = reshape(double(values), 1, []);
             rec(1).dims = {'row'};
@@ -816,6 +827,7 @@ classdef Dataset < handle
             p.addParameter('Dims', {});
             p.addParameter('Dtype', '');
             p.addParameter('Chunk', []);
+            p.addParameter('Filters', []);
             names = mestra.internal.Args.parameterNames(p);
             if isempty(role)
                 specs = {{'', @mestra.internal.Args.isArrayRole}, ...
@@ -871,6 +883,7 @@ classdef Dataset < handle
             slot(1).location = location;
             slot(1).support = supportName;
             slot(1).chunk = r.Chunk;
+            slot(1).filters = mestra.Dataset.filterMatrix(r.Filters);
             if ~isempty(r.Callable)
                 slot(1).source = ['callable:' r.Callable];
             end
@@ -1029,13 +1042,14 @@ classdef Dataset < handle
             s = struct('name', {}, 'role', {}, 'units', {}, 'lower', {}, ...
                        'upper', {}, 'category', {}, 'trajectoryGroup', {}, ...
                        'parent', {}, 'values', {}, 'dtype', {}, ...
-                       'chunk', {}, 'strSize', {});
+                       'chunk', {}, 'filters', {}, 'strSize', {});
         end
 
         function s = emptyScalar()
             s = struct('name', {}, 'units', {}, 'source', {}, 'output', {}, ...
                        'statistic', {}, 'of', {}, 'quantile', {}, ...
-                       'values', {}, 'dtype', {}, 'dims', {}, 'chunk', {});
+                       'values', {}, 'dtype', {}, 'dims', {}, 'chunk', {}, ...
+                       'filters', {});
         end
 
         function s = emptyCategory()
@@ -1057,12 +1071,51 @@ classdef Dataset < handle
                        'category', {}, 'recomputed', {}, 'derivedFrom', {}, ...
                        'recipe', {}, 'reference', {}, 'values', {}, ...
                        'dims', {}, 'shape', {}, 'dtype', {}, ...
-                       'location', {}, 'support', {}, 'chunk', {});
+                       'location', {}, 'support', {}, 'chunk', {}, ...
+                       'filters', {});
         end
 
         function s = emptyCallable()
             s = struct('id', {}, 'type', {}, 'repr', {}, 'dict', {}, ...
                        'obj', {});
+        end
+
+        function m = filterMatrix(v)
+        %filterMatrix  The filter pipeline of section 23, as stored.
+        %   An n-by-2 matrix of HDF5 filter id and first client
+        %   parameter, in pipeline order: [2 0] is shuffle, [1 4] is
+        %   gzip at level 4, and [2 0; 1 4] is shuffle then gzip,
+        %   which is the order that makes shuffle worth anything.
+        %   This is exactly what a dataset creation property list
+        %   reports, so a filter a file declares survives being read
+        %   and written again without being translated on the way.
+        %   Section 23 allows gzip at levels 1 to 9 and shuffle and
+        %   nothing else (E29).
+            m = zeros(0, 2);
+            if isempty(v), return, end
+            if ~isnumeric(v) || ~ismatrix(v) || size(v, 2) ~= 2
+                error('mestra:filters', ...
+                      ['Filters must be an n-by-2 matrix of HDF5 ' ...
+                       'filter id and parameter, for example [2 0; 1 4]']);
+            end
+            m = double(v);
+            for i = 1:size(m, 1)
+                switch m(i, 1)
+                    case 1
+                        if m(i, 2) < 1 || m(i, 2) > 9
+                            error('mestra:E29', ...
+                                  ['E29: gzip at level %g; section 23 ' ...
+                                   'allows levels 1 to 9'], m(i, 2));
+                        end
+                    case 2
+                        % shuffle takes no parameter
+                    otherwise
+                        error('mestra:E29', ...
+                              ['E29: filter %g is not gzip or shuffle, ' ...
+                               'which are the only two section 23 ' ...
+                               'allows'], m(i, 1));
+                end
+            end
         end
 
         function out = append(arr, rec, name)

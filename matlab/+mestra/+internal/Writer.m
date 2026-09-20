@@ -221,6 +221,7 @@ classdef Writer
         %writeKey  One key column.
             H5 = mestra.internal.H5;
             n = numel(k.values);
+            filters = mestra.internal.Writer.filtersOf(k);
             if strcmp(k.dtype, 'string')
                 size_ = k.strSize;
                 if isempty(size_)
@@ -231,7 +232,7 @@ classdef Writer
                     chunk = mestra.internal.Writer.rowChunk(size_, [], n);
                 end
                 did = H5.createDataset(g, k.name, 'string', n, -1, chunk, ...
-                                       [], size_);
+                                       filters, size_);
                 H5.writeData(did, 'string', k.values, size_);
             else
                 itemsize = mestra.internal.Writer.itemSize(k.dtype);
@@ -239,7 +240,8 @@ classdef Writer
                 if isempty(chunk)
                     chunk = mestra.internal.Writer.rowChunk(itemsize, [], n);
                 end
-                did = H5.createDataset(g, k.name, k.dtype, n, -1, chunk);
+                did = H5.createDataset(g, k.name, k.dtype, n, -1, chunk, ...
+                                       filters);
                 H5.writeData(did, k.dtype, k.values);
             end
             mestra.internal.Writer.attach(did, {'row'}, scales, []);
@@ -277,7 +279,8 @@ classdef Writer
             if isempty(chunk)
                 chunk = mestra.internal.Writer.rowChunk(8, [], n);
             end
-            did = H5.createDataset(g, s.name, 'float64', n, -1, chunk);
+            did = H5.createDataset(g, s.name, 'float64', n, -1, chunk, ...
+                                   mestra.internal.Writer.filtersOf(s));
             H5.writeData(did, 'float64', s.values);
             mestra.internal.Writer.attach(did, {'row'}, scales, []);
             mestra.internal.Writer.slotAttrs(did, s, false);
@@ -402,6 +405,7 @@ classdef Writer
             rowLeading = ~isempty(fileDims) && strcmp(fileDims{1}, 'row');
             maxdims = dims;
             chunk = slot.chunk;
+            filters = mestra.internal.Writer.filtersOf(slot);
             if rowLeading
                 maxdims(1) = -1;
                 if isempty(chunk)
@@ -410,9 +414,17 @@ classdef Writer
                         dims(2:end), rowCount);
                     chunk = [c dims(2:end)];
                 end
+            elseif isempty(chunk) && ~isempty(filters)
+                % Section 23: a slot with no `row` dimension may be
+                % contiguous, and a filter needs chunked storage, so a
+                % compressed one takes the section's other default --
+                % the whole dataset when that is a mebibyte or less,
+                % and otherwise the same rule over its leading axis.
+                chunk = mestra.internal.Writer.plainChunk( ...
+                    mestra.internal.Writer.itemSize(slot.dtype), dims);
             end
             did = H5.createDataset(g, slot.name, slot.dtype, dims, maxdims, ...
-                                   chunk);
+                                   chunk, filters);
             H5.writeData(did, slot.dtype, slot.values);
             mestra.internal.Writer.attach(did, fileDims, scales, local);
             mestra.internal.Writer.slotAttrs(did, slot, true);
@@ -491,6 +503,42 @@ classdef Writer
                 end
                 H5DS.attach_scale(did, sid, axis - 1);
             end
+        end
+
+        function f = filtersOf(rec)
+        %filtersOf  The filter pipeline a record carries, or none.
+        %   Section 23 makes compression optional, so the default is
+        %   no filter; but what a file said about its own layout has
+        %   to survive being read and written again, alongside a chunk
+        %   shape that is not the default.  A record built before this
+        %   field existed has no `filters` at all, which is why the
+        %   question is asked rather than assumed.
+            f = zeros(0, 2);
+            if ~isstruct(rec) || ~isfield(rec, 'filters'), return, end
+            if isempty(rec.filters), return, end
+            f = mestra.Dataset.filterMatrix(rec.filters);
+        end
+
+        function chunk = plainChunk(itemsize, dims)
+        %plainChunk  The chunk section 23 gives a dataset with no
+        %   `row` dimension that is chunked or compressed: the whole
+        %   dataset when that is 1 MiB or less, and otherwise the row
+        %   rule applied to its leading axis.  A zero-length axis
+        %   takes 1 on every axis, which is the only chunk HDF5 allows
+        %   for it.
+            dims = double(reshape(dims, 1, []));
+            if isempty(dims), chunk = []; return, end
+            if any(dims == 0)
+                chunk = ones(1, numel(dims));
+                return
+            end
+            if itemsize * prod(dims) <= 1048576
+                chunk = dims;
+                return
+            end
+            c = mestra.internal.Writer.rowChunk(itemsize, dims(2:end), ...
+                                                dims(1));
+            chunk = [c dims(2:end)];
         end
 
         function c = rowChunk(itemsize, rest, nRows)
