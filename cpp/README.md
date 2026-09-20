@@ -240,6 +240,10 @@ number of values. When two lengths are unknown, give one:
 
     {"row", "node", {"component", 3}}
 
+The type is `mestra::Dims`, a vector of `mestra::Dim`, and a `Dim` is
+a dimension name with an optional length, so a bare string and a
+braced pair both belong in the list.
+
 The names may be in any order, and the builder permutes into the
 stored order of section 4 rather than asking you to:
 
@@ -452,10 +456,11 @@ convenience; an integral is what that weight array is for; and a
 label is how this format spells a region, so grouping by one is
 reading the file rather than analysing it.
 
-Python and Julia have all four. If you need the other two in a C++
-pipeline, the shape they should take is in section 4 of the
-conventions, and the two here show what the argument order and the
-result should look like.
+Python and Julia are the implementations that carry the
+post-processing helpers. If you need the other two in a C++ pipeline,
+the shape they should take is in section 4 of the conventions, and the
+two here show what the argument order and the result should look
+like.
 
 
 What the dictionary dump looks like
@@ -556,7 +561,7 @@ identifiers they carry, `write` refusing a slot whose `varies` was
 assigned after the fact, the cell measures against shapes whose
 measure is known by hand, the lumped node weights adding up to the
 area, the default weight rule, and the statistics of a field with a
-missing value in it, and a zero-row callable file built with
+missing value in it; and a zero-row callable file built with
 `add_callable(id, callable)` and a callable slot, written, validated
 and evaluated.
 
