@@ -240,7 +240,7 @@ function validate(path::AbstractString;
                      first(sprint(showerror, e), 200))])
     end
     try
-        v = Validator(f, ScaleIndex(collect_scales(f)), Finding[],
+        v = Validator(f, ScaleIndex(f), Finding[],
                       Set{Tuple{String,String}}(), structural, 0,
                       String[], Int[], true, Dict{String,Vector{String}}(),
                       Dict{String,String}(), Dict{String,Any}(),
@@ -1502,9 +1502,10 @@ function check_every_dataset!(v::Validator)
                         "filter $(fid) is neither gzip nor shuffle")
             end
         end
-        names = axis_scale_names(obj, v.idx)
+        axes = axis_scales(obj, v.idx)
+        names = Union{String,Nothing}[t[2] for t in axes]
         for (axis, n) in pairs(names)
-            k = num_scales(obj, axis - 1)
+            k = axes[axis][1]
             if k < 0
                 report!(v, "E41", path,
                         "axis $(axis - 1): the library would not say how " *
@@ -1524,8 +1525,8 @@ function check_every_dataset!(v::Validator)
                 # with only CLASS is half a scale, and the axis it is
                 # attached to does not carry the thing the rule asks
                 # for.
-                got = attached_scale(obj, axis - 1, v.idx.all)
-                if got !== nothing && !haskey(HDF5.attributes(got[2]), "NAME")
+                sd = axes[axis][3]
+                if sd !== nothing && !haskey(HDF5.attributes(sd), "NAME")
                     report!(v, "E25", path,
                             "axis $(axis - 1) carries a scale `$(n)` with " *
                             "CLASS and no NAME, which is half of what " *
@@ -1582,20 +1583,14 @@ end
 function default_chunk_for(v::Validator, d::HDF5.Dataset, cdims::Vector{Int})
     ti = type_info(HDF5.datatype(d))
     nrows = 0
-    sc = attached_scale_name(d, 0, v.idx.all)
-    sc === nothing && return nothing
-    for (name, s) in v.idx.all
-        attached = try
-            HDF5.API.h5ds_is_attached(d, s, 0)
-        catch
-            false
-        end
-        if attached
-            sdims, _ = disk_shape(s)
-            nrows = isempty(sdims) ? 0 : sdims[1]
-            break
-        end
-    end
+    axes = axis_scales(d, v.idx)
+    isempty(axes) && return nothing
+    _, sc, sd = axes[1]
+    # Section 23: the row count is the length of the row dimension the
+    # leading axis is attached to, and not the dataset's own extent.
+    (sc === nothing || sd === nothing) && return nothing
+    sdims, _ = disk_shape(sd)
+    nrows = isempty(sdims) ? 0 : sdims[1]
     rest = cdims[2:end]
     return vcat(default_chunk_rows(ti.size, rest, nrows), rest)
 end

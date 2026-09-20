@@ -15,24 +15,69 @@ const ROOT_ATTRS = Set(["format", "writer", "created", "aligned",
 const ROOT_GROUPS = Set(["keys", "scalars", "categories", "supports",
                          "callables", "notes", "private"])
 
+"""Every dimension scale in the file, by link name and by the object
+reference a dataset's DIMENSION_LIST holds.  The map is built once per
+open, during this package's own bounded walk, and every attached scale
+is resolved through it (section 21), so resolving one costs a lookup
+and not a scan of the scale's REFERENCE_LIST."""
 struct ScaleIndex
     all::Vector{Pair{String,HDF5.Dataset}}
+    byref::Dict{HDF5.Reference,Int}
 end
 
-"""The link name of the scale on each C-order axis of `d`, or nothing
-where no single scale is attached."""
-function axis_scale_names(d::HDF5.Dataset, idx::ScaleIndex)
+function ScaleIndex(f::HDF5.File)
+    found = collect_scales(f)
+    all = Pair{String,HDF5.Dataset}[name => d for (name, d, _) in found]
+    byref = Dict{HDF5.Reference,Int}()
+    for (i, (_, _, ref)) in enumerate(found)
+        ref === nothing && continue
+        haskey(byref, ref) || (byref[ref] = i)
+    end
+    return ScaleIndex(all, byref)
+end
+
+"""For each C-order axis of `d`: how many dimension scales are
+attached, the link name of the one scale when exactly one is and this
+file holds it, and that scale's dataset.  A count of -1 says the
+library would not give the dataset's DIMENSION_LIST at all."""
+function axis_scales(d::HDF5.Dataset, idx::ScaleIndex)
+    T = Tuple{Int,Union{String,Nothing},Union{Nothing,HDF5.Dataset}}
     cdims, _ = try
         disk_shape(d)
     catch
-        return Union{String,Nothing}[]
+        return T[]
     end
-    out = Union{String,Nothing}[]
+    dl = dimension_list(d)
+    bad = dl === :unreadable
+    out = T[]
     for axis in 0:(length(cdims) - 1)
-        n = num_scales(d, axis)
-        push!(out, n == 1 ? attached_scale_name(d, axis, idx.all) : nothing)
+        if bad
+            push!(out, (-1, nothing, nothing))
+            continue
+        end
+        refs = axis_refs(dl, axis)
+        if length(refs) == 1
+            i = get(idx.byref, refs[1], 0)
+            push!(out, i == 0 ? (1, nothing, nothing) :
+                       (1, idx.all[i].first, idx.all[i].second))
+        else
+            push!(out, (length(refs), nothing, nothing))
+        end
     end
     return out
+end
+
+"""The link name of the scale on each C-order axis of `d`, or nothing
+where no single scale this file holds is attached."""
+axis_scale_names(d::HDF5.Dataset, idx::ScaleIndex) =
+    Union{String,Nothing}[t[2] for t in axis_scales(d, idx)]
+
+"""The link name of the one scale on C-order axis `axis`, or nothing."""
+function attached_scale_name(d::HDF5.Dataset, axis::Integer,
+                             idx::ScaleIndex)
+    got = axis_scales(d, idx)
+    i = Int(axis) + 1
+    return (1 <= i <= length(got)) ? got[i][2] : nothing
 end
 
 function slot_ldims(d::HDF5.Dataset, idx::ScaleIndex)
@@ -168,7 +213,7 @@ end
 
 function read_dataset(f::HDF5.File, path::String, lazy::Bool,
                       max_elements::Int = DEFAULT_MAX_ELEMENTS)
-    idx = ScaleIndex(collect_scales(f))
+    idx = ScaleIndex(f)
     root = own_attrs(f)
     ds = Dataset(writer = something(sattr(root, "writer"), ""),
                  created = something(sattr(root, "created"), ""))

@@ -742,51 +742,55 @@ end
 attach_scale!(d::HDF5.Dataset, scale::HDF5.Dataset, axis::Integer) =
     HDF5.API.h5ds_attach_scale(d, scale, axis)
 
-function num_scales(d::HDF5.Dataset, axis::Integer)
-    try
-        return Int(HDF5.API.h5ds_get_num_scales(d, axis))
-    catch
-        return -1
-    end
-end
+"""The DIMENSION_LIST attribute of `d`: for each C-order axis, the
+object references of the scales attached to that axis.  `nothing`
+means the attribute is not there, so nothing is attached anywhere;
+`:unreadable` means it is there and the library would not give it.
 
-"""The link name of the one scale attached to C-order axis `axis`.
-
-HDF5.jl wraps H5DSget_num_scales, H5DSis_attached, H5DSis_scale,
-H5DSset_scale and H5DSattach_scale, but not H5DSiterate_scales, so the
-attached scale is found by testing the file's scales with
-H5DSis_attached rather than by iterating.
-
-Section 21, decision 51: the candidates come from `collect_scales`,
-which is this package's own bounded walk of the file, and every name
-was read from a link during a walk that stopped at MAX_DEPTH.  Nothing
-here asks the library for the path of a scale object, because that
-search walks the group hierarchy and runs off the stack on a deeply
-nested file, taking the process with it.
+This attribute is how section 21 says to resolve an attached scale --
+from the dataset's own record, through a map built during this
+package's own bounded walk.  The alternative the HDF5.jl wrapper
+offers, asking H5DSis_attached of each scale in turn, reads the
+scale's REFERENCE_LIST every time, and that list holds one entry per
+dataset attached to it: on a file with n datasets on the `row`
+dimension the walk then costs n^2.  Nothing here asks the library for
+the path of a scale object, because that search walks the group
+hierarchy and runs off the stack on a deeply nested file.
 """
-function attached_scale(d::HDF5.Dataset, axis::Integer,
-                        candidates::Vector{Pair{String,HDF5.Dataset}})
-    for (name, s) in candidates
-        attached = try
-            HDF5.API.h5ds_is_attached(d, s, axis)
-        catch
-            false
-        end
-        attached && return (name, s)
+function dimension_list(d::HDF5.Dataset)
+    have = try
+        haskey(HDF5.attributes(d), "DIMENSION_LIST")
+    catch
+        return :unreadable
     end
-    return nothing
+    have || return nothing
+    try
+        a = HDF5.open_attribute(d, "DIMENSION_LIST")
+        try
+            v = HDF5.read(a)
+            return v isa Vector{Vector{HDF5.Reference}} ? v : :unreadable
+        finally
+            close(a)
+        end
+    catch
+        return :unreadable
+    end
 end
 
-function attached_scale_name(d::HDF5.Dataset, axis::Integer,
-                             candidates::Vector{Pair{String,HDF5.Dataset}})
-    got = attached_scale(d, axis, candidates)
-    return got === nothing ? nothing : got[1]
+"""The references on C-order axis `axis` of a `dimension_list` result."""
+function axis_refs(dl, axis::Integer)
+    dl isa Vector{Vector{HDF5.Reference}} || return HDF5.Reference[]
+    i = Int(axis) + 1
+    (1 <= i <= length(dl)) || return HDF5.Reference[]
+    return dl[i]
 end
 
-"""Every dimension scale in the file, as link name => dataset, nearest
-group first so that a support-local `row` is found before the file one."""
+"""Every dimension scale in the file, as (link name, dataset, object
+reference), nearest group first so that a support-local `row` is found
+before the file one.  The reference is what a dataset's DIMENSION_LIST
+holds, so it is the key a scale is found by."""
 function collect_scales(f::HDF5.File)
-    out = Pair{String,HDF5.Dataset}[]
+    out = Tuple{String,HDF5.Dataset,Union{Nothing,HDF5.Reference}}[]
     # An explicit stack, not the call stack: a file chooses how deep
     # its groups go and thirty thousand levels would overflow one.
     stack = Tuple{Any,Int}[(f, 0)]
@@ -806,7 +810,14 @@ function collect_scales(f::HDF5.File)
                 catch
                     false
                 end
-                ok && push!(out, String(name) => obj)
+                if ok
+                    ref = try
+                        HDF5.Reference(g, String(name))
+                    catch
+                        nothing
+                    end
+                    push!(out, (String(name), obj, ref))
+                end
             elseif obj isa HDF5.Group
                 push!(stack, (obj, depth + 1))
             end

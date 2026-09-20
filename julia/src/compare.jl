@@ -22,8 +22,8 @@ function structural_diff(a::AbstractString, b::AbstractString)
     out = String[]
     HDF5.h5open(String(a), "r") do fa
         HDF5.h5open(String(b), "r") do fb
-            ia = ScaleIndex(collect_scales(fa))
-            ib = ScaleIndex(collect_scales(fb))
+            ia = ScaleIndex(fa)
+            ib = ScaleIndex(fb)
             pa = object_paths(fa)
             pb = object_paths(fb)
             for p in setdiff(keys(pa), keys(pb))
@@ -100,17 +100,19 @@ function compare_dataset!(out, path, da, db, ia, ib)
         _, rb, _ = read_raw_dataset(db)
         ra == rb || push!(out, "$(path): contents differ")
     end
+    axa = axis_scales(da, ia)
+    axb = axis_scales(db, ib)
     for axis in 0:(length(sa) - 1)
-        nsa = num_scales(da, axis)
-        nsb = num_scales(db, axis)
+        nsa = axis + 1 <= length(axa) ? axa[axis + 1][1] : 0
+        nsb = axis + 1 <= length(axb) ? axb[axis + 1][1] : 0
         if nsa != nsb
             push!(out, "$(path): axis $(axis) has $(nsa) scales against " *
                        "$(nsb)")
             continue
         end
         nsa == 1 || continue
-        va = attached_scale_name(da, axis, ia.all)
-        vb = attached_scale_name(db, axis, ib.all)
+        va = axa[axis + 1][2]
+        vb = axb[axis + 1][2]
         va == vb || push!(out, "$(path): axis $(axis) scale $(va) against " *
                                "$(vb)")
     end
