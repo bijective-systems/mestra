@@ -29,10 +29,11 @@ import sys
 FINDING = re.compile(r"^([EW][0-9]{2}|!) (\S+): (.*)$")
 
 # Most of these files are here for the one thing above: an answer
-# rather than a signal.  Two of them are here for which answer, because
-# naming the wrong rule is its own fault -- the Phase 3 report's
-# SHOULD-FIX 14.  `must` is what `validate` has to name and `must_not`
-# what it may not, each an identifier of section 14.
+# rather than a signal.  Three of them are here for which answer,
+# because naming the wrong rule, or none, is its own fault -- the
+# Phase 3 report's SHOULD-FIX 12 and 14.  `must` is what `validate`
+# has to name and `must_not` what it may not, each an identifier of
+# section 14.
 EXPECTED = {
     "category_above_cap.mes": {
         # Section 29: the eager read of a table above the stated
@@ -45,6 +46,13 @@ EXPECTED = {
     },
     "shape_enormous.mes": {
         "must": ["E16", "E41"],
+        "must_not": [],
+    },
+    "support_unknown_dataset.mes": {
+        # The report's SHOULD-FIX 12.  A dataset this version does not
+        # know, in a group it does, is a public object and section
+        # 23's chunking rule holds on it.
+        "must": ["E27"],
         "must_not": [],
     },
 }

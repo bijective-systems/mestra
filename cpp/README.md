@@ -217,7 +217,7 @@ it. `mestra::read_slot_rows(path, slot, begin, end)` reads one slot
 for a row range without touching the rest.
 
 The two passes are checked against each other on every file there is
--- all 70 corpus cases, the 15 shared hostile files and the 11 here --
+-- all 70 corpus cases, the 15 shared hostile files and the 12 here --
 and they name the same structural rules on every one of them, and the
 open names nothing the read does not.
 
@@ -619,8 +619,8 @@ row-dimensioned probe, and, for the 30 cases that validate without an
 error, read-write-compare under the structural equality rule of
 section 30, and, for every worked evaluation, that the evaluated file
 carries no `/callables` group. Then the fifteen cases of
-`vectors/hostile` and the eleven of this implementation's own, each
-through `validate`, `info` and `read`, and all 96 files of the three
+`vectors/hostile` and the twelve of this implementation's own, each
+through `validate`, `info` and `read`, and all 97 files of the three
 sets through the metadata open beside the whole read.
 The whole of it also runs under the address and undefined-behaviour
 sanitizers.

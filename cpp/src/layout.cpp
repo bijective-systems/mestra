@@ -138,5 +138,47 @@ bool root_scale_name(const std::string& name) {
          name.compare(0, 9, "category_") == 0;
 }
 
+bool support_scale_name(const std::string& name) {
+  return one_of(name, {"node", "cell", "cell_plus_one", "index", "row"});
+}
+
+bool known_dataset_path(const std::string& path, bool is_scale) {
+  // The path split into its components, which is all this needs.
+  std::vector<std::string> part;
+  std::size_t at = 0;
+  while (at < path.size()) {
+    const std::size_t next = path.find('/', at + 1);
+    const std::size_t end = next == std::string::npos ? path.size() : next;
+    if (end > at + 1) part.push_back(path.substr(at + 1, end - at - 1));
+    at = end;
+  }
+  if (part.empty()) return false;
+  if (part.size() == 1) {
+    // At the root: a dimension scale of section 21, or /row_support.
+    if (part[0] == "row_support") return true;
+    return is_scale && root_scale_name(part[0]);
+  }
+  if (part.size() == 2) {
+    if (part[0] == "keys" || part[0] == "scalars" ||
+        part[0] == "categories") {
+      return true;
+    }
+    return false;
+  }
+  if (part[0] == "callables") return true;   // a dictionary, section 25
+  if (part[0] != "supports") return false;
+  if (part.size() == 3) {
+    if (part[2] == "coordinates" || part[2] == "cell_types" ||
+        part[2] == "cell_offsets" || part[2] == "cell_connectivity") {
+      return true;
+    }
+    return is_scale && support_scale_name(part[2]);
+  }
+  if (part.size() == 4) {
+    return part[2] == "node_arrays" || part[2] == "cell_arrays";
+  }
+  return false;
+}
+
 }  // namespace internal
 }  // namespace mestra

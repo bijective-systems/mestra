@@ -216,10 +216,27 @@ def category_above_cap(out):
     return path
 
 
+def support_unknown_dataset(out):
+    """A plain contiguous dataset called `row` inside a support group,
+    attached to the file's own `row` scale.  It is a dataset this
+    version of the format does not know, in a group it does: section
+    14 exempts /private and a *group* this version does not know, and
+    section 28 provides for a new attribute and a new group and not
+    for a new dataset, so it is a public object and section 23's
+    chunking rule holds on it (E27)."""
+    path = fresh(out, "support_unknown_dataset.mes")
+    with h5py.File(path, "r+") as f:
+        rows = f["/row"].shape[0]
+        d = f.create_dataset("/supports/s0/row", data=np.zeros(rows),
+                             track_times=False)
+        d.dims[0].attach_scale(f["/row"])
+    return path
+
+
 CASES = [attr_array_int, attr_array_float, attr_array_named,
          attr_array_vlen, dict_deep, link_soft_dangling, link_external,
          filter_unknown, member_named_type, shape_enormous,
-         category_above_cap]
+         category_above_cap, support_unknown_dataset]
 
 
 def main(argv):

@@ -316,6 +316,7 @@ class Validator {
                             bool warn_oversize);
   void check_dataset_storage(const std::string& path, const DsetInfo& info,
                              bool is_row_dataset, std::size_t chunk_rows);
+  void unknown_dataset(const std::string& path, const DsetInfo& info);
 
   void root();
   void categories();
@@ -530,19 +531,57 @@ void Validator::scales() {
       if (!m.is_dataset) continue;
       guarded(child, [&] {
         const DsetInfo info = f_.dataset_info(child);
-        if (!info.is_scale) return;
-        bool has_name = false;
-        for (const RawAttr& a : f_.attributes(child)) {
-          if (a.name == "NAME") has_name = true;
+        if (info.is_scale) {
+          bool has_name = false;
+          for (const RawAttr& a : f_.attributes(child)) {
+            if (a.name == "NAME") has_name = true;
+          }
+          if (!has_name) {
+            error("E25", child,
+                  "a dimension scale with no NAME attribute, which section "
+                  "21 requires of one");
+          }
         }
-        if (!has_name) {
-          error("E25", child,
-                "a dimension scale with no NAME attribute, which section "
-                "21 requires of one");
+        if (!internal::known_dataset_path(child, info.is_scale)) {
+          unknown_dataset(child, info);
         }
       });
     }
   }
+}
+
+void Validator::unknown_dataset(const std::string& path,
+                                const DsetInfo& info) {
+  // The Phase 3 report, SHOULD-FIX 12: a dataset this version does
+  // not know, inside a group it does.  Section 14 checks the
+  // byte-level rules of sections 18 to 25 "on the public objects
+  // only", and exempts /private and a *group* this version does not
+  // know; section 28 provides for a new attribute and a new group
+  // within a version and not for a new dataset.  So this is a public
+  // object and it is checked -- not for the rules that follow from a
+  // role, because it has none this version can read, but for the ones
+  // that follow from being a dataset in this file at all: its name,
+  // its attribute encodings, a dimension scale on every axis, valid
+  // UTF-8 if it holds fixed-length strings, its filters, and chunking
+  // if it carries a row dimension.
+  const std::string name = internal::basename(path);
+  if (!internal::legal_netcdf_name(name)) {
+    error("E33", path, "\"" + name + "\" is not a legal netCDF-4 name");
+  }
+  if (internal::reserved_name(name)) {
+    error("E33", path,
+          "\"" + name + "\" begins with the reserved prefix mestra_");
+  }
+  check_attribute_encodings(path, f_.attributes(path));
+  const Axes axes = axes_of(path, info, true);
+  DType dtype = DType::Float64;
+  if (internal::dtype_of(info.type, &dtype) && dtype == DType::String) {
+    check_string_dataset(path, info, true);
+  }
+  const bool row_leading = !axes.logical.empty() && axes.logical[0] == "row";
+  check_dataset_storage(path, info, row_leading,
+                        row_leading ? static_cast<std::size_t>(n_rows_)
+                                    : kNoChunkCheck);
 }
 
 void Validator::private_group() {
