@@ -308,6 +308,60 @@ The public API
 `Dataset.to_xarray()` is there too, when xarray is installed.
 
 
+Files you did not write
+-----------------------
+
+A reader opens files from other people, and a file is not a promise.
+This one is written to treat every file as untrusted input: whatever
+is wrong with it, the answer is a finding or a refusal that names the
+rule, never a crash, a hang, or an allocation that takes the machine
+with it.
+
+What it refuses, and what it says:
+
+  - it follows no link. A soft link, a cyclic one, and an external
+    link that would open another file are each reported and stepped
+    over. Listing a group by name is the one traversal a cycle
+    cannot break, so that is how members are found;
+  - it walks no deeper than `mestra.limits.MAX_DEPTH` into groups, a
+    callable's dictionary, or a group it must copy without
+    interpreting;
+  - it materialises no more than `mestra.limits.MAX_READ_ELEMENTS`
+    in one call. A dataset that declares a thousand billion elements
+    is opened, described and refused; a row range of it is an
+    ordinary read;
+  - it reads filters from the file's own creation property list, so
+    a filter with more client-data values than a library expects, or
+    an identifier no library has, is E29 and not silence;
+  - an attribute stored as an array where the format has a scalar,
+    or a string that is not UTF-8, is a rule (E19, E26) and the file
+    still reads;
+  - the validator catches per object: something the library will not
+    convert costs one finding with its path, and every rule after it
+    is still reported;
+  - a file that will not open at all is E01, from `validate` as a
+    report and from `read` as a `MestraError`.
+
+Findings the specification has no identifier for carry the rule
+`reader` and appear in `report.unclassified`; `report.ok` is false
+while any remain, because something in the file could not be
+checked. The same findings from opening a file are on
+`dataset.problems`, and what could not be copied is named in
+`dataset.lossy`, which `write` refuses rather than writing the file
+short.
+
+The limits are module attributes with reasons beside them in
+`mestra/limits.py`, and a caller who knows what it is doing can
+raise them.
+
+`python/tests/hostile/` holds the files this is tested against, and
+the script that made them. Each is driven in a subprocess with a
+timeout, because the only defence against a hang inside a C library
+is a process that can be killed. One case is not committed: thirty
+thousand nested groups is nine megabytes however it is stored, and
+`make_hostile.py --deep` writes it on demand.
+
+
 Tests
 -----
 

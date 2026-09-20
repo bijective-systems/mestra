@@ -38,6 +38,9 @@ packages = ["mestra"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = ["error::RuntimeWarning"]
+markers = [
+    "slow: builds a file too big to commit, and drives it",
+]
 
 [tool.ruff]
 line-length = 79

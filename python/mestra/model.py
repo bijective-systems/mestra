@@ -34,6 +34,7 @@ from .names import is_legal_name, is_reserved
 
 __all__ = [
     "NamedArray",
+    "fit_dims",
     "Storage",
     "CategoryTable",
     "Key",
@@ -69,6 +70,23 @@ _INTEGER_KEY_ROLES = ("categorical", "group", "split", "status")
 
 
 # --------------------------------------------------------------- arrays
+
+def fit_dims(dims: Sequence[str], ndim: int) -> tuple[str, ...]:
+    """Names for `ndim` axes, whatever the slot declared.
+
+    A file may declare a slot with dimensions its stored array does
+    not have; that is E04 or E25 and the validator's business, but a
+    reader still has to hand back an array with one name per axis.
+    The names it keeps are the leading ones, and any axis left over
+    is called "?" rather than guessed at.
+    """
+    names = tuple(dims)
+    if len(names) == ndim:
+        return names
+    if len(names) > ndim:
+        return names[:ndim]
+    return names + ("?",) * (ndim - len(names))
+
 
 class NamedArray:
     """A numpy array together with the name of each of its axes.
@@ -369,7 +387,9 @@ class Key:
         """The column, or one row range of it."""
         if self.data is None:
             return NamedArray(np.zeros(0), ("row",))
-        return NamedArray(self.data.read(rows), ("row",))
+        values = self.data.read(rows)
+        return NamedArray(values, fit_dims(("row",),
+                                           np.asarray(values).ndim))
 
     def __repr__(self) -> str:
         return "Key(%r, role=%r, units=%r)" % (
@@ -428,7 +448,9 @@ class ScalarSlot(Slot):
             raise MestraError(
                 "E30", "this slot is served by %s and holds no data"
                 % self.source, self.name)
-        return NamedArray(self.data.read(rows), ("row",))
+        values = self.data.read(rows)
+        return NamedArray(values, fit_dims(("row",),
+                                           np.asarray(values).ndim))
 
     @property
     def values(self) -> NamedArray:
@@ -490,7 +512,9 @@ class ArraySlot(Slot):
             raise MestraError(
                 "E30", "this slot is served by %s and holds no data"
                 % self.source, self.name)
-        return NamedArray(self.data.read(rows), self.dims)
+        values = self.data.read(rows)
+        return NamedArray(values, fit_dims(self.dims,
+                                           np.asarray(values).ndim))
 
     @property
     def values(self) -> NamedArray:
