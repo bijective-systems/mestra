@@ -539,14 +539,9 @@ function rows(ds::Dataset, s::Slot, range::AbstractUnitRange;
         d = open_path(f, s.path)
         d isa HDF5.Dataset || throw(MestraError("E41",
             "$(s.path) is not a dataset"))
-        # The library reads whole chunks, so a huge chunk costs the
-        # same as a huge dataset even for one row.
-        _, chunk, _ = dataset_layout(d)
-        chunk === nothing || element_count(chunk) <= max_elements ||
-            throw(MestraError("E41",
-                "$(s.path) has a chunk of $(element_count(chunk)) " *
-                "elements, more than the $(max_elements) this reader " *
-                "will materialise"))
+        # The library reads whole chunks, so a chunk this reader
+        # would not materialise costs the same for one row.
+        check_chunk(d; max_elements = max_elements)
         sel = ntuple(i -> i == axis ? range : Colon(), length(jdims))
         try
             d[sel...]

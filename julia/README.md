@@ -125,6 +125,50 @@ empty `errors` list is conforming; warnings are reported and the file
 is still accepted.
 
 
+A file is untrusted input
+-------------------------
+
+A `.mes` file is something somebody else wrote, and every number in it
+about itself -- how many elements a dataset has, how many values a
+filter declares, how deep its groups go -- is that somebody's claim.
+This reader checks each claim before it acts on it, and answers a file
+it will not read with a finding or with a `MestraError` rather than by
+falling over.
+
+What it refuses:
+
+  - **a link that is not a hard link**, anywhere in the public tree.
+    A soft link may point at nothing or in a circle, and an external
+    link would open another file on this file's say-so. The link is
+    asked what kind it is before anything opens it, and anything but a
+    hard link is reported as **E40** and never followed;
+  - **more than it will hold in memory**. A read is refused above
+    `max_elements`, which defaults to 2^31 and is a keyword on `read`,
+    `values` and `rows`, and above `Mestra.MAX_READ_BYTES[]`, which
+    defaults to 1 GiB. The chunk is checked too, because the library
+    reads a whole chunk at a time, so one row of a dataset with a
+    three-gigabyte chunk is refused as well. A file may declare a
+    trillion elements and hold none; validating one and reading one
+    row of it cost what the row costs;
+  - **an object it cannot read**, which is reported as **E41** with
+    its path, after which the pass carries on. One unreadable object
+    never hides what comes after it;
+  - **more depth than anything needs**. Every walk is iterative or
+    capped at 64 levels, so a file with thirty thousand nested groups
+    is reported and not followed. The units parser is capped the same
+    way.
+
+Where the reader can carry on it does: `Mestra.read` returns the
+dataset and puts what it would not follow or could not read in
+`ds.findings`, each a `Finding` with its rule, its path and a
+sentence. `Mestra.validate` never throws on a file it can open, and
+answers one it cannot with E01. Opening a file that is not HDF5 at all
+raises a `MestraError` with rule E01.
+
+`julia/test/hostile/` holds the files this is tested against, and
+`make_hostile.py` is what wrote them.
+
+
 Building a dataset from arrays
 ------------------------------
 
@@ -274,6 +318,7 @@ The public API
     After      field_statistics, integrate, time_series, grouped_split,
                split_leaks
     Errors     MestraError, ValidationReport, Finding
+    Limits     DEFAULT_MAX_ELEMENTS, MAX_READ_BYTES, MAX_DEPTH
 
 `DimArray`, `dimnames`, `permute`, `at` and `MestraError` are exported;
 everything else is reached as `Mestra.name`, because `read`, `write`

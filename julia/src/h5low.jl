@@ -516,21 +516,42 @@ function check_readable(d::HDF5.Dataset;
         "$(path) would take $(bytes) bytes, more than the $(max_bytes) " *
         "this reader will materialise; raise `Mestra.MAX_READ_BYTES[]` " *
         "if the file is trusted"))
-    _, chunk, _ = dataset_layout(d)
-    if chunk !== nothing
-        c = element_count(chunk)
-        c > max_elements && throw(MestraError("E41",
-            "$(path) has a chunk of $(c) elements, more than the " *
-            "$(max_elements) this reader will materialise"))
-        # The library reads a whole chunk at a time, so a chunk this
-        # reader would not materialise is a dataset it will not read.
-        Int128(c) * Int128(max(width, 1)) > max_bytes &&
-            throw(MestraError("E41",
-                "$(path) has a chunk of " *
-                "$(Int128(c) * Int128(max(width, 1))) bytes, more than " *
-                "the $(max_bytes) this reader will materialise"))
-    end
+    check_chunk(d; max_elements = max_elements, max_bytes = max_bytes)
     return n
+end
+
+"""
+    check_chunk(d; max_elements, max_bytes)
+
+The library reads a whole chunk at a time, so a chunk this reader
+would not materialise is a dataset it will not read, however small the
+part asked for.  This is what makes a one-row lazy read of a hostile
+file cost one row.
+"""
+function check_chunk(d::HDF5.Dataset;
+                     max_elements::Integer = DEFAULT_MAX_ELEMENTS,
+                     max_bytes::Integer = MAX_READ_BYTES[])
+    _, chunk, _ = dataset_layout(d)
+    chunk === nothing && return nothing
+    path = try
+        HDF5.name(d)
+    catch
+        "?"
+    end
+    width = try
+        Int(HDF5.API.h5t_get_size(HDF5.datatype(d)))
+    catch
+        1
+    end
+    c = element_count(chunk)
+    c > max_elements && throw(MestraError("E41",
+        "$(path) has a chunk of $(c) elements, more than the " *
+        "$(max_elements) this reader will materialise"))
+    bytes = Int128(c) * Int128(max(width, 1))
+    bytes > max_bytes && throw(MestraError("E41",
+        "$(path) has a chunk of $(bytes) bytes, more than the " *
+        "$(max_bytes) this reader will materialise"))
+    return nothing
 end
 
 """Raw bytes of a whole dataset, in the file's own datatype."""
