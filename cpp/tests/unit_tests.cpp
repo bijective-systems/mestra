@@ -68,6 +68,10 @@ void units_parser() {
     check::is_true(std::string("units \"") + bad + "\" does not parse",
                    !mestra::units_parse(bad));
   }
+  // A units string comes out of a file, so a long run of "(" must be
+  // refused rather than recursed on.
+  check::is_true("a deep run of parentheses is refused",
+                 !mestra::units_parse(std::string(100000, '(') + "m"));
 }
 
 void codec_values() {

@@ -41,6 +41,11 @@ class Parser {
     while (at_ < s_.size() && (s_[at_] == ' ' || s_[at_] == '\t')) ++at_;
   }
 
+  // A units string comes out of a file, so the recursion through
+  // parentheses is bounded rather than trusted: a long run of "("
+  // would otherwise be as deep as the attribute is long.
+  static const int kMaxDepth = 32;
+
   bool expr() { return product(); }
 
   bool product() {
@@ -100,9 +105,13 @@ class Parser {
   bool atom() {
     if (eof()) return false;
     if (peek() == '(') {
+      if (depth_ >= kMaxDepth) return false;
+      ++depth_;
       ++at_;
       skip_space();
-      if (!expr()) return false;
+      const bool inner = expr();
+      --depth_;
+      if (!inner) return false;
       skip_space();
       if (eof() || peek() != ')') return false;
       ++at_;
@@ -155,6 +164,7 @@ class Parser {
 
   const std::string& s_;
   std::size_t at_ = 0;
+  int depth_ = 0;
 };
 
 }  // namespace
