@@ -1,0 +1,177 @@
+Design notes
+============
+
+Why the model is shaped the way it is, recorded on 2026-09-19 from the
+design conversation, so the reasoning survives the people who had it.
+
+
+Long format with roles, not a table per kind of data
+----------------------------------------------------
+
+Every observation is a row; the key columns say where in the sampled
+space the row sits. A static parametric family, a transient run, a
+family of transients, and a sweep of operating points on one geometry
+are the same file with different columns populated. The cost is that
+semantics no longer come from structure (Exodus has one index, time,
+on one mesh, so it never needed to say what the index meant). Roles
+with cardinality rules restore the semantics and make the validator a
+table rather than a program.
+
+Time is not special: it is a key with role `time`, cardinality one,
+and a monotonic check inside its trajectory group. What is special is
+the role table itself.
+
+
+The unit of generalisation is data, not a habit
+-----------------------------------------------
+
+The most damaging silent bug in surrogate work is a train/test split
+that puts time steps of one run, or variants of one geometry, on both
+sides: the model is scored on interpolation inside a case it has
+already seen. Most tools have a grouping option; nothing makes a
+caller use it. The file now declares which group is the unit of
+generalisation, and a split that ignores it is a validator warning
+that a tool built on the format can turn into a refusal.
+
+
+"Varies along" instead of special cases
+---------------------------------------
+
+Node coordinates are not special. They are an array with role
+`coordinates` that varies along nothing (fixed mesh), a group
+(parametric family: one geometry per member, shared by every time
+step and condition of that member), or the row (moving mesh). Regions
+are not special either: they are integer label arrays with category
+tables, one column per taxonomy (CAD face, topology group, material).
+The only structures with fixed shape are cells (connectivity) and the
+row axis.
+
+
+No blocks
+---------
+
+Exodus blocks solve ragged connectivity for mixed cell types and give
+regions a name. VTK's types-offsets-connectivity triple solves the
+first in one structure; label arrays solve the second. Blocks would
+add a third way to say "these cells belong together".
+
+
+Connectivity never varies
+-------------------------
+
+Same connectivity is the correspondence invariant the whole suite is
+built on: node k in every row is the same node. The file states it
+structurally (one support) and the validator checks it; a content hash
+gives each support an identity so the same check is cheap across
+files. Rows with different
+connectivity are on different supports. The file allows several
+supports so it can hold benchmark data with varying meshes; the
+alignment claim is then false and the tools say so.
+
+
+Slots hold data or callables; the callable protocol is four things
+--------------------------------------------------------------------
+
+Data is arrays; a surrogate is the same schema with callables filling
+slots instead of stored arrays; distillation is evaluating the
+callables back into stored arrays. A callable is only `call` (keys
+in, values out), `to_dict`, `from_dict`, and an optional `repr`;
+everything else it knows is inside its own dictionary. The boundary
+is kept that narrow on purpose, so that future models, including
+other people's, integrate by conforming to four things and not to a
+model of what a surrogate is. Three consequences the suite gets for
+free:
+
+  - Composition of per-quantity models (x, y, z, pressure, shear) is
+    a file whose slots reference several callables sharing a support,
+    not a container class inside any one modelling tool, so a tool's
+    own record-keeping is never touched.
+  - Post-processing is written once against the dataset protocol and
+    runs on solver output and predictions alike.
+  - Validation is a comparison of two files, per field, per region,
+    per row.
+  - Provenance, lineage, and validation records are the callable's,
+    not the file's: that is the line between the open format and the
+    commercial tools, and the format does not cross it.
+
+Bounds are attributes of the key columns in every file, so a file
+with callable slots has zero rows and the same keys, and extrapolation
+warnings are generic rather than a library special case.
+
+
+Uncertainty is draws, because transform error must be included
+--------------------------------------------------------------
+
+Summaries computed in coefficient space are not honest in field space
+(in our experience, bands with full coverage in coefficient space
+decode to a small fraction of that pointwise). So model outputs carry joint draws over nodes
+under a `draw` dimension, summaries are derived from them by an open
+routine, and the parameters that change the numbers (draw count,
+seed, batch size) are recorded with the result. Whether draws are
+produced at all is a property of the producer; the format only holds
+them when asked.
+
+
+The public/private boundary
+---------------------------
+
+Everything a reader needs to use the data is public and readable
+without any proprietary dependency. A private group holds fitted
+state, algorithms, and the producer's own records; readers ignore it.
+This is what lets the format be open while the tools that produce
+callables stay closed, and it makes "what does an open user get from
+a distilled model" a structural fact: the table, not the object.
+
+
+HDF5, laid out to also be netCDF-4
+----------------------------------
+
+netCDF-4 is HDF5 with a constrained layout: named dimensions as
+dimension scales, plain attributes, groups. Staying inside that subset
+costs little (no compound types, references, or enums) and buys named
+dimensions in every language (xarray, MATLAB's ncread, Julia's
+NCDatasets, R's ncdf4), which is what makes "permute by name" work
+without each reader inventing it. The transpose confusion between
+MATLAB and Python is a naming problem, and named dimensions dissolve
+it. The CF and UGRID vocabularies are not adopted; `units` and
+`long_name` are borrowed because they are sensible.
+
+
+Conformance by corpus
+---------------------
+
+A pattern that has worked for us before: the spec plus golden files
+with expected values define conformance; every implementation in
+every language runs the corpus; no implementation is the reference.
+The corpus is what makes a MATLAB writer and a C++ reader agree
+without either reading the other's code.
+
+
+Alternatives considered
+-----------------------
+
+PLAID (Safran; CGNS-based; scalars, fields, meshes, splits). Closest
+prior art and one we have used ourselves. Not adopted because
+its per-sample tree layout is poor for slicing one field across all
+samples, it has no first-class time trajectories or family
+correspondence, and the CGNS toolchain is heavy in C++. A lossless
+export to PLAID should be possible and is worth keeping in mind.
+
+CGNS directly. Aerospace standard with zones, solutions, iterative
+data. Same weight problem; its "family" concept is about boundary
+conditions, not parametric correspondence.
+
+VTK plus PVD. Fine for a single time series; carries no semantics and
+no notion of rows.
+
+Exodus. The direct ancestor of this design: global, nodal, and
+element variables over an index; node and side sets; QA records.
+Generalised here by replacing the time index with role-tagged keys
+and replacing blocks with labels.
+
+The Well and PDEBench. HDF5 conventions for time-dependent physics
+built for machine learning; useful precedent for the draw and time
+handling, no support for supports or provenance.
+
+netCDF-4 with CF and UGRID wholesale. Rejected as vocabulary, adopted
+as layout discipline.
