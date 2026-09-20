@@ -394,6 +394,40 @@ classdef H5
         %   A group whose links cannot be listed gives an empty list
         %   rather than an error, so that one damaged group does not
         %   end a walk over the rest of the file.
+        %
+        %   The names come from one H5L.iterate pass and not from one
+        %   indexed lookup each.  An indexed lookup into a group whose
+        %   links live in the heap rebuilds the group's whole link
+        %   table to answer it, so listing a group of n links that way
+        %   costs n squared; on a file with four thousand scalars that
+        %   is most of the time an open takes.  H5_INDEX_NAME is the
+        %   library's own byte order over the names, which is the
+        %   order sortByBytes wants, so the sort below has nothing
+        %   left to do on a well-formed group and is kept for the one
+        %   that is not.
+            names = {};
+            try
+                info = H5G.get_info(gid);
+                n = double(info.nlinks);
+                if n == 0, return, end
+                [~, ~, names] = H5L.iterate(gid, 'H5_INDEX_NAME', ...
+                    'H5_ITER_INC', 0, @mestra.internal.H5.collectLink, {});
+                names = reshape(names, 1, []);
+            catch
+                names = mestra.internal.H5.childrenByIndex(gid);
+            end
+            names = mestra.internal.H5.sortByBytes(names);
+        end
+
+        function [status, names] = collectLink(gid, name, names) %#ok<INUSD>
+        %collectLink  The H5L.iterate callback children uses.
+            names{end + 1} = name;
+            status = 0;
+        end
+
+        function names = childrenByIndex(gid)
+        %childrenByIndex  children, one indexed lookup at a time, for a
+        %   build or a group that will not iterate.
             names = {};
             try
                 info = H5G.get_info(gid);
@@ -403,43 +437,75 @@ classdef H5
                     names{i} = H5L.get_name_by_idx(gid, '.', ...
                         'H5_INDEX_NAME', 'H5_ITER_INC', i - 1, 'H5P_DEFAULT');
                 end
-                names = mestra.internal.H5.sortByBytes(names);
             catch
                 names = {};
             end
         end
 
-        function kind = linkKind(gid, name)
-        %linkKind  What sort of link a name is, without following it.
-        %   'hard', 'soft', 'external' or 'unknown'.  H5L.get_info
-        %   reads the link itself and never the object it points at,
-        %   which is the only safe question to ask first: a soft link
-        %   may dangle or loop, and an external link names another
-        %   file, which this package never opens.
-            kind = 'unknown';
+        function out = listGroup(gid)
+        %listGroup  Every link of a group, asked about once: its name,
+        %   what it really is, and the address a hard link points at.
+        %   A 1-by-n struct array with fields name, kind and address,
+        %   where kind is what childType reports.
+        %
+        %   A walk wants all three of those for every child, and
+        %   asking them separately is three lookups per link where one
+        %   H5L.get_info answers two of them.
+            out = struct('name', {}, 'kind', {}, 'address', {});
+            names = mestra.internal.H5.children(gid);
+            for i = 1:numel(names)
+                link = mestra.internal.H5.linkInfo(gid, names{i});
+                rec.name = names{i};
+                rec.address = link.address;
+                switch link.kind
+                    case 'hard'
+                        rec.kind = mestra.internal.H5.objectKind(gid, ...
+                                                                 names{i});
+                    case 'unknown'
+                        rec.kind = 'unreadable';
+                    otherwise
+                        rec.kind = link.kind;
+                end
+                out(end + 1) = rec; %#ok<AGROW>
+            end
+        end
+
+        function link = linkInfo(gid, name)
+        %linkInfo  What sort of link a name is and where it points,
+        %   without following it.  Fields: kind ('hard', 'soft',
+        %   'external' or 'unknown') and address ([] for anything but
+        %   a hard link).
+        %
+        %   H5L.get_info reads the link itself and never the object it
+        %   points at, which is the only safe question to ask first: a
+        %   soft link may dangle or loop, and an external link names
+        %   another file, which this package never opens.  Two names
+        %   with one address are one object, which is how a walk
+        %   notices that a file's groups form a cycle.
+            link = struct('kind', 'unknown', 'address', []);
             try
                 info = H5L.get_info(gid, name, 'H5P_DEFAULT');
                 switch double(info.type)
-                    case 0, kind = 'hard';
-                    case 1, kind = 'soft';
-                    case 64, kind = 'external';
+                    case 0
+                        link.kind = 'hard';
+                        if isfield(info, 'address')
+                            link.address = double(info.address);
+                        end
+                    case 1, link.kind = 'soft';
+                    case 64, link.kind = 'external';
                 end
             catch
             end
         end
 
+        function kind = linkKind(gid, name)
+        %linkKind  What sort of link a name is, without following it.
+            kind = mestra.internal.H5.linkInfo(gid, name).kind;
+        end
+
         function addr = linkAddress(gid, name)
         %linkAddress  The address a hard link points at, or [].
-        %   Two names with one address are one object, which is how a
-        %   walk notices that a file's groups form a cycle.
-            addr = [];
-            try
-                info = H5L.get_info(gid, name, 'H5P_DEFAULT');
-                if double(info.type) == 0 && isfield(info, 'address')
-                    addr = double(info.address);
-                end
-            catch
-            end
+            addr = mestra.internal.H5.linkInfo(gid, name).address;
         end
 
         function out = sortByBytes(names)
@@ -493,6 +559,13 @@ classdef H5
                     t = 'unreadable';
                     return
             end
+            t = mestra.internal.H5.objectKind(gid, name);
+        end
+
+        function t = objectKind(gid, name)
+        %objectKind  'group', 'dataset', 'other' or 'unreadable' for a
+        %   name already known to be a hard link.  childType is what a
+        %   caller that does not know that yet asks.
             try
                 oid = H5O.open(gid, name, 'H5P_DEFAULT');
             catch
@@ -648,10 +721,23 @@ classdef H5
         %
         %   The key is the object's address, which is exactly what the
         %   eight bytes of an H5R_OBJECT reference hold, so resolving a
-        %   scale needs no dereference either.  The value carries the
-        %   link name and the length, because the chunk default of
-        %   section 23 is judged against the dimension's length and not
-        %   the dataset's own extent (decision 35).
+        %   scale needs no dereference either.  The value carries, for
+        %   each scale:
+        %
+        %     name       the link name, which is the dimension's name
+        %     length     because the chunk default of section 23 is
+        %                judged against the dimension's length and not
+        %                the dataset's own extent (decision 35)
+        %     hasName    whether it carries a NAME attribute (E25)
+        %     path       its HDF5 path, so that a finding can name it
+        %                and so that decision 43 can leave /private out
+        %     unlimited  whether its own extent is unlimited (E43)
+        %     order      the attribute creation order flags of its
+        %                creation property list (E42)
+        %
+        %   The last three cost nothing here and would otherwise need a
+        %   second walk of the file: this is the one pass that already
+        %   sees every scale there is.
             map = containers.Map('KeyType', 'double', 'ValueType', 'any');
             limits = mestra.internal.Limits.get();
             budget = limits.maxObjects;
@@ -668,48 +754,54 @@ classdef H5
                 catch
                     continue
                 end
-                for name = mestra.internal.H5.children(gid)
+                for entry = mestra.internal.H5.listGroup(gid)
                     budget = budget - 1;
                     if budget <= 0, break, end
-                    if ~strcmp(mestra.internal.H5.linkKind(gid, name{1}), ...
-                               'hard')
-                        continue    % a link this reader never follows
-                    end
                     if strcmp(here, '/')
-                        path = ['/' name{1}];
+                        path = ['/' entry.name];
                     else
-                        path = [here '/' name{1}];
+                        path = [here '/' entry.name];
                     end
-                    kind = mestra.internal.H5.childType(gid, name{1});
-                    if strcmp(kind, 'group')
+                    if strcmp(entry.kind, 'group')
                         pending{end + 1} = path; %#ok<AGROW>
                         depths(end + 1) = depth + 1; %#ok<AGROW>
-                    elseif strcmp(kind, 'dataset')
-                        address = mestra.internal.H5.linkAddress(gid, name{1});
+                    elseif strcmp(entry.kind, 'dataset')
+                        address = entry.address;
                         if isempty(address) || map.isKey(address), continue, end
                         try
-                            did = H5D.open(gid, name{1});
+                            did = H5D.open(gid, entry.name);
                         catch
                             continue
                         end
                         try
-                            if H5DS.is_scale(did) > 0
-                                sid = H5D.get_space(did);
-                                [~, dims] = H5S.get_simple_extent_dims(sid);
-                                H5S.close(sid);
+                            names = mestra.internal.H5.attrNames(did);
+                            % Every scale carries CLASS, so a dataset
+                            % without it is not one and needs no
+                            % further reading.  That is most of the
+                            % datasets in a wide file.
+                            if any(strcmp(names, 'CLASS')) && ...
+                               H5DS.is_scale(did) > 0
+                                info = mestra.internal.H5.dsetInfo(did);
                                 length_ = 0;
-                                if ~isempty(dims)
-                                    length_ = double(dims(1));
+                                unlimited = false;
+                                if ~isempty(info.dims)
+                                    length_ = info.dims(1);
+                                    unlimited = info.maxdims(1) < 0;
                                 end
                                 map(address) = struct( ...
-                                    'name', name{1}, 'length', length_, ...
-                                    'hasName', ...
-                                    mestra.internal.H5.hasAttr(did, 'NAME'));
+                                    'name', entry.name, 'length', length_, ...
+                                    'hasName', any(strcmp(names, 'NAME')), ...
+                                    'path', path, 'unlimited', unlimited, ...
+                                    'order', info.attrOrder);
                             end
                         catch
                         end
                         H5D.close(did);
                     end
+                    % Anything else is a link this reader never
+                    % follows, or an object it cannot open; the rules
+                    % for those are E40 and E41 and belong to the
+                    % caller's own walk, not to this map.
                 end
                 H5G.close(gid);
             end
@@ -720,13 +812,13 @@ classdef H5
         %   `axis` is zero based and in FILE order.  `map` comes from
         %   scaleMap; without it nothing can be resolved and the axis
         %   reads as unattached, which is E25.  The result is a struct
-        %   array with fields name, length and hasName, one per scale.
+        %   array shaped like a scaleMap record, one per scale.
         %
         %   The name comes from the link and never from the NAME
         %   attribute, which holds the same sentence in every scale in
         %   the file, and never from a path lookup, which section 21
         %   forbids.
-            found = struct('name', {}, 'length', {}, 'hasName', {});
+            found = mestra.internal.H5.noScales();
             if nargin < 3 || isempty(map), return, end
             if ~mestra.internal.H5.hasAttr(did, 'DIMENSION_LIST')
                 return
@@ -745,10 +837,24 @@ classdef H5
                 if map.isKey(address)
                     found(end + 1) = map(address); %#ok<AGROW>
                 else
-                    found(end + 1) = struct('name', '', 'length', -1, ...
-                                            'hasName', false); %#ok<AGROW>
+                    found(end + 1) = ...
+                        mestra.internal.H5.unresolvedScale(); %#ok<AGROW>
                 end
             end
+        end
+
+        function s = noScales()
+        %noScales  An empty scale list of the shape scaleMap fills.
+            s = struct('name', {}, 'length', {}, 'hasName', {}, ...
+                       'path', {}, 'unlimited', {}, 'order', {});
+        end
+
+        function s = unresolvedScale()
+        %unresolvedScale  What an axis attached to something this
+        %   reader could not resolve to a dimension looks like.  A
+        %   length of -1 is what says so; E25 is the rule.
+            s = struct('name', '', 'length', -1, 'hasName', false, ...
+                       'path', '', 'unlimited', false, 'order', 0);
         end
 
         function n = numScales(did, axis)
