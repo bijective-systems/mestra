@@ -907,7 +907,7 @@ class _FileValidator:
         axis_coordinates = None
         if kind == "axis" and isinstance(inside.get("coordinates"),
                                          h5py.Dataset):
-            # Section 24, decision 27: the digest of an axis support
+            # Section 24: the digest of an axis support
             # is over the coordinates as they are stored, so that a
             # file whose axis coordinates wrongly vary breaks E35 and
             # nothing else.
@@ -1205,9 +1205,8 @@ class _FileValidator:
         support check.
 
         A *dataset* this version does not know, inside a group it
-        does know, is checked like any other, and that is finding 12
-        of the Phase 3 report, on which the four implementations
-        split two against two. The text settles it in two steps.
+        does know, is checked like any other. The text settles
+        that in two steps.
         Section 14 exempts two things from the byte-level rules of
         sections 18 to 25 and names them: "`/private` is not
         checked, and neither is any group this version of the format

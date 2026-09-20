@@ -152,8 +152,7 @@ classdef PostTest < matlab.unittest.TestCase
         function integrateComputesAWeightAndSaysSo(testCase)
         %integrateComputesAWeightAndSaysSo  Section 3: a file with no
         %   weight array still integrates, and the call says where
-        %   the weight came from.  This is P1 of the ergonomics
-        %   report, which no implementation could satisfy.
+        %   the weight came from, rather than refusing for want of one.
             d = PostTest.family();
             d.addNodeArray('s0', 'pressure', ...
                            [101 102 103 104 105 106
@@ -187,9 +186,9 @@ classdef PostTest < matlab.unittest.TestCase
         % ------------------------------- 4. post-processing
 
         function fieldStatisticsHasNoGroupingColumnWithoutBy(testCase)
-        %fieldStatisticsHasNoGroupingColumnWithoutBy  Section 4, and
-        %   P2 of the ergonomics report: no column at all, and never
-        %   one called after somebody else's example label.
+        %fieldStatisticsHasNoGroupingColumnWithoutBy  Section 4: no
+        %   column at all, and never one called after somebody
+        %   else's example label.
             d = PostTest.withPressure();
             t = mestra.fieldStatistics(d, 'pressure');
             testCase.verifyEqual(t.Properties.VariableNames, ...
@@ -227,9 +226,9 @@ classdef PostTest < matlab.unittest.TestCase
         end
 
         function fieldStatisticsReportsOverScalars(testCase)
-        %fieldStatisticsReportsOverScalars  P5 of the ergonomics
-        %   report: a scalars-only file is a first-class case and the
-        %   one verb that suits it must apply to it.
+        %fieldStatisticsReportsOverScalars  A scalars-only file is a
+        %   first-class case, and the one verb that suits it must
+        %   apply to it.
             d = mestra.read(fullfile(corpusRoot(), 'scalars_only', ...
                                      'case.mes'));
             t = mestra.fieldStatistics(d, 'cl');
@@ -303,9 +302,8 @@ classdef PostTest < matlab.unittest.TestCase
         end
 
         function groupedSplitNeverReturnsAnEmptyPart(testCase)
-        %groupedSplitNeverReturnsAnEmptyPart  Section 4, and J1 of
-        %   the ergonomics report: with at least as many units as
-        %   parts, every named part gets one.
+        %groupedSplitNeverReturnsAnEmptyPart  Section 4: with at
+        %   least as many units as parts, every named part gets one.
             d = mestra.read(fullfile(corpusRoot(), 'scalars_only', ...
                                      'case.mes'));
             s = mestra.groupedSplit(d, struct('train', 0.99, ...

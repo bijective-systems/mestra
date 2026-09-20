@@ -1,6 +1,6 @@
 // `affine`, the reference callable of SPEC.md section 27.
 //
-// The summation order is fixed by decision 25: the dot product is
+// SPEC.md section 27 fixes the summation order: the dot product is
 // accumulated over the keys in the declared key order and b is added
 // last, with no fused multiply-add.  The whole library is compiled
 // with -ffp-contract=off so that the compiler may not fuse a multiply
@@ -13,7 +13,7 @@
 
 #include "mestra/io.hpp"
 
-// Decision 25 fixes the summation order, and the corpus compares
+// Section 27 fixes the summation order, and the corpus compares
 // float64 results bit for bit, so no multiply and add here may be
 // contracted into one rounding step.  The CMake build passes
 // -ffp-contract=off, but a translation unit that says so itself is

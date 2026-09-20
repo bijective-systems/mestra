@@ -7,10 +7,10 @@ read attributes and dataspaces only."
 
 Attributes and dataspaces are linear in the number of objects, so an
 open is linear in the number of row-dimensioned datasets or it is not
-doing what the sentence says. It was not: finding 4 of the Phase 3
-report measured 3.1 s at 125 key columns, 10.6 s at 250, 41.6 s at
-500 and 155.5 s at 1000, which quadruples for every doubling and is
-the signature of a scan inside a scan. The scan inside the scan was
+doing what the sentence says. It was not: an open took 3.1 s at 125
+key columns, 10.6 s at 250, 41.6 s at 500 and 155.5 s at 1000, which
+quadruples for every doubling and is the signature of a scan inside a
+scan. The scan inside the scan was
 the section 21 scale index, which maps a scale's object address to
 its link name: it was rebuilt from a walk of the whole file once per
 dataset, because it was looked up through `dataset.file`, which
@@ -229,7 +229,7 @@ def test_the_open_is_linear_from_a_thousand_datasets_to_four_thousand(
 
 @pytest.mark.slow
 def test_a_thousand_columns_open_in_seconds_and_not_minutes(opens):
-    """The file of finding 4, which took 155 s to open.
+    """The file that once took 155 s to open.
 
     A thousand key columns is 2.8 MB and about 1030 row-dimensioned
     datasets: an ordinary file, and one a user will wait for. It now

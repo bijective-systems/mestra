@@ -148,7 +148,7 @@ n_out_flat(o::AffineOutput) = isempty(o.shape) ? 1 : Int(prod(o.shape))
 
 Evaluate every output on a keys table.  The dot product is accumulated
 over the keys in the declared key order and b is added last, with no
-fused multiply-add (section 27, decision 25).  The loop below is
+fused multiply-add (section 27).  The loop below is
 written out for that reason: it uses Float64 throughout, it never
 calls `muladd`, and it carries no `@simd` or `@fastmath`, either of
 which would let the compiler reassociate or contract it.  Julia's

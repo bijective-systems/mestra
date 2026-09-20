@@ -72,7 +72,7 @@ classdef Reader
             root = H5G.open(fid, '/');
             d.skipped = {};
             H5 = mestra.internal.H5;
-            % Section 21, decision 51: the scale names come from this
+            % Section 21: the scale names come from this
             % map, built by a bounded walk of our own, and never from
             % asking the library for a scale object's path.
             scales = H5.scaleMap(fid);

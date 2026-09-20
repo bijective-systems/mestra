@@ -1,8 +1,8 @@
 The skeleton every per-language README is cut to
 ================================================
 
-Phase 5 of `plan.md` gives the documents four layers, each complete at
-its own depth and nothing repeated between them. A per-language README
+The documents come in four layers, each complete at its own depth and
+nothing repeated between them. A per-language README
 is not a layer: it is the door to one interface. Anything about the
 format belongs in `guide.md`, anything normative in `../SPEC.md`, and
 anything about one call belongs in that call's docstring or help text,
@@ -38,8 +38,8 @@ What order this language hands an array back in, that the dimension
 names are what two languages agree on, and the call that permutes or
 indexes by name. State the value at one named coordinate of the
 example above, so a reader can check their own run against it. This
-section is the one that has to be right; the ergonomics review found
-it was the part of the documents that never needed a second reading.
+section is the one that has to be right: it is the part of the
+documents a user should never have to read twice.
 
 
 4. What the reader refuses

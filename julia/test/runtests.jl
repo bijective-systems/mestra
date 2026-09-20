@@ -809,7 +809,7 @@ function scale_paths(path::AbstractString)
     end
 end
 
-@testset "the writer writes the corpus's object header layout (finding 8)" begin
+@testset "the writer writes the corpus's object header layout" begin
     # libhdf5 2.0 changed the default low libver bound from
     # `earliest` to `v18`, so a writer that takes the default writes
     # version-2 object headers.  The root one then records when the
@@ -857,8 +857,8 @@ end
 end
 
 @testset "every scale is created as section 21 requires (E42)" begin
-    # Decision 52, and the only decision in three rounds that changes
-    # the bytes of every golden file.  A scale created with the
+    # The one rule of section 16 that changes the bytes of every
+    # golden file.  A scale created with the
     # library's defaults takes at most 4085 attachments, and the
     # 4086th fails after deleting the REFERENCE_LIST it was extending,
     # leaving a file every reader and every validator accepts.  So the
@@ -924,10 +924,9 @@ end
     # Section 21: REFERENCE_LIST is informational and a scale whose
     # one is missing, short or stale is not an error.  It is not a
     # hypothetical either: the 4086th attachment to a scale created
-    # without decision 52's property deletes the REFERENCE_LIST it was
-    # extending, and `docs/scale/report.md` 6.5 measured this reader
-    # calling the axis of such a file `unknown` while every other
-    # reader still called it `row`.  The fixture is
+    # without that property deletes the REFERENCE_LIST it was
+    # extending, and this reader called the axis of such a file
+    # `unknown` while every other reader still called it `row`.  The fixture is
     # `vectors/cases/mesh_two_rows/case.mes` with the `row` scale's
     # REFERENCE_LIST deleted and `component_1`'s truncated to one
     # entry; see julia/test/scales/make_scales.py.
@@ -979,7 +978,7 @@ end
     # linear-ish in the dataset count rather than quadratic in it, so
     # the bound is generous: it is there to catch a reader that went
     # back to asking the library which scale is attached, which cost
-    # 516 s at four thousand datasets (docs/scale/report.md 2.3).
+    # 516 s at four thousand datasets.
     src = case_file("wide_keys")
     @test isfile(src)   # generated on demand; see vectors/README.md
     open_s = @elapsed ds = Mestra.read(src)

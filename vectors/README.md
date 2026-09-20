@@ -169,9 +169,9 @@ Where the corpus drove a change to the specification
 
 Building one file per rule found fourteen places where the text was
 silent, self-contradictory, or describing something no file could do.
-All fourteen were settled in the specification on 2026-09-20 and are
-listed in its section 16; the corpus follows the settled text and
-carries no private convention of its own. The three that shaped this
+All fourteen are settled in the specification and listed in its
+section 16; the corpus follows the settled text and carries no
+private convention of its own. The three that shaped this
 directory most:
 
   - expected.json has a sixth field, `evaluation`, without which the
@@ -287,8 +287,9 @@ purpose.
 Creation order is all it refuses on. Section 21 asks a writer for
 object time tracking off as well, and the check reads that property
 too, but a scale it reads as tracking prints a note beside the case
-and fails nothing (decision 57). HDF5 stores the flag only in a
-version 2 object header, and it is tracking the attribute creation
+and fails nothing, which is what section 16 settles. HDF5 stores the
+flag only in a version 2 object header, and it is tracking the
+attribute creation
 order that gives a scale one: on a version 1 header the four
 timestamps are kept whatever the writer asked for, and the property
 reads back as tracking on. So the only scale the flag can be read

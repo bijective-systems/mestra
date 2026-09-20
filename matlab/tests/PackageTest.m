@@ -355,9 +355,9 @@ classdef PackageTest < matlab.unittest.TestCase
         %   does not know are section 23's: a dataset with a row
         %   dimension must be chunked (E27).
         %
-        %   Finding 12 of the Phase 3 report: two implementations
-        %   reported E27 on such a file and two reported nothing.
-        %   Both names below are the same rule, and the one this
+        %   Such a file can be read as E27 or as nothing at all, which
+        %   is why it is pinned here.  Both names below are the same
+        %   rule, and the one this
         %   version happens to know as a support's own dimension scale
         %   draws no W11 while the other does.
             for probe = {{'row', false}, {'extra', true}}

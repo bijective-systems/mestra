@@ -55,7 +55,7 @@ class Id {
 // would exhaust memory on a machine that can open the file at all.
 const std::size_t kMaxAttributeElements = 1u << 20;     // 1,048,576
 const std::size_t kMaxAttributeBytes = std::size_t(1) << 30;   // 1 GiB
-// Section 29, decision 48: an eager read refuses a dataset whose
+// Section 29: an eager read refuses a dataset whose
 // declared element count is above a stated maximum, and 2^31 is the
 // default to state.  A lazy read and a row-range read are not subject
 // to it, because they never materialise the whole dataset.

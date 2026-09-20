@@ -109,11 +109,10 @@ def test_an_evaluated_file_has_no_callables_group_at_all(tmp_path, name):
     so the result has no callable to keep: the `/callables` group is
     absent from an evaluated file, not present and empty."
 
-    Finding 7 of the Phase 3 report found three answers to this in
-    four implementations, one of them a group present and empty. The
-    difference is invisible in the values and visible under section
-    30's structural equality, so it is asserted on the file and not
-    on the dataset.
+    That sentence has been read three ways, one of them a group
+    present and empty. The difference is invisible in the values and
+    visible under section 30's structural equality, so it is asserted
+    on the file and not on the dataset.
     """
     import h5py
 

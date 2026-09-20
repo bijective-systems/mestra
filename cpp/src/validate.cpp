@@ -441,7 +441,7 @@ void Validator::check_string_dataset(const std::string& path,
   }
 }
 
-// E43, decision 54.  `row` is the only dimension that may be
+// E43.  `row` is the only dimension that may be
 // unlimited, file-level or support-local, because every other
 // dimension carries its length in its name and one that grows makes
 // its own name false.  The check is on the dataspace: an axis whose
@@ -547,7 +547,7 @@ void Validator::scales() {
     const std::pair<std::string, int> here = todo.back();
     todo.pop_back();
     if (here.second > internal::kMaxGroupDepth) continue;
-    // /private is not checked (decision 43) and neither is a group
+    // /private is not checked (section 14) and neither is a group
     // this version does not know.
     for (const Member& m : f_.members(here.first)) {
       if (m.kind != internal::LinkKind::Hard) continue;
@@ -575,7 +575,7 @@ void Validator::scales() {
                   "a dimension scale with no NAME attribute, which section "
                   "21 requires of one");
           }
-          // E42, decision 52.  Nothing about the creation properties
+          // E42.  Nothing about the creation properties
           // is visible in a byte position, so the rule is checked by
           // asking the property list back.  A scale created without
           // them keeps its REFERENCE_LIST in an object header message,
@@ -600,8 +600,8 @@ void Validator::scales() {
 
 void Validator::unknown_dataset(const std::string& path,
                                 const DsetInfo& info) {
-  // The Phase 3 report, SHOULD-FIX 12: a dataset this version does
-  // not know, inside a group it does.  Section 14 checks the
+  // A dataset this version does not know, inside a group it does.
+  // Section 14 checks the
   // byte-level rules of sections 18 to 25 "on the public objects
   // only", and exempts /private and a *group* this version does not
   // know; section 28 provides for a new attribute and a new group
@@ -633,7 +633,7 @@ void Validator::unknown_dataset(const std::string& path,
 }
 
 void Validator::private_group() {
-  // Decision 32: E18 is reported beside the rule that found the
+  // E18 is reported beside the rule that found the
   // missing public thing, in a file that also carries /private.  A
   // writer that moved the public thing into the private part is what
   // the rule is about; these are the two facts a reader can see, and
@@ -1013,9 +1013,9 @@ void Validator::keys() {
         warn("W04", p,
              outside.message("key value(s) outside the declared bounds"));
       } else if (k.has_lower && k.has_upper && any && hi > lo) {
-        // Decision 20: more than a factor of four in width.  A value
-        // outside the bounds is W04 and not W08, and decision 36
-        // takes the rule out of a zero observed width altogether,
+        // More than a factor of four in width.  A value outside the
+        // bounds is W04 and not W08, and a zero observed width
+        // takes the rule out altogether,
         // which covers a file with no rows, a key with one distinct
         // value and a key with no finite value.
         if ((k.upper - k.lower) > 4.0 * (hi - lo)) {

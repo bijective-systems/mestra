@@ -5,10 +5,9 @@ same slots, now holding data. Distillation is that operation on a
 grid.
 
 What the result carries under `/callables`. Section 10 says only
-that the slots now hold data, and the four implementations read that
-sentence three different ways, which is finding 7 of the Phase 3
-report: two leave no `/callables` group, one leaves it present and
-empty, one leaves the whole callable with its dictionary. All three
+that the slots now hold data, and that sentence can be read three
+ways: leave no `/callables` group, leave it present and empty, or
+leave the whole callable with its dictionary. All three
 conform -- section 13 lets a container group be absent or present
 and empty, and no rule forbids a callable nothing references -- so
 the sentence alone does not settle it and another one has to.

@@ -1,12 +1,11 @@
 """One rule set decides every entry point.
 
-Finding 13 of the Phase 3 report: "a caller moving between two
-languages will find the same invalid file opens in one and is refused
-in the other", because the metadata open and the read do not name the
-same rule. Within this implementation they do, and these tests are
-what holds it: over every case of the corpus and every file of the
-hostile subset, the structural rule the metadata open names is the
-one a read names.
+Where a metadata open and a read do not name the same rule, a caller
+moving between two languages finds the same invalid file opening in
+one and refused in the other. Within this implementation they name
+the same rule, and these tests are what holds it: over every case of
+the corpus and every file of the hostile subset, the structural rule
+the metadata open names is the one a read names.
 
 The set is `mestra.reader.REFUSED`, which is the one section 2 of
 `docs/api-conventions.md` fixes: E01, E16, E19, E25, E26, E29, E30,

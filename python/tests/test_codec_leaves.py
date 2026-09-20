@@ -10,15 +10,14 @@ strings, an empty fixed-length string dataset, an integer, a float of
 the same value, both booleans, a string, an empty string, the null
 sentinel, the most negative int64 and the smallest subnormal float64.
 
-It is the case the Phase 3 verifier built, written here the same way:
-with h5py against sections 17, 18, 21 and 25 directly, so that the
-source comes from no implementation, and with the expected tagged
+The source is built here with h5py against sections 17, 18, 21 and 25
+directly, so that it comes from no implementation, and with the expected tagged
 form of section 30 stated beside it rather than computed. The
 callable's `type` is one nothing registers, so the reader keeps the
 dictionary whole rather than interpreting it.
 
-Two things are asserted, and the second is what finding 3 of the
-Phase 3 report was: reading the file gives the reference exactly, and
+Two things are asserted: reading the file gives the reference
+exactly, and
 writing it again gives a file structurally equal to the source. An
 empty fixed-length string dataset is the leaf that made the
 difference, because a bare Python list carries no element type and
@@ -203,7 +202,7 @@ def test_every_leaf_reads_as_the_specification_states(tmp_path):
 
 
 def test_every_leaf_survives_a_round_trip(tmp_path):
-    """Finding 3 of the Phase 3 report, as a test.
+    """Every leaf of the codec survives a write and a read.
 
     An empty fixed-length string dataset is the leaf that used to
     come back as an empty float64 dataset, because the reader handed

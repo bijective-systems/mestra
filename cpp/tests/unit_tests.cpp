@@ -250,7 +250,7 @@ void affine_worked_example() {
   check::is_true("a missing key column is an error at call time", missing);
 }
 
-// Ergonomics, checked rather than asserted: build the file of
+// Usability, checked rather than asserted: build the file of
 // docs/example.md from plain vectors, write it, and see that the
 // validator finds nothing to say.  If this stops reading like a
 // handful of calls, the API has gone wrong.
@@ -555,7 +555,7 @@ void conventions_write() {
   }
   std::remove(again.c_str());
 
-  // The trap the ergonomics review found: `varies` is assigned on a
+  // An easy trap to fall into: `varies` is assigned on a
   // slot whose shape is already built.  It must not be written out
   // for the validator to reject afterwards.
   mestra::Dataset broken = d;
@@ -957,7 +957,7 @@ void hardened_value_types() {
     }
   } catch (const mestra::Error& e) {
     // E41: an object the reader cannot read, which is what a nesting
-    // past the cap is (section 14, decision 48).
+    // past the cap is (section 14).
     refused = e.rule() == "E41";
   }
   check::is_true("a dictionary deeper than the limit is refused", refused);

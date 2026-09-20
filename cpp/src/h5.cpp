@@ -916,14 +916,14 @@ std::string File::dataset_link_name(hid_t object) const {
 void File::make_scale(const std::string& path, hsize_t length,
                       bool unlimited, const std::vector<hsize_t>& chunk) {
   make_group(parent_of(path));
-  // Section 21, decision 31: one-dimensional H5T_IEEE_F32BE, no value
+  // Section 21: one-dimensional H5T_IEEE_F32BE, no value
   // ever written, chunked with chunk length 1 when it is unlimited and
   // with a chunk equal to its length when it is not, which is what
   // H5DSset_scale leaves behind.
   const hsize_t max = unlimited ? H5S_UNLIMITED : length;
   Id space(H5Screate_simple(1, &length, &max));
   Id dcpl(H5Pcreate(H5P_DATASET_CREATE));
-  // Section 21, decision 52.  Tracking attribute creation order gives
+  // Section 21.  Tracking attribute creation order gives
   // the scale a version 2 object header, which is what lets its
   // REFERENCE_LIST live in the file's fractal heap instead of in an
   // object header message, where an attribute may not exceed 64 KiB.

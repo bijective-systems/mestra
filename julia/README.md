@@ -466,10 +466,10 @@ library writes, and libhdf5 2.0 changed its default from `earliest` to
 `v18`: a writer that takes that default writes version-2 object
 headers, whose root one records four timestamps, and a file that
 records when it was written is not byte reproducible. The layout also
-costs every other implementation: the Phase 3 report measured a C++
-validator taking 4.98 s on a thousand-key file in the newer layout
-against 0.68 s in this one. Files this package writes have the same
-object header version as the corpus's golden files, object for object.
+costs every other implementation: a C++ validator takes 4.98 s on a
+thousand-key file in the newer layout against 0.68 s in this one.
+Files this package writes have the same object header version as the
+corpus's golden files, object for object.
 
 One object in every file is the exception, and section 21 makes it:
 each dimension scale is created with attribute creation order tracked
@@ -701,5 +701,5 @@ and every axis of it must still be named: this package resolves an
 axis through the dataset's own `DIMENSION_LIST` and the map of scale
 addresses it builds during its own walk, and never through
 `REFERENCE_LIST` or `H5DSis_attached`, which reads one. A reader that
-does it the other way calls those axes `unknown`, which is what
-`docs/scale/report.md` 6.5 measured this one doing.
+does it the other way calls those axes `unknown`, which is what this
+one did before it built the map.
