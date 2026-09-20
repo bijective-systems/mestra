@@ -578,11 +578,20 @@ function checkKeyValues(ctx, did, path, role, values)
     if ~isnumeric(values), return, end
     lower = numAttr(did, 'lower');
     upper = numAttr(did, 'upper');
-    outside = false;
-    if ~isempty(lower) && any(double(values) < lower), outside = true; end
-    if ~isempty(upper) && any(double(values) > upper), outside = true; end
-    if outside
-        rep.add('W04', path, 'a value is outside the declared bounds');
+    v = double(reshape(values, 1, []));
+    outside = false(1, numel(v));
+    if ~isempty(lower), outside = outside | (v < lower); end
+    if ~isempty(upper), outside = outside | (v > upper); end
+    if any(outside)
+        % Section 5 of docs/api-conventions.md: a rule that could fire
+        % once per row fires once, with the count and the first three
+        % rows, so that the report stays a report on a long file.
+        idx = find(outside) - 1;
+        rep.add('W04', path, ...
+            ['%s are outside the declared bounds [%s, %s]; widen the ' ...
+             'bounds or leave the rows out'], ...
+            mestra.internal.Report.someRows(idx, numel(v)), ...
+            bound(lower), bound(upper));
     elseif ~isempty(lower) && ~isempty(upper) && ~isempty(values)
         finite = double(values(isfinite(double(values))));
         if isempty(finite), return, end
@@ -608,14 +617,30 @@ function checkSplitLeak(ctx)
     end
     if numel(unit.values) ~= numel(split.values), return, end
     units = unique(double(unit.values));
+    table = categoryEntries(ctx, unit.category);
     for i = 1:numel(units)
         sides = unique(double(split.values(double(unit.values) == units(i))));
         if numel(sides) > 1
+            % The message names the unit that leaked and then says why
+            % it matters, which is what turns a warning into something
+            % a user acts on.
             ctx.rep.add('W01', ['/keys/' split.name], ...
-                ['rows of one generalisation unit are on both sides of ' ...
-                 'the split']);
+                ['the rows of %s %s are on both sides of the split, so ' ...
+                 'this is not a generalisation test'], ...
+                unit.name, categoryLabel(table, units(i)));
             return
         end
+    end
+end
+
+function s = categoryLabel(table, id)
+%categoryLabel  The entry a category id names, or the id itself when
+%   the file carries no table for it.
+    j = double(id) + 1;
+    if ~isempty(table) && j >= 1 && j <= numel(table)
+        s = table{j};
+    else
+        s = sprintf('%d', double(id));
     end
 end
 
@@ -645,11 +670,22 @@ function checkStatus(ctx)
     if isempty(s) || isempty(s.values), return, end
     table = categoryEntries(ctx, s.category);
     converged = find(strcmp(table, 'converged'), 1) - 1;
-    if isempty(converged), converged = -1; end
-    if any(double(s.values) ~= converged)
-        ctx.rep.add('W02', ['/keys/' s.name], ...
-            'a row has a status other than converged');
+    missing = isempty(converged);
+    if missing, converged = -1; end
+    v = double(reshape(s.values, 1, []));
+    bad = find(v ~= converged) - 1;
+    if isempty(bad), return, end
+    if missing
+        tail = ['; this file''s status table has no entry called ' ...
+                '"converged", which is the word section 3 excludes ' ...
+                'rows against'];
+    else
+        tail = ['; a row that is not converged is excluded from ' ...
+                'modelling unless it is asked for'];
     end
+    ctx.rep.add('W02', ['/keys/' s.name], ...
+        '%s have a status other than converged%s', ...
+        mestra.internal.Report.someRows(bad, numel(v)), tail);
 end
 
 function checkUnusedCategories(ctx)
@@ -734,8 +770,14 @@ function checkOneScalar(ctx, g, name, path)
     checkChunking(ctx, oid, info, path, ctx.rowCount);
     try
         values = H5.readData(oid, info);
-        if isnumeric(values) && any(~isfinite(double(values)))
-            ctx.rep.add('W03', path, 'a non-finite value');
+        if isnumeric(values)
+            v = double(reshape(values, 1, []));
+            bad = find(~isfinite(v)) - 1;
+            if ~isempty(bad)
+                ctx.rep.add('W03', path, ...
+                    '%s hold a non-finite value', ...
+                    mestra.internal.Report.someRows(bad, numel(v)));
+            end
         end
     catch err
         ctx.rep.add('E41', path, 'the values would not read: %s', ...
@@ -1129,8 +1171,12 @@ function checkSlot(ctx, parent, name, path, location, nNodes, nCells, ...
     elseif any(strcmp(role, {'field', 'derived'}))
         try
             values = mestra.internal.H5.readData(oid, info);
-            if isnumeric(values) && any(~isfinite(double(values(:))))
-                rep.add('W03', path, 'a non-finite value');
+            if isnumeric(values)
+                bad = find(~isfinite(double(values(:))));
+                if ~isempty(bad)
+                    rep.add('W03', path, '%s', ...
+                            nonFinitePhrase(bad, varies, info.dims));
+                end
             end
         catch err
             rep.add('E41', path, 'the values would not read: %s', ...
@@ -1403,6 +1449,34 @@ function why = scaleNameProblem(name, len)
         end
     end
     why = sprintf('"%s" is not a dimension name section 21 defines', name);
+end
+
+function s = nonFinitePhrase(bad, varies, dims)
+%nonFinitePhrase  W03 for an array, once, with the count and the
+%   first three rows when the array has rows to name.
+%
+%   MATLAB reads a C-order dataset with its axes reversed, so the
+%   file's leading `row` axis is the array's trailing one and a
+%   linear index divided by the size of one row gives the row.
+    n = numel(bad);
+    if strcmp(varies, 'row') && numel(dims) >= 1 && dims(1) > 0
+        block = max(1, prod(double(dims(2:end))));
+        rows = unique(floor((double(bad(:)') - 1) / block));
+        s = sprintf('%s hold a non-finite value, %d value(s) in all', ...
+                    mestra.internal.Report.someRows(rows, dims(1)), n);
+    else
+        s = sprintf(['%d value(s) are non-finite; this array does not ' ...
+                     'vary along rows, so there is no row to name'], n);
+    end
+end
+
+function s = bound(v)
+%bound  A bound, or a dash when the file declares none.
+    if isempty(v)
+        s = '-';
+    else
+        s = strtrim(sprintf('%g', double(v)));
+    end
 end
 
 function checkChunking(ctx, did, info, path, nRows)

@@ -694,6 +694,7 @@ classdef Reader
             if isGroup
                 rec(1).values = [];
                 rec(1).dims = {};
+                rec(1).shape = [];
                 rec(1).dtype = '';
                 rec(1).chunk = [];
                 H5G.close(oid);
@@ -703,6 +704,9 @@ classdef Reader
             names = mestra.internal.Reader.axisNames(oid, numel(info.dims), ...
                                                      map);
             rec(1).dims = fliplr(names);
+            % The extents in the file's own order, so that a lazy read
+            % can still say what shape a slot has (section 29).
+            rec(1).shape = reshape(double(info.dims), 1, []);
             rec(1).dtype = info.type;
             rec(1).chunk = info.chunk;
             R().inspect(oid, info, d, path, map);

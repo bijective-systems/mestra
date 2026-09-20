@@ -22,13 +22,33 @@ classdef Report < handle
     methods
         function add(obj, id, path, varargin)
         %add  Record one finding.  Extra arguments go to sprintf.
+        %
+        %   One finding per rule per object (docs/api-conventions.md,
+        %   section 5): a rule that has already fired at this path
+        %   does not fire again, so a report has one line per thing
+        %   that is wrong and not one line per way of noticing it.
             if isempty(varargin)
                 msg = '';
             else
                 msg = sprintf(varargin{:});
             end
+            if obj.hasAt(id, path)
+                return
+            end
             obj.findings(end + 1) = struct('id', id, 'path', path, ...
                                            'message', msg);
+        end
+
+        function tf = hasAt(obj, id, path)
+        %hasAt  True when that rule has already fired at that path.
+            tf = false;
+            for i = 1:numel(obj.findings)
+                if strcmp(obj.findings(i).id, id) && ...
+                        strcmp(obj.findings(i).path, path)
+                    tf = true;
+                    return
+                end
+            end
         end
 
         function tf = has(obj, id)
@@ -69,6 +89,46 @@ classdef Report < handle
             s.unclassified = obj.unclassified();
             s.findings = obj.findings;
             s.valid = isempty(s.errors);
+        end
+    end
+
+    methods (Static)
+
+        function s = someRows(idx, total)
+        %someRows  How a per-row rule says how much and where.
+        %
+        %   W02, W03 and W04 could each fire once per row, and
+        %   docs/api-conventions.md section 5 has them fire once with
+        %   the count and the first three row indices instead, so that
+        %   a report on a file of 1,800 rows is still a report.  The
+        %   indices are the file's, counted from 0.
+            idx = reshape(double(idx), 1, []);
+            n = numel(idx);
+            if n == 0
+                s = '';
+                return
+            end
+            show = idx(1:min(3, n));
+            bits = strjoin(arrayfun(@(v) sprintf('%d', v), show, ...
+                                    'UniformOutput', false), ', ');
+            if n == 1
+                where = sprintf('row %s', bits);
+            elseif n > 3
+                where = sprintf('rows %s and %d more', bits, n - 3);
+            else
+                where = sprintf('rows %s', bits);
+            end
+            if nargin >= 2 && ~isempty(total)
+                s = sprintf('%d of %d %s', n, total, where);
+            else
+                s = sprintf('%d %s', n, where);
+            end
+        end
+
+        function s = countOf(idx, total, what)
+        %countOf  "2 of 6 rows (rows 1, 4)" for a per-row rule.
+            s = sprintf('%s: %s', what, ...
+                        mestra.internal.Report.someRows(idx, total));
         end
     end
 end
