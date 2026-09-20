@@ -37,7 +37,11 @@ end
 
 function check(path::AbstractString)
     notes = String[]
+    rules = String[]
     bad = false
+
+    keep!(note) = (m = match(r": (E\d\d)$", note);
+                   m === nothing || push!(rules, m.captures[1]))
 
     st, report, note = attempt("validate", () -> Mestra.validate(path))
     isempty(note) || push!(notes, note)
@@ -49,13 +53,14 @@ function check(path::AbstractString)
                         push!(notes, "validate threw instead of reporting"))
 
     st, lazy, note = attempt("read", () -> Mestra.read(path))
-    isempty(note) || push!(notes, note)
+    isempty(note) || (push!(notes, note); keep!(note))
     st === :bad && (bad = true)
 
     st, eager, note = attempt("read eager",
                               () -> Mestra.read(path; lazy = false))
-    isempty(note) || push!(notes, note)
+    isempty(note) || (push!(notes, note); keep!(note))
     st === :bad && (bad = true)
+    eager === nothing || append!(rules, [f.rule for f in eager.findings])
 
     if lazy !== nothing
         for s in Mestra.all_slots(lazy)
@@ -63,41 +68,66 @@ function check(path::AbstractString)
             :row in Mestra.julia_dims(s) || continue
             st, _, note = attempt("rows $(s.path)",
                                   () -> Mestra.rows(lazy, s, 1:1))
-            isempty(note) || push!(notes, note)
+            isempty(note) || (push!(notes, note); keep!(note))
             st === :bad && (bad = true)
         end
         for sup in lazy.supports
             st, _, note = attempt("support_id $(sup.name)",
                                   () -> Mestra.support_id(sup))
-            isempty(note) || push!(notes, note)
+            isempty(note) || (push!(notes, note); keep!(note))
             st === :bad && (bad = true)
         end
         for (n, k) in lazy.keys
             st, _, note = attempt("values $(n)",
                                   () -> Mestra.values(lazy, k))
-            isempty(note) || push!(notes, note)
+            isempty(note) || (push!(notes, note); keep!(note))
             st === :bad && (bad = true)
         end
         append!(notes, ["found:" * f.rule for f in lazy.findings])
+        append!(rules, [f.rule for f in lazy.findings])
     end
-    return (bad, errors, warnings, notes)
+    return (bad, errors, warnings, sort(unique(rules)), notes)
+end
+
+"""The name a case is known by: the directory when the file is
+`<case>/case.mes`, as the shared subset lays it out, and the file's
+own stem otherwise."""
+function case_name(path::AbstractString)
+    base = basename(path)
+    base == "case.mes" && return basename(dirname(path))
+    return splitext(base)[1]
 end
 
 function main(argv)
-    for path in argv
-        name = splitext(basename(path))[1]
+    paths = String[]
+    warmup = nothing
+    i = 1
+    while i <= length(argv)
+        if argv[i] == "--warmup"
+            warmup = argv[i + 1]
+            i += 2
+        else
+            push!(paths, argv[i])
+            i += 1
+        end
+    end
+    # Compile the paths that every file uses before timing any file,
+    # so that what is measured is the file and not the compiler.
+    warmup === nothing || check(warmup)
+    for path in paths
+        name = case_name(path)
         t0 = time()
-        bad, errors, warnings, notes = try
+        bad, errors, warnings, rules, notes = try
             check(path)
         catch e
-            (true, String[], String[],
+            (true, String[], String[], String[],
              ["the check itself failed: " *
               first(sprint(showerror, e), 160)])
         end
         elapsed = round(time() - t0; digits = 3)
         println(join([name, bad ? "fail" : "ok", string(elapsed),
                       join(errors, ","), join(warnings, ","),
-                      join(unique(notes), "; ")], "|"))
+                      join(rules, ","), join(unique(notes), "; ")], "|"))
         flush(stdout)
     end
     return 0

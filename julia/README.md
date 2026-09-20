@@ -120,9 +120,32 @@ Checking a file
     r.findings      # each with its rule, its path and a sentence
 
 The report names rules by identifier and nothing else, as the corpus
-does. Retired identifiers (E07, W09) are never emitted. A file with an
-empty `errors` list is conforming; warnings are reported and the file
-is still accepted.
+does. A file with an empty `errors` list is conforming; warnings are
+reported and the file is still accepted.
+
+The rules are E01 to E41 and W01 to W15. E07 and W09 are retired and
+are never emitted. Four of them are easy to confuse with each other,
+so, as section 14 now settles them:
+
+  - **E11** is units absent from a field or a scalar. Units on a key,
+    on coordinates and on a derived array are **E39**, and `weight`
+    and `normal` need no units at all;
+  - **E16** is a length disagreeing with a row count, on a slot whose
+    leading dimension is `row`, on a key column or on `/row_support`,
+    and it also catches a key or scalar dataset that is not
+    one-dimensional. A slot that varies along `none` or a group has
+    no row dimension and is E04 or E34 instead;
+  - **E25** does not fire where the dimension's name follows from an
+    attribute another rule already checks: the leading axis against
+    `varies` is E04, the node or cell count is E05, and the component
+    count is E31. A dimension scale is not subject to it, and a scale
+    with `CLASS` and no `NAME` is;
+  - **E18** is reported beside the rule that found a missing public
+    attribute, in a file that also carries `/private`. Nothing here
+    interprets `/private`, which section 29 forbids.
+
+**E40** and **E41** are the two that a well-formed file never needs;
+the next section is what they are for.
 
 
 A file is untrusted input
@@ -142,6 +165,10 @@ What it refuses:
     link would open another file on this file's say-so. The link is
     asked what kind it is before anything opens it, and anything but a
     hard link is reported as **E40** and never followed;
+  - **an object that is not the kind the format requires**, such as a
+    key that is a group or a support that is a dataset. There is
+    nothing there to read as what it must be, so it is **E41** beside
+    the rule that names the shape;
   - **more than it will hold in memory**. A read is refused above
     `max_elements`, which defaults to 2^31 and is a keyword on `read`,
     `values` and `rows`, and above `Mestra.MAX_READ_BYTES[]`, which
@@ -158,6 +185,19 @@ What it refuses:
     is reported and not followed. The units parser is capped the same
     way.
 
+One trap in that last one is worth naming, because section 21 now
+does. Asking HDF5 for the *path* of a dimension scale attached to an
+axis makes it search the group hierarchy, and on a deeply nested file
+that search runs off the stack and takes the process with it. This
+reader never asks: the link name of every scale comes from a map built
+during its own bounded walk of the file, and an attached scale is
+matched against that map.
+
+A lazy read and a row-range read are not subject to the element cap,
+because they never materialise the whole dataset, so a file may be
+readable one way and E41 the other. That is what section 29 says, and
+the corpus states which is which.
+
 Where the reader can carry on it does: `Mestra.read` returns the
 dataset and puts what it would not follow or could not read in
 `ds.findings`, each a `Finding` with its rule, its path and a
@@ -165,8 +205,19 @@ sentence. `Mestra.validate` never throws on a file it can open, and
 answers one it cannot with E01. Opening a file that is not HDF5 at all
 raises a `MestraError` with rule E01.
 
-`julia/test/hostile/` holds the files this is tested against, and
-`make_hostile.py` is what wrote them.
+Two sets of files test this. `vectors/hostile` is the shared subset
+every language runs: fifteen files with a looser contract than the
+corpus's, where the validator must report at least the ids
+`expected.json` requires, may report more, and must finish cleanly
+inside ten seconds. Its two thirty-thousand-group files are generated
+rather than committed, so run
+
+    python vectors/generate.py --hostile-deep
+
+before the suite if you want them; the tests say so and carry on
+without them. `julia/test/hostile/` is this package's own set, written
+by `make_hostile.py`, which goes further in a few places the shared
+subset does not reach.
 
 
 Building a dataset from arrays
@@ -241,12 +292,14 @@ dictionary and is its own business.
     c(Dict("mach" => [0.5], "alpha" => [4.0]))
     # Dict("cl" => [1.45], "pressure" => ...)
 
-The keys table of section 26 is, in Julia, a `Dict{String,Vector{Float64}}`
-of key name to column, with every column the same length and the row
-order the evaluation order: output row i is the result for table row i.
-A `NamedTuple` of columns and a `(matrix, names)` pair, where the matrix
-is (rows, keys) and the names are in the file's key order, are accepted
-and converted. A key with role `id` may hold a `Vector{String}`.
+Section 26 now has a Julia row, and this is it: the keys table is a
+`Dict{String,Vector{Float64}}` of key name to column, with every column
+the same length and the row order the evaluation order, so output row i
+is the result for table row i. A `NamedTuple` of columns and a
+`(matrix, names)` pair, where the matrix is (rows, keys) and the names
+are in the file's key order, are accepted and converted, as Python
+accepts its second form. A key with role `id` may hold a
+`Vector{String}`.
 
 `affine` is the one callable type the package defines, so that the
 protocol, the codec and evaluation can be conformance tested with no
@@ -331,7 +384,7 @@ Running the tests
     julia --project=julia -e 'using Pkg; Pkg.test()'
 
 The suite runs the whole conformance corpus: the validator's outcome
-for all 69 cases against expected.json, every probe, every support id,
+for all 70 cases against expected.json, every probe, every support id,
 every codec round trip, every worked evaluation, and a read, write and
 compare of every case that must validate cleanly. It also opens two
 written files with NCDatasets to check that they are netCDF-4 files
