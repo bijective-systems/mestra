@@ -114,6 +114,39 @@ class Validator {
   bool has_row_support_ = false;
   bool has_group_key_ = false;
 
+  // The validator reports a fault rather than failing on one, so a
+  // read that the library refuses -- a dtype the rule above has
+  // already reported, a dataset HDF5 will not convert -- comes back
+  // empty and the walk goes on.
+  std::vector<double> reals(const std::string& path) {
+    try {
+      return f_.read_f64(path);
+    } catch (const std::exception&) {
+      return {};
+    }
+  }
+  std::vector<std::int64_t> integers(const std::string& path) {
+    try {
+      return f_.read_i64(path);
+    } catch (const std::exception&) {
+      return {};
+    }
+  }
+  std::vector<std::string> texts(const std::string& path) {
+    try {
+      return f_.read_strings(path);
+    } catch (const std::exception&) {
+      return {};
+    }
+  }
+  std::vector<std::string> raw_texts(const std::string& path) {
+    try {
+      return f_.read_strings_raw(path);
+    } catch (const std::exception&) {
+      return {};
+    }
+  }
+
   Axes axes_of(const std::string& path, const DsetInfo& info,
                bool report_e25);
   void check_attribute_encodings(const std::string& path,
@@ -224,7 +257,7 @@ void Validator::check_string_dataset(const std::string& path,
           "a variable-length string dataset, which section 18 forbids");
     return;
   }
-  const std::vector<std::string> raw = f_.read_strings_raw(path);
+  const std::vector<std::string> raw = raw_texts(path);
   std::size_t longest = 0;
   for (const std::string& s : raw) {
     if (internal::embedded_nul(s)) {
@@ -394,7 +427,7 @@ void Validator::categories() {
       continue;
     }
     check_string_dataset(p, info, true);
-    category_tables_[m.name] = f_.read_strings(p);
+    category_tables_[m.name] = texts(p);
     axes_of(p, info, true);
     if (!info.scales.empty() && info.scales[0].size() == 1 &&
         info.scales[0].front() != "category_" + m.name) {
@@ -542,9 +575,9 @@ void Validator::keys() {
     if (dtype == DType::String) check_string_dataset(p, info, true);
 
     if (dtype == DType::Float64) {
-      k.f64 = f_.read_f64(p);
+      k.f64 = reals(p);
     } else if (dtype != DType::String) {
-      k.i64 = f_.read_i64(p);
+      k.i64 = integers(p);
     }
     infos.push_back(std::move(k));
   }
@@ -805,7 +838,7 @@ void Validator::scalars() {
     check_dataset_storage(p, info, true,
                           static_cast<std::size_t>(n_rows_));
     if (dtype == DType::Float64) {
-      for (const double v : f_.read_f64(p)) {
+      for (const double v : reals(p)) {
         if (!std::isfinite(v)) {
           warn("W03", p, "a non-finite value in a scalar");
           break;
@@ -855,7 +888,7 @@ void Validator::row_support_dataset() {
     error("E16", p, "/row_support does not have one entry per row");
   }
   check_dataset_storage(p, info, true, static_cast<std::size_t>(n_rows_));
-  row_support_ = f_.read_i64(p);
+  row_support_ = integers(p);
   std::set<std::int64_t> used;
   for (const std::int64_t v : row_support_) {
     if (v < 0 || v >= static_cast<std::int64_t>(n_supports)) {
@@ -950,7 +983,7 @@ void Validator::supports() {
         error("E25", p, "the dimension of cell_types is not `cell`");
       }
       check_dataset_storage(p, info, false, kNoChunkCheck);
-      for (const std::int64_t v : f_.read_i64(p)) {
+      for (const std::int64_t v : integers(p)) {
         types.push_back(static_cast<std::uint8_t>(v));
       }
     }
@@ -968,7 +1001,7 @@ void Validator::supports() {
               "the dimension of cell_offsets is not `cell_plus_one`");
       }
       check_dataset_storage(p, info, false, kNoChunkCheck);
-      offsets = f_.read_i64(p);
+      offsets = integers(p);
     }
     if (has_conn) {
       const std::string p = sp + "/cell_connectivity";
@@ -984,7 +1017,7 @@ void Validator::supports() {
               "the dimension of cell_connectivity is not `index`");
       }
       check_dataset_storage(p, info, false, kNoChunkCheck);
-      conn = f_.read_i64(p);
+      conn = integers(p);
     }
 
     bool bad_code = false;
@@ -1058,7 +1091,7 @@ void Validator::supports() {
       const std::vector<std::uint8_t> no_types;
       const std::vector<std::int64_t> no_ints;
       if (kind == "axis" && f_.is_dataset(sp + "/coordinates")) {
-        const std::vector<double> coords = f_.read_f64(sp + "/coordinates");
+        const std::vector<double> coords = reals(sp + "/coordinates");
         computed =
             support_id_digest(n_nodes, no_types, no_ints, no_ints, &coords);
       } else if (kind == "axis" || kind == "none") {
@@ -1289,7 +1322,7 @@ void Validator::slot(const std::string& path,
                         row_leading ? want_rows : kNoChunkCheck);
 
   if (role == "field" && dtype_ok && dtype == DType::Float64) {
-    for (const double v : f_.read_f64(path)) {
+    for (const double v : reals(path)) {
       if (!std::isfinite(v)) {
         warn("W03", path, "a non-finite value in a field");
         break;
@@ -1306,7 +1339,7 @@ void Validator::slot(const std::string& path,
               "the category table \"" + table + "\" is not in the file");
       } else {
         const std::int64_t n = static_cast<std::int64_t>(it->second.size());
-        for (const std::int64_t v : f_.read_i64(path)) {
+        for (const std::int64_t v : integers(path)) {
           if (v < 0 || v >= n) {
             error("E10", path, "a label value outside its category table");
             break;
