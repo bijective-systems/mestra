@@ -234,6 +234,30 @@ def structural_diff(path_a, path_b, chain=None):
     return out
 
 
+def scale_property_checks(path):
+    """Section 21: every dimension scale is created with attribute
+    creation order tracked and indexed, and with object times off.
+    Without the first no scale takes more than 4085 attachments;
+    without the second the file is not byte reproducible."""
+    want = h5py.h5p.CRT_ORDER_TRACKED | h5py.h5p.CRT_ORDER_INDEXED
+    problems = []
+    with h5py.File(path, "r") as f:
+        objs, _by_addr, _capped = walk(f)
+        for p, obj in sorted(objs.items()):
+            if not is_scale(obj):
+                continue
+            dcpl = obj.id.get_create_plist()
+            order = dcpl.get_attr_creation_order()
+            if order != want:
+                problems.append(
+                    "%s: attribute creation order is %d, section 21 "
+                    "requires %d (tracked and indexed)"
+                    % (p, order, want))
+            if dcpl.get_obj_track_times():
+                problems.append("%s: object times are tracked" % p)
+    return problems
+
+
 # ------------------------------------------------ the netCDF readers
 
 def netcdf_checks(path):
@@ -320,7 +344,8 @@ def main(argv):
         quiet = sys.stdout
         sys.stdout = open(os.devnull, "w")
         try:
-            generate.main(["generate.py", tmp, "--hostile-deep"])
+            generate.main(["generate.py", tmp, "--hostile-deep",
+                           "--wide"])
         finally:
             sys.stdout.close()
             sys.stdout = quiet
@@ -334,6 +359,19 @@ def main(argv):
             print("%-28s FAIL  committed but not produced by the "
                   "generator" % name)
             failures += 1
+
+        for name in sorted(generate.WIDE):
+            a = os.path.join(cases_dir, name, "case.mes")
+            if not os.path.exists(a):
+                quiet = sys.stdout
+                sys.stdout = open(os.devnull, "w")
+                try:
+                    generate.write_case(cases_dir, name,
+                                        generate.CASES[name])
+                finally:
+                    sys.stdout.close()
+                    sys.stdout = quiet
+                print("%-28s generated, it is not committed" % name)
 
         for name in expected_names:
             notes = []
@@ -355,7 +393,17 @@ def main(argv):
                 ba = fh.read()
             with open(b, "rb") as fh:
                 bb = fh.read()
-            if ba == bb:
+            if name in generate.WIDE:
+                # Generated on demand, so one person's copy and
+                # another's come from two libhdf5 versions.
+                diffs = structural_diff(a, b)
+                if diffs:
+                    notes.extend(diffs[:5])
+                    how = "%d structural differences" % len(diffs)
+                else:
+                    how = "structurally equal (%d MB, generated)" % (
+                        len(ba) // 1048576)
+            elif ba == bb:
                 how = "bytes equal"
             else:
                 diffs = structural_diff(a, b)
@@ -365,6 +413,8 @@ def main(argv):
                 else:
                     how = "structurally equal, bytes differ"
             exp = json.loads(ja.decode("utf-8"))
+            if "E42" not in exp["validator"]["errors"]:
+                notes.extend(scale_property_checks(a))
             if not exp["validator"]["errors"]:
                 notes.extend(netcdf_checks(a))
             if notes:

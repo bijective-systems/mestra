@@ -569,6 +569,15 @@ rule.
        count (section 29). A lazy read and a row-range read are not
        subject to the last of these, so a file can be valid for one
        reader and E41 for another; the corpus states which
+  E42  a dimension scale whose creation properties are not the ones
+       section 21 requires: attribute creation order not tracked and
+       indexed. A file written before this rule refuses it, which is
+       the point of the rule: such a file cannot carry more than 4085
+       attachments to one scale, and the 4086th destroys the scale's
+       REFERENCE_LIST on its way to failing
+  E43  an unlimited dimension other than `row`, file-level or
+       support-local. The one exception is a zero-length axis of a
+       dictionary dataset, which section 25 requires to be unlimited
 
 Warnings (the file is accepted; the reader must report):
 
@@ -785,6 +794,49 @@ where all four had to invent the same missing rule:
      object's path: that search walks the group hierarchy and
      overflows the stack on a deep file. Section 21.
 
+Taken on 2026-09-20, third batch, from a study that measured the
+format at size for the first time (docs/scale/report.md) and from
+four findings of docs/verification/phase-3.md. These are the first
+decisions in this document taken from measurement rather than from
+reading:
+
+ 52. A dimension scale is created with attribute creation order
+     tracked and indexed and with object time tracking off (E42).
+     Without it a scale takes at most 4085 attachments, which is a
+     ceiling on the container and not on any reader: the 4086th
+     attachment fails after destroying the REFERENCE_LIST it was
+     extending, and leaves a file every reader and every validator
+     accepts. This is the only decision in three rounds that changes
+     the bytes of every golden file. Sections 21 and 23.
+ 53. H5Pset_attr_phase_change asks for the same thing and is silently
+     ignored under the default library version bounds; a writer must
+     not rely on it. The library version bounds stay at the default
+     for every object, so the superblock and every non-scale object
+     are unchanged. REFERENCE_LIST is informational: a reader
+     resolves an axis through DIMENSION_LIST and the map of decision
+     51, and a scale whose REFERENCE_LIST is missing or short is not
+     an error. Section 21.
+ 54. Only `row`, file-level or support-local, may be unlimited; every
+     other dimension, `draw` included, is fixed (E43). The exception
+     is the zero-length dictionary axis section 25 requires. Every
+     dimension but `row` carries its length in its name, so one that
+     grows makes its own name false: on a file with an appended draw,
+     two implementations refused it and two returned the value at the
+     new draw. Draws are produced at evaluation and never appended.
+     Sections 19 and 21.
+ 55. Section 21's claim that a round trip through netCDF-C changes
+     nothing was not true and is corrected: the layout is the one
+     netCDF-C reads as an unlimited dimension, which is a claim about
+     reading. What netCDF-C writes differently is listed there, so
+     that a reader knows a netCDF-C-written file is not a conforming
+     file. Section 21.
+ 56. The corpus gains a case with a compressed field, one with 4200
+     row-dimensioned datasets, and one carrying /notes and /private.
+     The first would have caught two writers dropping gzip from a
+     710 MB file, the second is the only case that reaches the
+     ceiling decision 52 lifts, and the third covers two groups that
+     thirty valid cases never exercised. Section 30.
+
 Still open: nothing.
 
 
@@ -943,6 +995,20 @@ zero-length extent is legal only for the `row` dimension and for a
 zero-length axis of a dictionary dataset (section 25); every other
 dimension has length one or more.
 
+`row` is also the only dimension that may be unlimited. Every other
+dimension scale, and every axis attached to one, is created with a
+maximum extent equal to its length (E43). The one exception is a
+zero-length axis of a dictionary dataset, which section 25 requires
+to be unlimited because HDF5 has no other legal way to write it. The
+reason to forbid rather than allow is that every dimension except
+`row` carries its length in its name, directly in `draw_<n>` and
+`component_<n>` and through the table it names in `group_<k>` and
+`category_<t>`, so a dimension that grows makes its own name false.
+Measured on a file whose `draw` dimension had been appended to, two
+implementations refused it and two returned the value at the new
+draw; and draws are produced at evaluation and never appended, so
+nothing is lost by forbidding it.
+
 Slots. A slot whose `source` is `data` is a dataset. A slot whose
 `source` is `callable:<id>` is an empty HDF5 group carrying the slot's
 attributes and no datasets (E30). A group is used because a callable
@@ -1079,6 +1145,40 @@ Setting CLASS and NAME is what H5DSset_scale does, with NAME given as
 the string above; attaching is H5DSattach_scale. A writer that calls
 those two functions produces the layout netCDF-C expects.
 
+A dimension scale is created with attribute creation order tracked
+and indexed, and with object time tracking off, on its dataset
+creation property list (E42):
+
+    H5Pset_attr_creation_order(dcpl,
+        H5P_CRT_ORDER_TRACKED | H5P_CRT_ORDER_INDEXED);
+    H5Pset_obj_track_times(dcpl, 0);
+
+which is what netCDF-C sets on every object it creates. The first
+call gives the scale a version 2 object header, so that its
+REFERENCE_LIST is kept in the file's heap rather than as an object
+header message, where an attribute may not exceed 64 KiB. Without it
+no scale carries more than 4085 attachments: REFERENCE_LIST grows by
+sixteen bytes each time, and the 4086th H5DSattach_scale fails with
+"object header message is too large" after it has already deleted the
+attribute it was extending, which leaves a file that every reader and
+every validator still accepts. The second call keeps the file byte
+reproducible, because a version 2 object header records four
+timestamps unless it is told not to.
+
+Three things about that rule. H5Pset_attr_phase_change looks like the
+way to ask for the same thing and is not: under the default library
+version bounds it is silently ignored, because dense attribute
+storage needs a version 2 object header that those bounds will not
+write, and a writer must not rely on it. The library version bounds
+themselves stay at the default, for the scale and for every other
+object: this rule changes the object header of the scales and of
+nothing else, so the superblock and every non-scale object are as
+they were. And REFERENCE_LIST is informational. A reader never reads
+it; it resolves an axis through the dataset's own DIMENSION_LIST and
+the map of this section's last paragraph. A scale whose
+REFERENCE_LIST is missing, short or stale is not an error, and no
+rule in section 14 is about it.
+
 The dimension's name is the scale dataset's HDF5 link name and not its
 NAME attribute, which holds the sentence above in every file. A reader
 must take the name from the link, because a reader that took it from
@@ -1103,7 +1203,8 @@ A dimension scale that is unlimited is chunked with chunk length 1,
 which is what netCDF-C writes; a scale that is not unlimited is
 chunked with a chunk equal to its length, which is what H5DSset_scale
 leaves behind. No value is ever stored in either, so the choice is
-visible only in the file's bytes.
+visible only in the file's bytes. Only the `row` scale, file-level or
+support-local, is unlimited at all (E43).
 
 Where the scales live and what they are called. All file-level scales
 are at the root group, because netCDF-4 resolves a dimension in the
@@ -1181,10 +1282,27 @@ when the file has no rows, and shape (n,) with an unlimited maximum
 otherwise. Making it unlimited in every file has three effects: a
 zero-row file is a netCDF-4 file with an empty record dimension rather
 than an illegal zero-length fixed dimension; rows can be appended
-without rewriting; and the layout matches what netCDF-C itself writes,
-so a round trip through netCDF-C changes nothing. The scale dataset's
-own length must equal the row count, so that a reader can learn the
-row count from a file that has no row-dimensioned datasets at all.
+without rewriting; and the layout is the one netCDF-C reads as an
+unlimited dimension.
+
+That last is a claim about reading and not about round trips. A file
+that netCDF-C has written or copied is not a conforming file. It
+writes every text attribute as ASCII with NUL termination where
+section 18 requires fixed-length UTF-8 with NUL padding; it writes
+every scalar attribute as a one-element array, so `aligned`, `lower`,
+`upper`, `n_nodes`, `n_cells` and `components` all change shape; it
+leaves the scale of an unlimited dimension at length 0 where this
+section requires the row count; it writes dimension scales contiguous
+where this section requires them chunked; and it adds
+`_NCProperties` to the root, `_Netcdf4Dimid` to every scale and
+`_Netcdf4Coordinates` to every variable. A file that has been through
+netCDF-C, including through `nccopy`, must be written again by a
+conforming writer before it is a conforming file. This paragraph is
+informational: the rules it points at are the normative ones.
+
+The scale dataset's own length must equal the row count, so that a
+reader can learn the row count from a file that has no
+row-dimensioned datasets at all.
 netCDF-C infers the length of an unlimited dimension from the
 variables that use it and ignores the scale dataset's length; the two
 must agree.
@@ -1282,7 +1400,9 @@ chunked or compressed, the default chunk is the whole dataset if that
 is 1 MiB or less, and otherwise the same rule applied to its leading
 dimension. A dimension scale dataset is never compressed and is
 chunked as section 21 says: chunk length 1 when it is unlimited and a
-chunk equal to its length when it is not.
+chunk equal to its length when it is not. Section 21 also fixes its
+creation property list, which is the only place in this format where
+a property list other than the defaults is required.
 
 Compression. The only filters allowed are gzip at levels 1 to 9 and
 shuffle; shuffle may be used with or without gzip. A writer must use

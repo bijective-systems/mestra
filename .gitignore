@@ -15,7 +15,9 @@ build/
 .mypy_cache/
 .ruff_cache/
 
-# The two deep hostile files are 31 MB each and are generated on
-# demand: python vectors/generate.py --hostile-deep
+# Three golden files are generated on demand rather than committed,
+# because of their size:
+#   python vectors/generate.py --hostile-deep --wide
 vectors/hostile/deep_groups_callables/case.mes
 vectors/hostile/deep_groups_keys/case.mes
+vectors/cases/wide_keys/case.mes
