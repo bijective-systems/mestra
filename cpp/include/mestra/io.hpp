@@ -25,11 +25,30 @@ class Error : public std::runtime_error {
   std::string rule_;
 };
 
-// Reads a whole file.  Throws Error("E01", ...) for a major version
-// this reader does not accept, and Error with the rule identifier for
-// the layout faults it cannot read past.  It does not validate: run
-// `mestra::validate` for that.
-Dataset read(const std::string& path);
+// What `read` is allowed to accept.
+struct ReadOptions {
+  // Strict, which is the default, refuses a file that breaks a
+  // structural rule -- E01, E16, E19, E25, E26, E29, E30, E40, E41 --
+  // and a fault no rule of section 14 covers.  A semantic fault (a
+  // missing unit, a split that straddles a generalisation unit) never
+  // stops a read, so that `info` and a reader still work on the files
+  // a user most needs to look at.
+  //
+  // `strict = false` reads what it can and lists what it refused in
+  // `Dataset::not_read`.
+  bool strict = true;
+};
+
+// Reads a whole file.  Throws Error carrying the first rule
+// identifier, and every structural finding in its message, when a
+// strict read meets one; and Error with the rule identifier for the
+// layout faults it cannot read past whatever the options say.
+//
+// A read costs one validation pass over the file.  `read_header`,
+// `read_slot` and `read_slot_rows` are the cheap paths and do not
+// validate.
+Dataset read(const std::string& path,
+             const ReadOptions& options = ReadOptions());
 
 // Opens a file and reports what section 29 asks for without reading an
 // array: the row count, the keys with their roles and bounds, the
@@ -54,8 +73,25 @@ Array read_slot_rows(const std::string& path, const std::string& slot,
 // conformance corpus needs.
 Array read_slot(const std::string& path, const std::string& slot);
 
+// What `write` is allowed to do.
+struct WriteOptions {
+  // Validate before leaving a file behind.  A dataset that breaks a
+  // rule of section 14 is refused, with the findings, and `path` is
+  // not touched: the file is built beside it and only moved into
+  // place once it validates.  `check = false` writes it anyway, for
+  // the one caller who wants a file the validator rejects -- a test
+  // of a validator, mostly.  The shape checks a builder makes are not
+  // part of this and are not skipped: `varies` disagreeing with the
+  // shape a slot was built with is refused either way, because such a
+  // file is not something a caller can have meant.
+  bool check = true;
+};
+
 // Writes a conforming file.  Existing content at `path` is replaced.
-void write(const Dataset& d, const std::string& path);
+// Throws Error carrying the first rule identifier, and every finding
+// in its message, when the dataset does not validate.
+void write(const Dataset& d, const std::string& path,
+           const WriteOptions& options = WriteOptions());
 
 // The digest of section 24 for one support of a file, computed from
 // the stored arrays rather than read from the `support_id` attribute.

@@ -9,8 +9,8 @@ For each file and each command:
 
   - the tool exits, within a timeout: never a hang;
   - it exits with a status and not a signal: never a crash;
-  - `validate` comes back with at least one finding, on a line
-    beginning "E ", "W " or "! ";
+  - `validate` comes back with at least one finding, on a line in the
+    form "<id> <path>: <message>" or "! <path>: <why>";
   - `info` and `read` either succeed or fail with a message, and say
     which file and why.
 
@@ -22,8 +22,11 @@ was made.
 
 import argparse
 import os
+import re
 import subprocess
 import sys
+
+FINDING = re.compile(r"^([EW][0-9]{2}|!) (\S+): (.*)$")
 
 # Long enough that a slow machine under a sanitizer is not mistaken
 # for a hang, short enough that a hang is not mistaken for patience.
@@ -57,7 +60,7 @@ def check(cli, path, problems):
             continue
         if command == "validate":
             findings = [line for line in out.splitlines()
-                        if line[:2] in ("E ", "W ", "! ")]
+                        if FINDING.match(line)]
             if not findings:
                 problems.append("%s: validate found nothing to say"
                                 % (name,))

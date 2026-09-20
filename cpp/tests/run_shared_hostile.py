@@ -22,17 +22,23 @@ than being passed over quietly.
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 
+# A finding, in the form docs/api-conventions.md section 5 fixes:
+# "<id> <path>: <message>".  A "! " line carries no identifier and is
+# not one.
+FINDING = re.compile(r"^([EW][0-9]{2}) (\S+): (.*)$")
+
 
 def ids_from(text):
-    """The rule identifiers the tool printed, from its "E " and "W "
-    lines. A "! " line carries no identifier and is not one."""
+    """The rule identifiers the tool printed."""
     out = set()
     for line in text.splitlines():
-        if line[:2] in ("E ", "W "):
-            out.add(line[2:].strip())
+        match = FINDING.match(line)
+        if match:
+            out.add(match.group(1))
     return out
 
 

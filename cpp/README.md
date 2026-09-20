@@ -2,9 +2,11 @@ mestra in C++
 =============
 
 A reader, a writer and a validator for the `.mes` format of SPEC.md,
-in plain C++17 over the HDF5 C API and `hdf5_hl`. No other dependency:
-the SHA-256 of section 24 is written out here, and the tests read the
-conformance corpus with a small Python script rather than a framework.
+with the integration weights the format says a writer computes rather
+than imports, in plain C++17 over the HDF5 C API and `hdf5_hl`. No
+other dependency: the SHA-256 of section 24 is written out here, and
+the tests read the conformance corpus with a small Python script
+rather than a framework.
 
 SPEC.md is the normative document and `vectors/` is the conformance
 corpus. Nothing in this directory is the reference; when this code and
@@ -32,11 +34,21 @@ If the Python CMake picks up is not that one, name it:
     cmake --build cpp/build -j
     ctest --test-dir cpp/build --output-on-failure
 
-The suite has two tests. `unit` is a handful of pure C++ checks: the
-SHA-256 vectors and the three worked digests of section 24, the units
-parser, the dictionary codec's value types, the worked affine example
-of section 27, and one dataset built from plain vectors and validated.
-`corpus` runs every case of `vectors/` through `mestra-cli`.
+The suite has four tests. `unit` is pure C++ checks: the SHA-256
+vectors and the three worked digests of section 24, the units parser,
+the dictionary codec's value types, the worked affine example of
+section 27, one dataset built from plain vectors and validated, and
+the conventions of `docs/api-conventions.md` one rule at a time.
+`corpus` runs every case of `vectors/cases` through `mestra-cli`.
+`shared_hostile` runs the corpus's own hostile subset and `hostile`
+this implementation's; both are described at the end of this file.
+
+Two of the shared hostile files are generated rather than committed,
+so run
+
+    python vectors/generate.py --hostile-deep
+
+before `ctest`.
 
 The library is compiled with `-Wall -Wextra -Wpedantic -Wshadow
 -Wconversion -Wsign-conversion` and builds warning-free, and with
@@ -50,24 +62,63 @@ Five minutes with the tool
 --------------------------
 
     mestra-cli validate FILE
-        the rule identifiers of section 14, one per line, errors as
-        "E <id>" and warnings as "W <id>". No output means the file is
-        clean. It exits 1 when the file is rejected and 0 otherwise, so
-        warnings alone still exit 0.
+        one finding per line, as "<id> <path>: <message>", and then
+        the summary line "<n> error(s), <m> warning(s)". That is the
+        form docs/api-conventions.md section 5 fixes for the tool of
+        every language, so the same file through `mestra validate` and
+        through this reads the same way. A fault that no rule of
+        section 14 covers carries no identifier and is printed as
+        "! <path>: <why>", so a file is never reported clean because
+        the thing wrong with it has no name. It exits 1 when the file
+        is rejected and 0 otherwise, so warnings alone still exit 0.
+
+            E11 /scalars/power: a scalar with no `units`
+            W02 /keys/status: 7 row(s) whose status is not converged;
+                rows 5, 6, 7
+            1 error(s), 1 warning(s)
+
+        A rule that could fire once per row -- W02, W03, W04 -- is
+        reported once with the count and the first three rows, and
+        never once per row.
+
+    mestra-cli validate --ids FILE
+        the identifiers alone, "E <id>" and "W <id>" one per line,
+        which is what a shell script wants.
 
     mestra-cli read FILE
-        check the file, refuse it with the rule identifiers if the
-        validator rejects it, and otherwise read the whole of it and
+        check the file, refuse it with the findings if the validator
+        rejects it, and otherwise read the whole of it and
         say what came back: the row count, how
         many keys, scalars, supports and callables, and how many array
         values.
 
     mestra-cli info FILE
-        the row count, the keys with their roles and bounds, the
-        supports with their ids, and every slot. It checks the file
-        first and refuses it the way `read` does; past that it reads
-        attributes and dataspaces only, so it opens a large file as
-        fast as a small one.
+        what the file holds, in the fields section 5 of the
+        conventions lists: for every key its name, role, units,
+        bounds, category, trajectory group and parent; for every
+        support its kind, its counts and its id; for every slot its
+        shape with the axes named, its units, its source, and for a
+        callable slot the callable id and the output.
+
+            key time role=time units=s lower=0 upper=9
+                trajectory_group=trajectory
+            support s0 kind=mesh n_nodes=8 n_cells=3 support_id=96df...
+              node_array pressure (row, node, component) 6x8x1
+                role=field varies=row components=1 units=Pa source=data
+
+        It checks the file first and refuses it the way `read` does;
+        past that it reads attributes and dataspaces only, so it opens
+        a large file as fast as a small one.
+
+    mestra-cli integrate FILE SLOT [WEIGHT]
+        one slot integrated over its support, one value per row and
+        component. It says which weight array it used and whether it
+        had to compute one, because the file carried none.
+
+    mestra-cli stats FILE SLOT [BY]
+        count, missing, minimum, mean, maximum and deviation for one
+        slot, grouped by the label BY when one is named. The grouping
+        column is headed with the label's own name.
 
     mestra-cli probe FILE SLOT ROW NODE COMPONENT [DRAW]
         one stored value. Any index may be `-` when the slot has no
@@ -86,12 +137,14 @@ Five minutes with the tool
         not read from the attribute.
 
     mestra-cli roundtrip IN OUT
-        read IN and write OUT.
+        read IN and write OUT. Both ends check: the read is strict and
+        the write validates, so a round trip that finishes is a round
+        trip between two files that validate.
 
     mestra-cli evaluate FILE KEYS.csv OUT
         evaluate every callable slot on a keys table and write the
-        result. KEYS.csv has one line of column names and one line per
-        table row.
+        result, and say what was written and how many rows. KEYS.csv
+        has one line of column names and one line per table row.
 
     mestra-cli rows FILE SLOT BEGIN END
         one slot for the half-open row range, reading no other slot
@@ -111,6 +164,11 @@ Everything is behind one header:
 
     #include "mestra/mestra.hpp"
 
+`docs/api-conventions.md` is normative for the shape of this API: the
+names, the argument order, the defaults and the messages are the same
+in all four languages, and where an idiom forces a difference the
+difference is in syntax only. What follows is that document in C++.
+
 Reading. `mestra::read` gives a `Dataset` value type, and every array
 in it carries its dimension names, so a caller permutes by name and
 never by axis position:
@@ -121,39 +179,201 @@ never by axis position:
     p.dims;                    // "row", "node", "component"
     p.at_f64({1, 3, 0});       // row 1, node 3, component 0
 
-`mestra::read_header` does the same without reading any array, and
-`mestra::read_slot_rows(path, slot, begin, end)` reads one slot for a
-row range without touching the rest.
+A read is strict: it refuses a file that breaks a structural rule --
+E01, E16, E19, E25, E26, E29, E30, E40, E41, and a fault no rule
+covers -- with every finding in the message. A semantic fault, a
+missing unit or a split that straddles a generalisation unit, never
+stops a read, so that a reader still works on the files a user most
+needs to look at. `mestra::read(path, {/*strict=*/false})` reads what
+it can and lists what it refused in `Dataset::not_read`.
 
-Writing. Build a dataset from vectors; the builders fill in the
-dimension names, the shapes and the support id:
+A strict read costs one validation pass over the file.
+`mestra::read_header` reads the metadata without reading any array or
+validating anything, and `mestra::read_slot_rows(path, slot, begin,
+end)` reads one slot for a row range without touching the rest; those
+are the cheap paths.
+
+Writing. Build a dataset from plain vectors. The builders fill in the
+dimension names, the shapes, the bounds and the support id, so that
+what a caller states is what a caller meant:
 
     mestra::Dataset d;
     d.writer = "my tool 1.0";
     d.created = "2026-09-19T00:00:00Z";
-    d.generalisation_group = "member";
+    d.set_generalisation_group("member");
 
-    d.add_categories("member", {"wing_a", "wing_b"});
-    mestra::Key& mach = d.add_key("mach", "condition", {0.4, 0.8}, "1");
-    mach.lower = 0.1;
-    mach.upper = 0.9;
-    d.add_category_key("member", "group", {0, 1}, "member");
-    d.add_scalar("cl", "1", {0.25, 0.55});
+    d.add_category_table("member", {"wing_a", "wing_b"});
+    d.add_key("mach", {0.4, 0.8}, "condition", "1");
+    d.add_category_key("member", {0, 1}, "group", "member");
+    d.add_scalar("cl", {0.25, 0.55}, "1");
 
-    mestra::Support& s = d.add_mesh_support(
-        "s0", 6, {9, 9}, {0, 4, 8}, {0, 1, 4, 3, 1, 2, 5, 4});
-    mestra::set_coordinates(s, coordinates, 2, "m", "group:member");
-    mestra::add_field(s, mestra::Location::Node, "pressure", "Pa",
-                      pressure);
+    d.add_mesh_support("s0", 6, {9, 9}, {0, 4, 8},
+                       {0, 1, 4, 3, 1, 2, 5, 4});
+    mestra::Support* s = d.support("s0");
+    mestra::set_coordinates(*s, coordinates, "m",
+                            {"group:member", "node", {"component", 2}});
+    mestra::add_node_array(*s, "pressure", pressure, "Pa",
+                           {"row", "node"});
 
     mestra::write(d, "family.mes");
 
-How many instances a `varies = row` or `varies = group:<k>` array
-holds follows from the length of the values handed over, so there is
-no count to get wrong. `add_key`, `add_scalar` and `add_mesh_support`
-keep their vectors sorted, which invalidates references into them, so
-fetch by name (`d.support("s0")`) rather than holding a reference
-across a later `add_`.
+Fetch by name (`d.support("s0")`) rather than holding a reference
+across a later `add_`: `add_key`, `add_scalar`, `add_category_table`
+and `add_mesh_support` keep their vectors sorted, which invalidates
+references into them. The example above does that throughout, and so
+should yours.
+
+Four things in those calls are worth saying out loud.
+
+*The order is the name, then the values, then what they mean.*
+`add_key(name, values, role, units)`, `add_scalar(name, values,
+units)`, `add_node_array(support, name, values, units, dims)`. It is
+the same order in Python, MATLAB and Julia.
+
+*`dims` names the axes of the array you flattened, in your own axis
+order.* From it the builder works out `varies` -- a `row` axis means
+row, a `group:<k>` axis means that group, neither means none -- and
+`components`, adding a component axis of length one when you named
+none. A bare name is an axis whose length the builder derives: `node`
+and `cell` from the support, and the one remaining unknown from the
+number of values. When two lengths are unknown, give one:
+
+    {"row", "node", {"component", 3}}
+
+The type is `mestra::Dims`, a vector of `mestra::Dim`, and a `Dim` is
+a dimension name with an optional length, so a bare string and a
+braced pair both belong in the list.
+
+The names may be in any order, and the builder permutes into the
+stored order of section 4 rather than asking you to:
+
+    // (node, row) data, written as (row, node, component)
+    mestra::add_node_array(*s, "pressure", by_node, "Pa",
+                           {"node", "row"});
+
+There is no `varies` argument and no mutable `varies` to assign to
+afterwards. Assigning to `varies` or `components` on a slot that
+already holds data does not reshape it, so `write` refuses such a slot
+with E04 or E31 before it opens anything. Build the slot again with
+the `dims` you meant.
+
+*Bounds default to the observed finite range.* A key with no `lower`
+and `upper` given records the smallest and largest finite value it
+holds, so that the same arrays give the same file in every language
+and W04 and W08 are decidable on it. A caller who wants a wider domain
+of validity assigns `lower` and `upper` on the key that comes back;
+those are plain attributes and assigning them takes effect.
+
+*`write` validates first and refuses on any error.* It builds the file
+beside the name you gave and moves it into place only once it
+validates, so a refusal leaves nothing behind. The Error carries the
+first rule identifier and every finding in its message.
+`mestra::WriteOptions` with `check = false` writes the file anyway,
+for the one caller who wants a file the validator rejects.
+
+The builders, in full. Every one of them refuses at build time, with
+the rule identifier and which argument to change, whatever the
+validator would refuse at read time.
+
+    Dataset::add_key(name, values, role, units)
+    Dataset::add_category_key(name, ids, role, category, dtype)
+    Dataset::add_scalar(name, values, units)
+    Dataset::add_category_table(name, entries)
+    Dataset::set_generalisation_group(name)
+    Dataset::add_mesh_support(name, n_nodes, cell_types, cell_offsets,
+                              connectivity)
+    Dataset::add_axis_support(name, coordinates, units)
+    Dataset::add_none_support(name)
+    Dataset::add_callable(id, callable)
+    Dataset::add_callable(id, type, dict)
+
+    set_coordinates(support, values, units, dims)
+    add_node_array(support, name, values, units, dims)
+    add_cell_array(support, name, values, units, dims)
+    add_node_label(support, name, values, category, dims, dtype)
+    add_cell_label(support, name, values, category, dims, dtype)
+    add_callable_node_array(support, name, units, dims, callable,
+                            output)
+    add_callable_cell_array(support, name, units, dims, callable,
+                            output)
+    add_callable_scalar(dataset, name, units, callable, output)
+
+    compute_weights(support, location, options)
+
+A category table is added once with `add_category_table` and named by
+the key or label that uses it; there is no inline form.
+`add_category_key` is the convenience for a key whose column is
+integer category ids, and it is `add_key` with `category` in the place
+of `units`. A label names its table the same way, through the
+`category` argument of `add_node_label` and `add_cell_label`, and a
+label that names none has values that are their own categories.
+
+What a builder does not take, you assign, on the object
+`d.key(name)`, `d.scalar(name)` or `d.support(name)` gives back:
+
+    d.key("time")->trajectory_group = "trajectory";
+    d.key("trajectory")->parent = "member";
+    slot.statistic = "quantile";   // with `of` and `quantile`,
+    slot.of = "pressure";          //   section 9
+    slot.quantile = 0.95;
+    slot.role = "derived";         // with `derived_from`, `recipe`
+    slot.derived_from = "coordinates";   //   and `reference`,
+    slot.recipe = "minus reference";     //   section 5
+    slot.reference = "group:member=wing_a";
+
+Those are plain attributes with no shape behind them, so assigning
+them takes effect. `varies` and `components` are the two that do not,
+and the builders are the only way to set them.
+
+Weights and integration. Section 3 of the specification says a weight
+array is computed from connectivity and never imported, so this
+library computes them:
+
+    mestra::compute_weights(*d.support("s0"), mestra::Location::Cell);
+
+That adds an array of role `weight` with the cell measure -- length,
+area or volume by cell type -- in the coordinate units raised to the
+support's dimension, with `recomputed` set and the `varies` of the
+coordinates, so a family of meshes gets one instance per member.
+`Location::Node` gives the lumped share of the adjacent cell measure
+instead; an `axis` support has no cells and takes its node weights
+from the spacing of its own coordinates. Calling it twice replaces
+rather than adds, because a support carries one weight array per
+location.
+
+Measured here: line, triangle, quadrilateral, polygon, tetrahedron,
+hexahedron, wedge and pyramid. A surface cell of any shape goes
+through Newell's method, which is exact for a polygon that is not
+convex and gives the projected area for one that is not planar; a
+volume cell is a signed sum of tetrahedra. The quadratic cell types of
+section 20 are refused by name, with the cell index, rather than
+approximated by their corner nodes, and so is a mesh whose cells are
+not all of one dimension.
+
+    const mestra::Integral i = mestra::integrate(d, "pressure");
+    i.at(row);              // one value per row and component
+    i.units;                // the slot's units times the weight's
+    i.weight_recomputed;    // the file had none, so one was computed
+
+`integrate` uses the weight array at the slot's location on its
+support by default, computes one on the fly when the file has none and
+says so in the result, and takes `IntegrateOptions::weight` to name
+another by name. A slot served by a callable is refused: evaluate the
+file first.
+
+    const mestra::FieldStatistics f =
+        mestra::field_statistics(d, "pressure", "region");
+    f.group_by;             // "region", never a fixed word
+    f.groups;               // the category names, one per row
+    f.count; f.missing; f.minimum; f.mean; f.maximum; f.deviation;
+
+`field_statistics` groups by a label on the same support at the same
+location, and the grouping column is named after the label. Without
+`by` there is no grouping column at all. A non-finite value is not a
+value: it is this format's spelling of missing floating-point data
+(W03), so it is counted in `missing` and left out of the rest.
+`deviation` is the population standard deviation over the `count`
+finite values.
 
 Validating. Every finding carries the rule identifier and nothing else
 identifies it:
@@ -163,6 +383,10 @@ identifies it:
         std::cerr << f.id << " " << f.where << ": " << f.message << "\n";
     }
     r.error_ids();     // sorted, without duplicates
+
+There is one finding per rule per object, and a rule that could fire
+once per row -- W02, W03, W04 -- reports once with the count and the
+first three rows in its message.
 
 Callables. A callable is exactly four things: `call`, `to_dict`, a
 static `from_dict` dispatched on a `type` string through
@@ -180,6 +404,14 @@ one vector per key, looked up by name through `column(name)`, because
 C++ has no run-time member names. That is the form section 26 now
 gives for this language.
 
+A callable goes into a dataset with `d.add_callable("m1", model)`,
+which takes the type, the dictionary and the optional one-line `repr`
+from the object itself; `add_callable_node_array`,
+`add_callable_cell_array` and `add_callable_scalar` then point slots
+at it by id and output. A callable slot stores nothing, so it has no
+values for a component axis to take a length from: write
+`{"row", "node", {"component", 3}}`.
+
 To add your own callable type, derive from `mestra::Callable` and
 register a factory:
 
@@ -196,6 +428,39 @@ One thing a round trip does not carry. Section 29 forbids a reader to
 interpret `/private`, so nothing of it is read and `write` does not
 reproduce it. `Dataset::has_private` says the file had one; a producer
 that needs to keep its private group copies that group itself.
+
+
+What this package does not do
+-----------------------------
+
+Two of the four post-processing helpers of `docs/api-conventions.md`
+section 4 are not here, and will not be:
+
+    time_series(dataset, slot, node, trajectory)
+    grouped_split(dataset, fractions, seed)
+
+Both of them are analysis over rows rather than anything the format
+decides. A time series is a selection and a sort that a caller writes
+in three lines of C++ over the arrays this library already hands them,
+with the time key and its `trajectory_group` in their hand; a grouped
+split is a random assignment of units of generalisation to parts, and
+which random assignment you get would then depend on this library's
+choice of generator rather than on the seed you gave it. Neither would
+read the same in C++ as in Python, and a helper that gives a different
+answer in two languages is worse than no helper.
+
+`compute_weights`, `integrate` and `field_statistics` are here for the
+opposite reason. A weight array is computed from connectivity and
+never imported, which is a rule of the specification and not a
+convenience; an integral is what that weight array is for; and a
+label is how this format spells a region, so grouping by one is
+reading the file rather than analysing it.
+
+Python and Julia are the implementations that carry the
+post-processing helpers. If you need the other two in a C++ pipeline,
+the shape they should take is in section 4 of the conventions, and the
+two here show what the argument order and the result should look
+like.
 
 
 What the dictionary dump looks like
@@ -288,14 +553,27 @@ sanitizers to the whole suite.
 What this build has been checked against
 ----------------------------------------
 
-All 70 corpus cases: the validator outcome, every support id, every
-probe, every codec round trip, every worked evaluation, a lazy row
-read of every row-dimensioned probe, and, for the 30 cases that
-validate without an error, read-write-compare under the structural
-equality rule of section 30. Then the fifteen cases of
-`vectors/hostile` and the ten of this implementation's own, each
-through `validate`, `info` and `read`. The whole of it also runs under
-the address and undefined-behaviour sanitizers.
+179 unit checks, including the conventions of
+`docs/api-conventions.md` one rule at a time: the argument order, the
+bounds default, `dims` deriving `varies` and `components`, the
+permutation into stored order, the refusals a builder makes and the
+identifiers they carry, `write` refusing a slot whose `varies` was
+assigned after the fact, the cell measures against shapes whose
+measure is known by hand, the lumped node weights adding up to the
+area, the default weight rule, and the statistics of a field with a
+missing value in it; and a zero-row callable file built with
+`add_callable(id, callable)` and a callable slot, written, validated
+and evaluated.
+
+All 70 corpus cases: the validator outcome and the shape of the
+validator's own output, every support id, every probe, every codec
+round trip, every worked evaluation, a lazy row read of every
+row-dimensioned probe, and, for the 30 cases that validate without an
+error, read-write-compare under the structural equality rule of
+section 30. Then the fifteen cases of `vectors/hostile` and the ten of
+this implementation's own, each through `validate`, `info` and `read`.
+The whole of it also runs under the address and undefined-behaviour
+sanitizers.
 
 Byte identity with the corpus files is not required and section 30
 says it must not be tested: the HDF5 library decides the superblock,

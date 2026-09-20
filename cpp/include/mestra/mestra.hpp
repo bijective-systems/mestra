@@ -4,6 +4,9 @@
 //   mestra::write(dataset, path)    a conforming file
 //   mestra::validate(path)          errors and warnings by rule id
 //   mestra::evaluate(dataset, keys) a materialised Dataset
+//   mestra::compute_weights(support, location)   integration weights
+//   mestra::integrate(dataset, slot)             one slot, integrated
+//   mestra::field_statistics(dataset, slot, by)  one slot, summarised
 //
 // SPEC.md is the normative document and vectors/ is the conformance
 // corpus.  No implementation is the reference.
@@ -15,9 +18,11 @@
 #include "mestra/dataset.hpp"
 #include "mestra/evaluate.hpp"
 #include "mestra/io.hpp"
+#include "mestra/post.hpp"
 #include "mestra/sha256.hpp"
 #include "mestra/validate.hpp"
 #include "mestra/value.hpp"
+#include "mestra/weights.hpp"
 
 namespace mestra {
 

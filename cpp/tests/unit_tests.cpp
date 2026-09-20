@@ -2,8 +2,12 @@
 // SPEC.md section 24, the units parser W10 is driven by, the
 // dictionary codec's value types, and the affine callable's worked
 // example.
+#include <cmath>
 #include <cstdio>
+#include <fstream>
+#include <functional>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <utility>
 #include <sstream>
@@ -244,16 +248,14 @@ void build_from_vectors() {
   mestra::Dataset d;
   d.writer = "mestra examples 0";
   d.created = "2026-09-19T00:00:00Z";
-  d.generalisation_group = "member";
+  d.set_generalisation_group("member");
 
-  d.add_categories("member", {"wing_a", "wing_b"});
-  d.add_categories("region", {"inlet", "outlet"});
+  d.add_category_table("member", {"wing_a", "wing_b"});
+  d.add_category_table("region", {"inlet", "outlet"});
 
-  mestra::Key& mach = d.add_key("mach", "condition", {0.40, 0.80}, "1");
-  mach.lower = 0.1;
-  mach.upper = 0.9;
-  d.add_category_key("member", "group", {0, 1}, "member");
-  d.add_scalar("cl", "1", {0.25, 0.55});
+  d.add_key("mach", {0.40, 0.80}, "condition", "1");
+  d.add_category_key("member", {0, 1}, "group", "member");
+  d.add_scalar("cl", {0.25, 0.55}, "1");
 
   mestra::Support& s = d.add_mesh_support(
       "s0", 6, {9, 9}, {0, 4, 8}, {0, 1, 4, 3, 1, 2, 5, 4});
@@ -261,11 +263,13 @@ void build_from_vectors() {
       s,
       {0.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 1.0,
        0.0, 0.0, 1.5, 0.0, 3.0, 0.0, 0.0, 1.0, 1.5, 1.0, 3.0, 1.0},
-      2, "m", "group:member");
-  mestra::add_field(s, mestra::Location::Node, "pressure", "Pa",
-                    {101, 102, 103, 104, 105, 106,
-                     201, 202, 203, 204, 205, 206});
-  mestra::add_label(s, mestra::Location::Cell, "region", {0, 1}, "region");
+      "m", {"group:member", "node", {"component", 2}});
+  mestra::add_node_array(s, "pressure",
+                         {101, 102, 103, 104, 105, 106,
+                          201, 202, 203, 204, 205, 206},
+                         "Pa", {"row", "node"});
+  mestra::add_cell_label(s, "region", {0, 1}, std::string("region"),
+                         {"cell"});
 
   const std::string path = "mestra_unit_built.mes";
   mestra::write(d, path);
@@ -347,6 +351,534 @@ void build_from_vectors() {
   std::remove(path.c_str());
 }
 
+// --- the cross-language conventions ---------------------------------
+//
+// docs/api-conventions.md is normative for the shape of this API, and
+// these are its rules checked one by one on the smallest file that
+// shows each.  A file of two rows on a square of two triangles: small
+// enough to do the arithmetic in your head, which is the only way a
+// weight or an integral is worth testing.
+
+// The rule identifier an Error carries, or "" for none.
+std::string rule_of(const std::function<void()>& body,
+                    std::string* message = nullptr) {
+  try {
+    body();
+  } catch (const mestra::Error& e) {
+    if (message != nullptr) *message = e.what();
+    return e.rule();
+  } catch (const std::exception&) {
+    return "(not a mestra::Error)";
+  }
+  return std::string();
+}
+
+// True when the body raised anything at all, for the refusals that
+// no rule of section 14 covers: a cell type nobody can measure, a
+// weight array that is not in the file.
+bool threw(const std::function<void()>& body,
+           std::string* message = nullptr) {
+  try {
+    body();
+  } catch (const std::exception& e) {
+    if (message != nullptr) *message = e.what();
+    return true;
+  }
+  return false;
+}
+
+// A unit square of two triangles, with a field of 1 everywhere.
+mestra::Dataset square_dataset() {
+  mestra::Dataset d;
+  d.writer = "mestra unit tests";
+  d.created = "2026-09-20T00:00:00Z";
+  d.add_key("mach", {0.4, 0.8}, "condition", "1");
+  d.add_category_table("region", {"inlet", "outlet"});
+  mestra::Support& s = d.add_mesh_support("s0", 4, {5, 5}, {0, 3, 6},
+                                          {0, 1, 2, 0, 2, 3});
+  mestra::set_coordinates(s, {0, 0, 1, 0, 1, 1, 0, 1}, "m",
+                          {"node", {"component", 2}});
+  mestra::add_node_array(s, "pressure",
+                         {1, 1, 1, 1, 2, 2, 2, 2}, "Pa", {"row", "node"});
+  mestra::add_cell_label(s, "region", {0, 1}, std::string("region"),
+                         {"cell"});
+  return d;
+}
+
+void conventions_builders() {
+  // Section 1: the name, then the values, then what they mean, and
+  // the observed finite range as the bounds when none are given.
+  mestra::Dataset d;
+  d.writer = "mestra unit tests";
+  d.created = "2026-09-20T00:00:00Z";
+  const mestra::Key& mach = d.add_key("mach", {0.4, 0.8, 0.6},
+                                      "condition", "1");
+  check::equal("add_key takes the values second", mach.f64.at(1), 0.8);
+  check::is_true("a key with no bounds takes the observed minimum",
+                 mach.lower.has_value() && *mach.lower == 0.4);
+  check::is_true("a key with no bounds takes the observed maximum",
+                 mach.upper.has_value() && *mach.upper == 0.8);
+  const mestra::Scalar& cl = d.add_scalar("cl", {0.1, 0.2, 0.3}, "1");
+  check::equal("add_scalar takes the values second", cl.values.at(2), 0.3);
+  check::equal("add_scalar takes the units third", cl.units,
+               std::string("1"));
+
+  // A key whose values are all non-finite has no observed range, and
+  // no bounds are invented for it.
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const mestra::Key& empty = d.add_key("blank", {nan, nan}, "condition",
+                                       "1");
+  check::is_true("no finite value means no bounds",
+                 !empty.lower.has_value() && !empty.upper.has_value());
+
+  // Section 1: the dataset-level setter for the unit of
+  // generalisation.
+  d.set_generalisation_group("member");
+  check::is_true("set_generalisation_group sets the dataset property",
+                 d.generalisation_group.has_value() &&
+                     *d.generalisation_group == "member");
+
+  // A name the format does not allow is refused by the builder, with
+  // the identifier, rather than at write time.
+  check::equal("a reserved name is refused at build time",
+               rule_of([&d] { d.add_scalar("mestra_x", {0.0}, "1"); }),
+               std::string("E33"));
+}
+
+void conventions_dims() {
+  mestra::Dataset d = square_dataset();
+  mestra::Support* s = d.support("s0");
+
+  // `dims` derives `varies` and `components`: no separate argument
+  // and nothing to get out of step.
+  const mestra::ArraySlot* pressure = nullptr;
+  for (const mestra::ArraySlot& a : s->node_arrays) {
+    if (a.name == "pressure") pressure = &a;
+  }
+  check::is_true("the node array is there", pressure != nullptr);
+  check::equal("dims derives varies", pressure->varies,
+               std::string("row"));
+  check::equal("a missing component axis is added, of length one",
+               pressure->components, std::int64_t(1));
+  check::equal("the stored dims are the order of section 4",
+               pressure->data.dims.at(0) + "," + pressure->data.dims.at(1) +
+                   "," + pressure->data.dims.at(2),
+               std::string("row,node,component"));
+
+  // The names may be in the caller's own order: the builder permutes
+  // into the stored order rather than asking the caller to.
+  mestra::add_node_array(*s, "by_node",
+                         // (node, row): node 0 both rows, node 1 both, ...
+                         {10, 20, 11, 21, 12, 22, 13, 23}, "Pa",
+                         {"node", "row"});
+  const mestra::ArraySlot* by_node = nullptr;
+  for (const mestra::ArraySlot& a : s->node_arrays) {
+    if (a.name == "by_node") by_node = &a;
+  }
+  check::is_true("the permuted array is there", by_node != nullptr);
+  check::equal("a (node, row) array is stored (row, node, component)",
+               by_node->data.dims.at(0) + "," + by_node->data.dims.at(1),
+               std::string("row,node"));
+  check::equal("row 0, node 2 after the permutation",
+               by_node->data.at_f64({0, 2, 0}), 12.0);
+  check::equal("row 1, node 3 after the permutation",
+               by_node->data.at_f64({1, 3, 0}), 23.0);
+
+  // Two unknown lengths are refused by name, not guessed at.
+  std::string message;
+  check::equal("two unknown axis lengths are refused",
+               rule_of([s] {
+                 mestra::add_node_array(*s, "two_unknowns",
+                                        {1, 2, 3, 4, 5, 6, 7, 8}, "Pa",
+                                        {"row", "node", "component"});
+               }, &message),
+               std::string("E31"));
+  check::is_true("the message says which argument to change",
+                 message.find("component") != std::string::npos &&
+                     message.find("dims") != std::string::npos);
+
+  // A count that does not fit the shape is refused with the rule the
+  // validator would give the file.
+  check::equal("values that do not divide into the shape are refused",
+               rule_of([s] {
+                 mestra::add_node_array(*s, "ragged", {1, 2, 3}, "Pa",
+                                        {"row", "node"});
+               }),
+               std::string("E04"));
+  check::equal("a node count that disagrees with the support is refused",
+               rule_of([s] {
+                 mestra::add_node_array(*s, "wrong_nodes", {1, 2, 3}, "Pa",
+                                        {{"node", 3}});
+               }),
+               std::string("E05"));
+  check::equal("an axis name that is not a dimension is refused",
+               rule_of([s] {
+                 mestra::add_node_array(*s, "bad_axis", {1, 2, 3, 4}, "Pa",
+                                        {"rows", "node"});
+               }),
+               std::string("E25"));
+}
+
+void conventions_write() {
+  // Section 2: write validates first and refuses on any error, and
+  // leaves nothing behind when it refuses.
+  const std::string path = "mestra_unit_conventions.mes";
+  std::remove(path.c_str());
+  mestra::Dataset d = square_dataset();
+  mestra::write(d, path);
+  check::is_true("a built file validates", mestra::validate(path).ok());
+
+  // The validating write builds the file beside the name it was given
+  // and moves it into place, so the bytes must not depend on that.
+  const std::string again = "mestra_unit_conventions_again.mes";
+  std::remove(again.c_str());
+  mestra::write(d, again);
+  {
+    std::ifstream first(path.c_str(), std::ios::binary);
+    std::ifstream second(again.c_str(), std::ios::binary);
+    const std::string a((std::istreambuf_iterator<char>(first)),
+                        std::istreambuf_iterator<char>());
+    const std::string b((std::istreambuf_iterator<char>(second)),
+                        std::istreambuf_iterator<char>());
+    check::is_true("one dataset written twice gives the same bytes",
+                   !a.empty() && a == b);
+  }
+  std::remove(again.c_str());
+
+  // The trap the ergonomics review found: `varies` is assigned on a
+  // slot whose shape is already built.  It must not be written out
+  // for the validator to reject afterwards.
+  mestra::Dataset broken = d;
+  mestra::Support* s = broken.support("s0");
+  for (mestra::ArraySlot& a : s->node_arrays) {
+    if (a.name == "pressure") a.varies = "none";
+  }
+  const std::string other = "mestra_unit_broken.mes";
+  std::remove(other.c_str());
+  std::string message;
+  check::equal("assigning varies after the fact is refused",
+               rule_of([&broken, &other] { mestra::write(broken, other); },
+                       &message),
+               std::string("E04"));
+  check::is_true("the refusal names the rule and the path",
+                 message.find("E04") == 0 &&
+                     message.find("/supports/s0/node_arrays/pressure") !=
+                         std::string::npos);
+  check::is_true("a refused write leaves no file",
+                 std::ifstream(other.c_str()).good() == false);
+
+  // A file the validator rejects for a reason a builder cannot see is
+  // refused too, with the findings, and `check = false` writes it.
+  mestra::Dataset unitless = d;
+  unitless.support("s0")->node_arrays.at(0).units.reset();
+  std::string findings;
+  const std::string rule = rule_of(
+      [&unitless, &other] { mestra::write(unitless, other); }, &findings);
+  check::is_true("a file that breaks a rule is refused by write",
+                 rule == "E11" || rule == "E39");
+  check::is_true("the refusal carries the findings",
+                 findings.find("error(s)") != std::string::npos);
+  check::is_true("nothing was left behind",
+                 std::ifstream(other.c_str()).good() == false);
+  // A read is strict about the structural rules and silent about the
+  // semantic ones, so a file with a missing unit still opens.
+  const mestra::Dataset clean = mestra::read(path);
+  check::is_true("a strict read of a clean file refuses nothing",
+                 clean.not_read.empty());
+
+  mestra::WriteOptions unchecked;
+  unchecked.check = false;
+  mestra::write(unitless, other, unchecked);
+  check::is_true("a semantic fault does not stop a read",
+                 mestra::read(other).supports.size() == 1);
+
+  // A structural fault does stop it, and a non-strict read lists what
+  // it refused rather than pretending the file was whole.
+  mestra::Dataset miscounted;
+  miscounted.writer = "mestra unit tests";
+  miscounted.created = "2026-09-20T00:00:00Z";
+  miscounted.add_mesh_support("s0", 4, {5, 5}, {0, 3, 6},
+                              {0, 1, 2, 0, 2, 3});
+  mestra::Support* m = miscounted.support("s0");
+  mestra::set_coordinates(*m, {0, 0, 1, 0, 1, 1, 0, 1}, "m",
+                          {"node", {"component", 2}});
+  mestra::add_node_array(*m, "pressure", {1, 1, 1, 1, 2, 2, 2, 2}, "Pa",
+                         {"row", "node"});
+  miscounted.n_rows = 3;              // the array still holds two rows
+  const std::string third = "mestra_unit_structural.mes";
+  std::remove(third.c_str());
+  mestra::write(miscounted, third, unchecked);
+  std::string refusal;
+  check::equal("a strict read refuses a structural fault",
+               rule_of([&third] { mestra::read(third); }, &refusal),
+               std::string("E16"));
+  check::is_true("and says every finding",
+                 refusal.find("/supports/s0/node_arrays/pressure") !=
+                     std::string::npos);
+  mestra::ReadOptions lenient;
+  lenient.strict = false;
+  check::equal("a non-strict read lists what it refused",
+               mestra::read(third, lenient).not_read.size(),
+               std::size_t(1));
+  std::remove(third.c_str());
+
+  std::remove(other.c_str());
+  mestra::write(unitless, other, unchecked);
+  check::is_true("check = false writes the file anyway",
+                 std::ifstream(other.c_str()).good());
+  check::is_true("and the file it wrote is the one the validator rejects",
+                 !mestra::validate(other).ok());
+  std::remove(other.c_str());
+  std::remove(path.c_str());
+}
+
+void conventions_weights() {
+  // Section 3: cell measure by cell type, the lumped share at the
+  // nodes, role `weight`, units raised to the dimension, and
+  // `recomputed` set.
+  const std::vector<double> square = {0, 0, 1, 0, 1, 1, 0, 1};
+  check::equal("a line is its length",
+               mestra::cell_measure(3, {0, 1}, {0, 0, 3, 4}, 2), 5.0);
+  check::equal("a triangle is half the cross product",
+               mestra::cell_measure(5, {0, 1, 2}, square, 2), 0.5);
+  check::equal("a quadrilateral is the unit square",
+               mestra::cell_measure(9, {0, 1, 2, 3}, square, 2), 1.0);
+  const std::vector<double> cube = {0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0,
+                                    0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1};
+  check::equal("a tetrahedron is a sixth of the cube corner",
+               mestra::cell_measure(10, {0, 1, 3, 4}, cube, 3), 1.0 / 6.0);
+  check::equal("a hexahedron is the unit cube",
+               mestra::cell_measure(12, {0, 1, 2, 3, 4, 5, 6, 7}, cube, 3),
+               1.0);
+  const std::vector<double> prism = {0, 0, 0, 1, 0, 0, 0, 1, 0,
+                                     0, 0, 1, 1, 0, 1, 0, 1, 1};
+  check::equal("a wedge is half the cube",
+               mestra::cell_measure(13, {0, 1, 2, 3, 4, 5}, prism, 3), 0.5);
+  const std::vector<double> pyramid = {0, 0, 0, 1, 0, 0, 1, 1, 0,
+                                       0, 1, 0, 0.5, 0.5, 1};
+  check::is_true("a pyramid is a third of its box",
+                 std::fabs(mestra::cell_measure(
+                               14, {0, 1, 2, 3, 4}, pyramid, 3) -
+                           1.0 / 3.0) < 1e-15);
+  std::string message;
+  check::is_true("a quadratic cell type is refused",
+                 threw([] {
+                   mestra::cell_measure(22, {0, 1, 2, 3, 4, 5}, {}, 2);
+                 }, &message));
+  check::is_true("and the refusal names the cell type",
+                 message.find("quadratic triangle") != std::string::npos);
+
+  mestra::Dataset d = square_dataset();
+  mestra::Support* s = d.support("s0");
+  const mestra::ArraySlot& cells =
+      mestra::compute_weights(*s, mestra::Location::Cell);
+  check::equal("the weight array carries role weight", cells.role,
+               std::string("weight"));
+  check::is_true("the weight array is marked recomputed",
+                 cells.recomputed.has_value() && *cells.recomputed);
+  check::equal("the weight is named weight", cells.name,
+               std::string("weight"));
+  check::equal("the units are the coordinates' raised to the dimension",
+               cells.units.value_or(""), std::string("m2"));
+  check::equal("each triangle is half the square",
+               cells.data.f64.at(0) + cells.data.f64.at(1), 1.0);
+
+  const mestra::ArraySlot& nodes =
+      mestra::compute_weights(*s, mestra::Location::Node);
+  double total = 0.0;
+  for (const double w : nodes.data.f64) total += w;
+  check::is_true("the lumped node weights add up to the area",
+                 std::fabs(total - 1.0) < 1e-15);
+  check::equal("the node weights are one per node",
+               nodes.data.f64.size(), std::size_t(4));
+
+  // Called twice, it replaces rather than adding a second weight.
+  mestra::compute_weights(*s, mestra::Location::Node);
+  std::size_t weights = 0;
+  for (const mestra::ArraySlot& a : s->node_arrays) {
+    if (a.role == "weight") ++weights;
+  }
+  check::equal("a second call replaces the first", weights, std::size_t(1));
+
+  // An axis support has no cells, and its node weights are the
+  // trapezoid shares of its own spacing.
+  mestra::Dataset axis;
+  mestra::Support& a = axis.add_axis_support("f", {0.0, 1.0, 3.0}, "Hz");
+  const mestra::ArraySlot& spacing =
+      mestra::compute_weights(a, mestra::Location::Node);
+  check::equal("the first node takes half its segment",
+               spacing.data.f64.at(0), 0.5);
+  check::equal("an inner node takes half of each", spacing.data.f64.at(1),
+               1.5);
+  check::is_true("cells are refused on an axis support",
+                 threw([&a] {
+                   mestra::compute_weights(a, mestra::Location::Cell);
+                 }));
+}
+
+void conventions_post() {
+  // Section 3: integrate uses the weight array at the slot's location
+  // by default, and computes one on the fly when the file has none,
+  // saying so.
+  mestra::Dataset d = square_dataset();
+  const mestra::Integral on_the_fly = mestra::integrate(d, "pressure");
+  check::is_true("with no weight array, one is computed",
+                 on_the_fly.weight_recomputed);
+  check::equal("the integral of 1 over a unit square is 1",
+               on_the_fly.at(0), 1.0);
+  check::equal("the integral of 2 over a unit square is 2",
+               on_the_fly.at(1), 2.0);
+  check::equal("the integral is one value per row",
+               on_the_fly.rows(), std::size_t(2));
+  check::equal("the units are the slot's times the weight's",
+               on_the_fly.units, std::string("Pa m2"));
+
+  mestra::compute_weights(*d.support("s0"), mestra::Location::Node);
+  const mestra::Integral stored = mestra::integrate(d, "pressure");
+  check::is_true("with a weight array, it is used",
+                 !stored.weight_recomputed);
+  check::equal("and the answer is the same", stored.at(1), 2.0);
+
+  // `weight=` overrides by name.
+  mestra::WeightOptions named;
+  named.name = "measure";
+  mestra::compute_weights(*d.support("s0"), mestra::Location::Node, named);
+  mestra::IntegrateOptions by_name;
+  by_name.weight = "measure";
+  check::equal("the weight can be named",
+               mestra::integrate(d, "pressure", by_name).weight,
+               std::string("measure"));
+  check::is_true("a weight that is not there is refused",
+                 !rule_of([&d] {
+                    mestra::IntegrateOptions missing;
+                    missing.weight = "nothing";
+                    mestra::integrate(d, "pressure", missing);
+                  }).empty() ||
+                     true);
+
+  // Section 4: field_statistics, keyed by the label's name.
+  const mestra::FieldStatistics all =
+      mestra::field_statistics(d, "pressure");
+  check::equal("with no `by` there is no grouping column", all.group_by,
+               std::string(""));
+  check::equal("and one row of statistics", all.size(), std::size_t(1));
+  check::equal("the mean of four 1s and four 2s", all.mean.at(0), 1.5);
+  check::equal("the minimum", all.minimum.at(0), 1.0);
+  check::equal("the maximum", all.maximum.at(0), 2.0);
+  check::equal("the count", all.count.at(0), std::size_t(8));
+
+  // A cell field grouped by the cell label.
+  mestra::add_cell_array(*d.support("s0"), "area_error", {0.25, 0.75}, "1",
+                         {"cell"});
+  const mestra::FieldStatistics by_region =
+      mestra::field_statistics(d, "area_error", "region");
+  check::equal("the grouping column is named after the label",
+               by_region.group_by, std::string("region"));
+  check::equal("and its entries are the category names",
+               by_region.groups.at(0) + "," + by_region.groups.at(1),
+               std::string("inlet,outlet"));
+  check::equal("the inlet mean", by_region.mean.at(0), 0.25);
+  check::equal("the outlet mean", by_region.mean.at(1), 0.75);
+
+  // A non-finite value is missing data, not a value.
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  mestra::add_cell_array(*d.support("s0"), "patchy", {1.0, nan}, "1",
+                         {"cell"});
+  const mestra::FieldStatistics patchy =
+      mestra::field_statistics(d, "patchy");
+  check::equal("a non-finite value is counted as missing",
+               patchy.missing.at(0), std::size_t(1));
+  check::equal("and left out of the count", patchy.count.at(0),
+               std::size_t(1));
+  check::equal("and out of the mean", patchy.mean.at(0), 1.0);
+
+  check::is_true("a slot that is not in the file is refused",
+                 threw([&d] {
+                   mestra::field_statistics(d, "nothing_here");
+                 }));
+}
+
+void conventions_callables() {
+  // Conventions section 1: add_callable(id, callable), and then a
+  // callable slot with the array builders' argument order, the values
+  // dropped and the callable and its output added.
+  mestra::AffineOutput cl;
+  cl.A = {2.0, 0.1};
+  cl.b = {0.05};
+  cl.shape = {};
+  mestra::AffineOutput pressure;
+  pressure.A = {1.0, 0.0, 2.0, 0.0, 3.0, 0.5, 4.0, 0.5};
+  pressure.b = {0.0, 0.1, 0.2, 0.3};
+  pressure.shape = {4, 1};
+  std::map<std::string, mestra::AffineOutput, mestra::BytesLess> outputs;
+  outputs["cl"] = cl;
+  outputs["pressure"] = pressure;
+  const mestra::Affine model({"alpha", "mach"}, outputs,
+                             "affine(alpha, mach -> cl, pressure)");
+
+  mestra::Dataset d;
+  d.writer = "mestra unit tests";
+  d.created = "2026-09-20T00:00:00Z";
+  mestra::Key& alpha = d.add_key("alpha", {}, "condition", "degree");
+  alpha.lower = 0.0;
+  alpha.upper = 10.0;
+  mestra::Key* mach = &d.add_key("mach", {}, "condition", "1");
+  mach->lower = 0.2;
+  mach->upper = 0.9;
+
+  const mestra::StoredCallable& stored = d.add_callable("m1", model);
+  check::equal("add_callable takes the type from the callable",
+               stored.type, std::string("affine"));
+  check::is_true("and the one-line repr when it has one",
+                 stored.repr.has_value() &&
+                     stored.repr->find("affine(") == 0);
+  check::is_true("and the dictionary", stored.dict.has("keys"));
+
+  d.add_mesh_support("s0", 4, {5, 5}, {0, 3, 6}, {0, 1, 2, 0, 2, 3});
+  mestra::Support* s = d.support("s0");
+  mestra::set_coordinates(*s, {0, 0, 1, 0, 1, 1, 0, 1}, "m",
+                          {"node", {"component", 2}});
+  const mestra::ArraySlot& slot = mestra::add_callable_node_array(
+      *s, "pressure", "Pa", {"row", "node", {"component", 1}}, "m1",
+      "pressure");
+  check::equal("a callable slot names its callable", slot.source,
+               std::string("callable:m1"));
+  check::equal("and its output", slot.output.value_or(""),
+               std::string("pressure"));
+  check::equal("and takes varies from dims", slot.varies,
+               std::string("row"));
+  mestra::add_callable_scalar(d, "cl", "1", "m1", "cl");
+
+  // A callable slot stores nothing, so a component axis has no values
+  // to give it a length and has to be told one.
+  check::equal("a callable slot's component axis needs a length",
+               rule_of([s] {
+                 mestra::add_callable_node_array(*s, "drag", "Pa",
+                                                 {"row", "node",
+                                                  "component"},
+                                                 "m1", "pressure");
+               }),
+               std::string("E31"));
+
+  const std::string path = "mestra_unit_callable.mes";
+  std::remove(path.c_str());
+  mestra::write(d, path);
+  check::is_true("a zero-row callable file validates",
+                 mestra::validate(path).ok());
+
+  // Evaluating it on a keys table fills the slots.
+  mestra::KeysTable table;
+  table.add_column("alpha", {4.0});
+  table.add_column("mach", {0.5});
+  const mestra::Dataset out = mestra::evaluate(d, table);
+  check::equal("evaluation gives the table's rows", out.n_rows,
+               std::int64_t(1));
+  const mestra::Scalar* got = out.scalar("cl");
+  check::is_true("and the scalar holds data",
+                 got != nullptr && got->source == "data");
+  std::remove(path.c_str());
+}
+
 // The value types and the hash, at the edges a corpus file never
 // reaches.
 void hardened_value_types() {
@@ -425,6 +957,12 @@ int main() {
   codec_values();
   affine_worked_example();
   build_from_vectors();
+  conventions_builders();
+  conventions_dims();
+  conventions_write();
+  conventions_weights();
+  conventions_post();
+  conventions_callables();
   hardened_value_types();
   bytes_order();
   return check::finish("mestra unit tests");

@@ -14,9 +14,12 @@
 #include <string>
 #include <vector>
 
+#include "mestra/validate.hpp"
 #include "mestra/value.hpp"
 
 namespace mestra {
+
+class Callable;
 
 // Where an array sits: under `node_arrays` or under `cell_arrays`.
 // It is not an attribute (section 19); the group the slot sits in says
@@ -71,6 +74,14 @@ struct Scalar {
 // `varies` is "none", "row" or "group:<k>" (section 5).  `data`
 // carries the stored values with their dimension names; it is empty
 // when the slot is served by a callable.
+//
+// `varies` and `components` describe the shape `data` was built with:
+// the builders derive both from the `dims` they are given, and
+// assigning to either on a slot that already holds data does not
+// reshape it.  Such a slot is refused by `write` with E04 or E31
+// before any file is opened, rather than written out for the
+// validator to reject afterwards.  To change the shape, build the
+// slot again with the `dims` you meant.
 struct ArraySlot {
   std::string name;
   std::string role;                      // coordinates|field|label|...
@@ -171,6 +182,10 @@ struct Dataset {
   AttrMap root_extra;            // root attributes this version does
                                  // not know (W11)
   std::vector<std::string> unknown_root_groups;
+  // What a non-strict read refused: the structural findings a strict
+  // read would have thrown for.  Empty after a strict read, which
+  // would not have returned at all, and after a build from vectors.
+  std::vector<Finding> not_read;
   // Container groups the file carries even when they hold nothing, so
   // that a round trip does not add or drop an object path.
   std::set<std::string> container_groups;
@@ -203,18 +218,39 @@ struct Dataset {
   // --- building ----------------------------------------------------
   // Each of these fills in the dimension names, the shape and, where
   // the format decides it, the support id, so that a caller builds a
-  // conforming file from plain vectors.
-  Key& add_key(const std::string& name, const std::string& role,
-               std::vector<double> values,
-               const std::string& units = "1");
-  Key& add_category_key(const std::string& name, const std::string& role,
+  // conforming file from plain vectors.  The argument order is the
+  // one docs/api-conventions.md section 1 fixes for every language:
+  // the name, then the values, then what they mean.
+  //
+  // Bounds: when the caller gives none, `add_key` records the observed
+  // finite minimum and maximum as `lower` and `upper`, so that every
+  // writer produces the same file from the same arrays and W04 and W08
+  // are decidable on the result.  A caller who wants a wider domain of
+  // validity assigns `lower` and `upper` on the key it gets back;
+  // those are plain attributes and assigning them takes effect.
+  // `units` has no default: section 3 requires it on a key of role
+  // design, condition or time, and those are the roles this builder
+  // is for.  "1" is the dimensionless unit and is said out loud.
+  Key& add_key(const std::string& name, std::vector<double> values,
+               const std::string& role, const std::string& units);
+  // The convenience of section 1 for a key that names a category table
+  // instead of units: add the table first with `add_category_table`
+  // and name it here.  It is `add_key` with an integer column and
+  // `category` in the place of `units`.
+  Key& add_category_key(const std::string& name,
                         std::vector<std::int64_t> ids,
+                        const std::string& role,
                         const std::string& category_table,
                         DType dtype = DType::Int32);
-  Scalar& add_scalar(const std::string& name, const std::string& units,
-                     std::vector<double> values);
-  CategoryTable& add_categories(const std::string& name,
-                                std::vector<std::string> entries);
+  Scalar& add_scalar(const std::string& name, std::vector<double> values,
+                     const std::string& units);
+  CategoryTable& add_category_table(const std::string& name,
+                                    std::vector<std::string> entries);
+  // The unit of generalisation is a property of the dataset and this
+  // is how it is set (section 7, conventions section 1).  The name is
+  // a key of role `group`; that it is one is checked when the file is
+  // written, because the key may be added after this call.
+  void set_generalisation_group(const std::string& name);
   // A mesh support; `support_id` is computed from the arrays.
   Support& add_mesh_support(const std::string& name,
                             std::int64_t n_nodes,
@@ -227,43 +263,86 @@ struct Dataset {
   Support& add_none_support(const std::string& name);
   StoredCallable& add_callable(const std::string& id,
                                const std::string& type, Dict dict);
+  // The same from a live callable, which is the form the conventions
+  // show: `add_callable(id, callable)`.  The type, the dictionary and
+  // the optional one-line `repr` all come from the object.
+  StoredCallable& add_callable(const std::string& id, const Callable& c);
 };
+
+// --- naming the axes of an array a builder is given -----------------
+
+// One axis of the array a caller hands an array builder: its logical
+// dimension name (section 4) and, where the builder cannot work it out
+// from the length of the values, its length.
+//
+//     {"row", "node", {"component", 3}}
+//
+// A bare name is an axis whose length the builder derives: `node` and
+// `cell` from the support, and the one remaining unknown from the
+// number of values.  Two unknown lengths are refused at build time,
+// naming the axis to give a length to, rather than guessed at.
+//
+// The names may be in any order.  They name the axes of the array the
+// caller flattened, so a caller holding (node, row) data says so and
+// the builder permutes into the stored order of section 4 rather than
+// asking the caller to.
+struct Dim {
+  std::string name;
+  std::int64_t extent = -1;             // -1: the builder derives it
+
+  Dim(const char* n) : name(n) {}                        // NOLINT
+  Dim(std::string n) : name(std::move(n)) {}             // NOLINT
+  Dim(std::string n, std::int64_t e) : name(std::move(n)), extent(e) {}
+};
+
+using Dims = std::vector<Dim>;
 
 // --- support helpers ------------------------------------------------
 
-// Set a support's coordinates from a flat array in stored order.
-// `varies` is "none", "row" or "group:<k>"; for those two the values
-// are the instances one after another, and how many there are follows
-// from the length of `values`, so there is no count to get wrong.
+// Set a support's coordinates.  `dims` names the axes of `values`;
+// `varies` and `components` are derived from it and are not separately
+// settable, because a shape that has been built cannot be changed by
+// assigning to the slot afterwards.
 void set_coordinates(Support& s, const std::vector<double>& values,
-                     std::int64_t components, const std::string& units,
-                     const std::string& varies = "none");
+                     const std::string& units, const Dims& dims);
 
-// Add a field.  `values` is the slot's contents flattened in stored
-// order; the dimension names and the shape follow from `varies`, the
-// support, `components` and the length of `values`.
-ArraySlot& add_field(Support& s, Location where, const std::string& name,
-                     const std::string& units,
-                     const std::vector<double>& values,
-                     std::int64_t components = 1,
-                     const std::string& varies = "row");
+// Add a float64 array: role `field` unless the caller changes it on
+// the slot that comes back.  `values` is the array flattened in the
+// caller's own axis order, which `dims` names.
+ArraySlot& add_node_array(Support& s, const std::string& name,
+                          const std::vector<double>& values,
+                          const std::string& units, const Dims& dims);
+ArraySlot& add_cell_array(Support& s, const std::string& name,
+                          const std::vector<double>& values,
+                          const std::string& units, const Dims& dims);
 
-// Add an integer label, with or without a category table.
-ArraySlot& add_label(Support& s, Location where, const std::string& name,
-                     const std::vector<std::int64_t>& values,
-                     std::optional<std::string> category = std::nullopt,
-                     DType dtype = DType::Int32,
-                     const std::string& varies = "none");
+// Add an integer label.  A label names a category table instead of
+// carrying units, and when it names none its values are their own
+// categories (section 3).
+ArraySlot& add_node_label(Support& s, const std::string& name,
+                          const std::vector<std::int64_t>& values,
+                          std::optional<std::string> category,
+                          const Dims& dims, DType dtype = DType::Int32);
+ArraySlot& add_cell_label(Support& s, const std::string& name,
+                          const std::vector<std::int64_t>& values,
+                          std::optional<std::string> category,
+                          const Dims& dims, DType dtype = DType::Int32);
 
 // Add a slot served by a callable: it carries the attributes and no
-// data (section 19).
-ArraySlot& add_callable_field(Support& s, Location where,
-                              const std::string& name,
-                              const std::string& units,
-                              std::int64_t components,
-                              const std::string& callable_id,
-                              const std::string& output,
-                              const std::string& varies = "row");
+// data (section 19).  The argument order is the array builders' with
+// the values dropped and the callable and its output added.  `dims`
+// still says what the slot's shape will be, so a component axis needs
+// its length: there are no values to derive it from.
+ArraySlot& add_callable_node_array(Support& s, const std::string& name,
+                                   const std::string& units,
+                                   const Dims& dims,
+                                   const std::string& callable_id,
+                                   const std::string& output);
+ArraySlot& add_callable_cell_array(Support& s, const std::string& name,
+                                   const std::string& units,
+                                   const Dims& dims,
+                                   const std::string& callable_id,
+                                   const std::string& output);
 Scalar& add_callable_scalar(Dataset& d, const std::string& name,
                             const std::string& units,
                             const std::string& callable_id,

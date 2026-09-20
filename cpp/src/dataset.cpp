@@ -1,14 +1,41 @@
 #include "mestra/dataset.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
+#include "mestra/callable.hpp"
 #include "mestra/io.hpp"
 #include "mestra/sha256.hpp"
 #include "names.hpp"
 
 namespace mestra {
 namespace {
+
+// A builder refuses at build time, with the rule identifier, whatever
+// the validator would refuse at read time (conventions section 1), and
+// says which argument to change (section 6).  Error puts the rule
+// identifier in front, so what a caller reads is the identifier, then
+// the object path, then what to do about it.
+[[noreturn]] void refuse(const std::string& rule, const std::string& path,
+                         const std::string& message) {
+  throw Error(rule, path + ": " + message);
+}
+
+void check_builder_name(const std::string& path, const std::string& name) {
+  if (!internal::legal_netcdf_name(name)) {
+    refuse("E33", path,
+           "\"" + name +
+               "\" is not a legal netCDF-4 name; change the `name` "
+               "argument");
+  }
+  if (internal::reserved_name(name)) {
+    refuse("E33", path,
+           "\"" + name +
+               "\" begins with the reserved prefix mestra_; change the "
+               "`name` argument");
+  }
+}
 
 void put_i64_le(Sha256& h, std::int64_t v) {
   unsigned char bytes[8];
@@ -219,25 +246,48 @@ T& insert_sorted(std::vector<T>& into, T value) {
 
 }  // namespace
 
-Key& Dataset::add_key(const std::string& name, const std::string& role,
-                      std::vector<double> values,
+Key& Dataset::add_key(const std::string& name, std::vector<double> values,
+                      const std::string& role,
                       const std::string& units) {
+  check_builder_name("/keys/" + name, name);
   Key k;
   k.name = name;
   k.role = role;
   k.units = units;
   k.dtype = DType::Float64;
   k.f64 = std::move(values);
+  // Conventions section 1: with no bounds given, the observed finite
+  // range is what the file records, so that the same arrays give the
+  // same file in every language and W04 and W08 are decidable.
+  bool any = false;
+  double lo = 0.0;
+  double hi = 0.0;
+  for (const double v : k.f64) {
+    if (!std::isfinite(v)) continue;
+    if (!any) {
+      lo = v;
+      hi = v;
+      any = true;
+    } else {
+      lo = std::min(lo, v);
+      hi = std::max(hi, v);
+    }
+  }
+  if (any) {
+    k.lower = lo;
+    k.upper = hi;
+  }
   if (n_rows == 0) n_rows = static_cast<std::int64_t>(k.f64.size());
   container_groups.insert("/keys");
   return insert_sorted(keys, std::move(k));
 }
 
 Key& Dataset::add_category_key(const std::string& name,
-                               const std::string& role,
                                std::vector<std::int64_t> ids,
+                               const std::string& role,
                                const std::string& category_table,
                                DType dtype) {
+  check_builder_name("/keys/" + name, name);
   Key k;
   k.name = name;
   k.role = role;
@@ -250,8 +300,9 @@ Key& Dataset::add_category_key(const std::string& name,
 }
 
 Scalar& Dataset::add_scalar(const std::string& name,
-                            const std::string& units,
-                            std::vector<double> values) {
+                            std::vector<double> values,
+                            const std::string& units) {
+  check_builder_name("/scalars/" + name, name);
   Scalar s;
   s.name = name;
   s.units = units;
@@ -262,13 +313,18 @@ Scalar& Dataset::add_scalar(const std::string& name,
   return insert_sorted(scalars, std::move(s));
 }
 
-CategoryTable& Dataset::add_categories(const std::string& name,
-                                       std::vector<std::string> entries) {
+CategoryTable& Dataset::add_category_table(
+    const std::string& name, std::vector<std::string> entries) {
+  check_builder_name("/categories/" + name, name);
   CategoryTable c;
   c.name = name;
   c.entries = std::move(entries);
   container_groups.insert("/categories");
   return insert_sorted(categories, std::move(c));
+}
+
+void Dataset::set_generalisation_group(const std::string& name) {
+  generalisation_group = name;
 }
 
 Support& Dataset::add_mesh_support(
@@ -301,7 +357,9 @@ Support& Dataset::add_axis_support(const std::string& name,
   s.n_cells = 0;
   container_groups.insert("/supports");
   Support& ref = insert_sorted(supports, std::move(s));
-  set_coordinates(ref, coordinates, 1, units, "none");
+  // Section 5: the coordinates of an axis support vary along nothing,
+  // because they are part of that support's identity.
+  set_coordinates(ref, coordinates, units, {"node"});
   ref.support_id = ref.computed_support_id();
   aligned = supports.size() <= 1;
   return ref;
@@ -335,32 +393,234 @@ StoredCallable& Dataset::add_callable(const std::string& id,
   return *callables.insert(at, std::move(c));
 }
 
+StoredCallable& Dataset::add_callable(const std::string& id,
+                                      const Callable& c) {
+  StoredCallable& stored = add_callable(id, c.type(), c.to_dict());
+  const std::string line = c.repr();
+  if (!line.empty()) stored.repr = line;
+  return stored;
+}
+
 // --- support helpers -------------------------------------------------
 
 namespace {
 
-// The dimension names of an array slot, in stored order.
-std::vector<std::string> slot_dims(const std::string& varies,
-                                   bool has_draw, Location where) {
-  std::vector<std::string> dims;
-  if (varies == "row") {
-    dims.push_back("row");
-  } else if (varies.compare(0, 6, "group:") == 0) {
-    dims.push_back(varies);
-  }
-  if (has_draw) dims.push_back("draw");
-  dims.push_back(where == Location::Node ? "node" : "cell");
-  dims.push_back("component");
-  return dims;
+// The logical name of the axis a support contributes at `where`.
+const char* support_axis(Location where) {
+  return where == Location::Node ? "node" : "cell";
 }
 
-// How many instances the leading dimension holds, from the length of
-// the values the caller handed over.  Deriving it rather than asking
-// for it is what keeps a builder from writing a shape the validator
-// then rejects (E04, E16, E34).
-std::size_t leading_extent(std::size_t values, std::size_t per_instance) {
-  if (per_instance == 0) return 0;
-  return values / per_instance;
+std::string count_text(std::size_t n) {
+  return internal::format_i64(static_cast<std::int64_t>(n));
+}
+
+// What a builder works out from the `dims` it was given: the stored
+// shape of section 4, the `varies` and the `components` that follow
+// from it, and the permutation from the caller's axis order into the
+// stored one.  Nothing here is guessed: an axis whose length neither
+// the support nor the values settle is refused by name.
+struct Resolved {
+  std::string varies = "none";
+  std::int64_t components = 1;
+  std::vector<std::string> dims;        // stored order
+  std::vector<std::size_t> shape;       // stored order
+  std::vector<std::size_t> source_shape; // the caller's order
+  std::vector<int> source_axis;         // stored axis -> caller axis, -1
+};
+
+Resolved resolve(const std::string& path, const Dims& dims, Location where,
+                 std::int64_t support_extent, std::size_t values,
+                 bool have_values) {
+  const std::string here = support_axis(where);
+  const std::string there = where == Location::Node ? "cell" : "node";
+
+  std::vector<std::string> names;
+  std::vector<std::int64_t> extent;
+  int leading = -1;
+  int draw = -1;
+  int support_at = -1;
+  int component = -1;
+  for (std::size_t i = 0; i < dims.size(); ++i) {
+    const std::string& n = dims[i].name;
+    const int at = static_cast<int>(i);
+    for (const std::string& seen : names) {
+      if (seen == n) {
+        refuse("E25", path,
+               "`dims` names the axis \"" + n + "\" twice");
+      }
+    }
+    if (n == "row" || n.compare(0, 6, "group:") == 0) {
+      if (n.size() == 6) {
+        refuse("E04", path,
+               "\"group:\" in `dims` names no group key; write "
+               "\"group:<key>\" with the name of a key of role group");
+      }
+      if (leading >= 0) {
+        refuse("E04", path,
+               "`dims` names both \"" + names[static_cast<std::size_t>(
+                   leading)] + "\" and \"" + n +
+                   "\"; an array varies along row, along one group, or "
+                   "along neither");
+      }
+      leading = at;
+    } else if (n == "draw") {
+      draw = at;
+    } else if (n == here) {
+      support_at = at;
+    } else if (n == there) {
+      refuse("E25", path,
+             "`dims` names the \"" + there + "\" axis on a " + here +
+                 " array; it carries the \"" + here + "\" axis");
+    } else if (n == "component") {
+      component = at;
+    } else {
+      refuse("E25", path,
+             "\"" + n +
+                 "\" is not a dimension name of section 4; `dims` takes "
+                 "row, group:<key>, draw, " + here + " and component");
+    }
+    names.push_back(n);
+    extent.push_back(dims[i].extent);
+  }
+  if (support_at < 0) {
+    refuse("E25", path,
+           "`dims` does not name the \"" + here +
+               "\" axis, which every array on a support carries");
+  }
+
+  // The support settles its own axis; a caller who states it as well
+  // must state it right.
+  const std::size_t sa = static_cast<std::size_t>(support_at);
+  if (extent[sa] >= 0 && extent[sa] != support_extent) {
+    refuse("E05", path,
+           "`dims` gives the \"" + here + "\" axis " +
+               internal::format_i64(extent[sa]) +
+               " and the support has " +
+               internal::format_i64(support_extent) +
+               "; leave the length off and the support decides it");
+  }
+  extent[sa] = support_extent;
+
+  // Whatever is left unknown has to follow from the number of values,
+  // and only one thing can.
+  std::size_t known = 1;
+  std::vector<std::size_t> unknown;
+  for (std::size_t i = 0; i < extent.size(); ++i) {
+    if (extent[i] < 0) {
+      unknown.push_back(i);
+    } else {
+      known *= static_cast<std::size_t>(extent[i]);
+    }
+  }
+  const bool component_unknown =
+      component >= 0 && extent[static_cast<std::size_t>(component)] < 0;
+  const std::string count_rule = leading >= 0 ? "E04" : "E05";
+
+  if (!have_values) {
+    // A slot served by a callable stores nothing, so only `varies` and
+    // `components` have to come out; but `components` is an attribute
+    // of the slot and there are no values to work it out from.
+    if (component_unknown) {
+      refuse("E31", path,
+             "the \"component\" axis has no length and a callable slot "
+             "carries no values to work one out from; write it as "
+             "{\"component\", <n>}");
+    }
+    for (const std::size_t i : unknown) extent[i] = 1;
+  } else if (unknown.size() > 1) {
+    std::string listed;
+    for (std::size_t at = 0; at < unknown.size(); ++at) {
+      if (at != 0) listed += at + 1 == unknown.size() ? "\" and \"" : "\", \"";
+      listed += names[unknown[at]];
+    }
+    // The axis to suggest is the component one when it is among them,
+    // because a caller knows how many components they have and not
+    // always how many rows.
+    const std::string suggest =
+        component_unknown ? std::string("component")
+                          : names[unknown.front()];
+    refuse(component_unknown ? "E31" : count_rule, path,
+           "the length of \"" + listed + "\" cannot " +
+               (unknown.size() == 2 ? "both" : "all") +
+               " be worked out from " + count_text(values) +
+               " values; give one of them a length in `dims`, as "
+               "{\"" + suggest + "\", <n>}");
+  } else if (unknown.size() == 1) {
+    const std::size_t i = unknown.front();
+    if (known == 0 || values % known != 0) {
+      refuse(count_rule, path,
+             count_text(values) + " values do not divide into blocks of " +
+                 count_text(known) + ", which is what one \"" + names[i] +
+                 "\" holds; change `values` or the lengths in `dims`");
+    }
+    extent[i] = static_cast<std::int64_t>(values / known);
+  } else if (known != values) {
+    refuse(count_rule, path,
+           count_text(values) + " values do not fill a shape of " +
+               count_text(known) +
+               "; change `values` or the lengths in `dims`");
+  }
+
+  Resolved r;
+  r.varies = leading >= 0
+                 ? names[static_cast<std::size_t>(leading)]
+                 : std::string("none");
+  r.components =
+      component >= 0 ? extent[static_cast<std::size_t>(component)] : 1;
+  if (r.components <= 0) {
+    refuse("E31", path,
+           "the \"component\" axis has length " +
+               internal::format_i64(r.components) +
+               "; an array has one component or more");
+  }
+  auto push = [&r, &extent](int caller_axis, const std::string& name) {
+    r.dims.push_back(name);
+    r.shape.push_back(
+        caller_axis < 0
+            ? std::size_t(1)
+            : static_cast<std::size_t>(
+                  extent[static_cast<std::size_t>(caller_axis)]));
+    r.source_axis.push_back(caller_axis);
+  };
+  if (leading >= 0) push(leading, r.varies);
+  if (draw >= 0) push(draw, "draw");
+  push(support_at, here);
+  push(component, "component");
+  for (const std::int64_t e : extent) {
+    r.source_shape.push_back(static_cast<std::size_t>(e));
+  }
+  return r;
+}
+
+// The caller's flattening put the axes in the caller's order; the file
+// wants the order of section 4.  One pass, and the identity case costs
+// the copy it would have cost anyway.
+template <typename T>
+std::vector<T> in_stored_order(const std::vector<T>& in, const Resolved& r) {
+  std::size_t total = 1;
+  for (const std::size_t e : r.shape) total *= e;
+  if (total == 0 || in.empty()) return std::vector<T>();
+  std::vector<std::size_t> stride(r.source_shape.size(), 1);
+  for (std::size_t i = r.source_shape.size(); i-- > 1;) {
+    stride[i - 1] = stride[i] * r.source_shape[i];
+  }
+  std::vector<T> out(total);
+  std::vector<std::size_t> at(r.shape.size(), 0);
+  for (std::size_t f = 0; f < total; ++f) {
+    std::size_t source = 0;
+    for (std::size_t i = 0; i < r.shape.size(); ++i) {
+      const int axis = r.source_axis[i];
+      if (axis >= 0) {
+        source += at[i] * stride[static_cast<std::size_t>(axis)];
+      }
+    }
+    out[f] = source < in.size() ? in[source] : T();
+    for (std::size_t i = r.shape.size(); i-- > 0;) {
+      if (++at[i] < r.shape[i]) break;
+      at[i] = 0;
+    }
+  }
+  return out;
 }
 
 ArraySlot& add_slot(Support& s, Location where, ArraySlot slot) {
@@ -374,106 +634,151 @@ ArraySlot& add_slot(Support& s, Location where, ArraySlot slot) {
   return *into.insert(at, std::move(slot));
 }
 
+std::int64_t extent_of(const Support& s, Location where) {
+  return where == Location::Node ? s.n_nodes : s.n_cells;
+}
+
+ArraySlot built_slot(const std::string& name, Location where,
+                     const Resolved& r) {
+  ArraySlot a;
+  a.name = name;
+  a.varies = r.varies;
+  a.components = r.components;
+  a.source = "data";
+  a.location = where;
+  a.data.dims = r.dims;
+  a.data.shape = r.shape;
+  return a;
+}
+
 }  // namespace
 
 void set_coordinates(Support& s, const std::vector<double>& values,
-                     std::int64_t components, const std::string& units,
-                     const std::string& varies) {
-  ArraySlot c;
-  c.name = "coordinates";
+                     const std::string& units, const Dims& dims) {
+  const std::string path = "/supports/" + s.name + "/coordinates";
+  const Resolved r =
+      resolve(path, dims, Location::Node, s.n_nodes, values.size(), true);
+  ArraySlot c = built_slot("coordinates", Location::Node, r);
   c.role = "coordinates";
-  c.varies = varies;
   c.units = units;
-  c.components = components;
-  c.source = "data";
-  c.location = Location::Node;
   c.data.dtype = DType::Float64;
-  c.data.dims = slot_dims(varies, false, Location::Node);
-  if (varies != "none") {
-    c.data.shape.push_back(leading_extent(
-        values.size(), static_cast<std::size_t>(s.n_nodes * components)));
-  }
-  c.data.shape.push_back(static_cast<std::size_t>(s.n_nodes));
-  c.data.shape.push_back(static_cast<std::size_t>(components));
-  c.data.f64 = values;
+  c.data.f64 = in_stored_order(values, r);
   s.coordinates = std::move(c);
 }
 
-ArraySlot& add_field(Support& s, Location where, const std::string& name,
-                     const std::string& units,
+namespace {
+
+ArraySlot& add_array(Support& s, Location where, const std::string& name,
                      const std::vector<double>& values,
-                     std::int64_t components, const std::string& varies) {
-  ArraySlot a;
-  a.name = name;
+                     const std::string& units, const Dims& dims) {
+  const std::string path = "/supports/" + s.name +
+                           (where == Location::Node ? "/node_arrays/"
+                                                    : "/cell_arrays/") +
+                           name;
+  check_builder_name(path, name);
+  const Resolved r = resolve(path, dims, where, extent_of(s, where),
+                             values.size(), true);
+  ArraySlot a = built_slot(name, where, r);
   a.role = "field";
-  a.varies = varies;
   a.units = units;
-  a.components = components;
-  a.source = "data";
-  a.location = where;
   a.data.dtype = DType::Float64;
-  const std::int64_t extent =
-      where == Location::Node ? s.n_nodes : s.n_cells;
-  a.data.dims = slot_dims(varies, false, where);
-  if (varies != "none") {
-    a.data.shape.push_back(leading_extent(
-        values.size(), static_cast<std::size_t>(extent * components)));
-  }
-  a.data.shape.push_back(static_cast<std::size_t>(extent));
-  a.data.shape.push_back(static_cast<std::size_t>(components));
-  a.data.f64 = values;
+  a.data.f64 = in_stored_order(values, r);
   return add_slot(s, where, std::move(a));
 }
 
 ArraySlot& add_label(Support& s, Location where, const std::string& name,
                      const std::vector<std::int64_t>& values,
-                     std::optional<std::string> category, DType dtype,
-                     const std::string& varies) {
-  ArraySlot a;
-  a.name = name;
+                     std::optional<std::string> category, const Dims& dims,
+                     DType dtype) {
+  const std::string path = "/supports/" + s.name +
+                           (where == Location::Node ? "/node_arrays/"
+                                                    : "/cell_arrays/") +
+                           name;
+  check_builder_name(path, name);
+  const Resolved r = resolve(path, dims, where, extent_of(s, where),
+                             values.size(), true);
+  ArraySlot a = built_slot(name, where, r);
   a.role = "label";
-  a.varies = varies;
-  a.components = 1;
-  a.source = "data";
   a.category = std::move(category);
-  a.location = where;
   a.data.dtype = dtype;
-  const std::int64_t extent =
-      where == Location::Node ? s.n_nodes : s.n_cells;
-  a.data.dims = slot_dims(varies, false, where);
-  if (varies != "none") {
-    a.data.shape.push_back(
-        leading_extent(values.size(), static_cast<std::size_t>(extent)));
-  }
-  a.data.shape.push_back(static_cast<std::size_t>(extent));
-  a.data.shape.push_back(1);
-  a.data.i64 = values;
+  a.data.i64 = in_stored_order(values, r);
   return add_slot(s, where, std::move(a));
 }
 
-ArraySlot& add_callable_field(Support& s, Location where,
+ArraySlot& add_callable_array(Support& s, Location where,
                               const std::string& name,
-                              const std::string& units,
-                              std::int64_t components,
+                              const std::string& units, const Dims& dims,
                               const std::string& callable_id,
-                              const std::string& output,
-                              const std::string& varies) {
-  ArraySlot a;
-  a.name = name;
+                              const std::string& output) {
+  const std::string path = "/supports/" + s.name +
+                           (where == Location::Node ? "/node_arrays/"
+                                                    : "/cell_arrays/") +
+                           name;
+  check_builder_name(path, name);
+  const Resolved r =
+      resolve(path, dims, where, extent_of(s, where), 0, false);
+  ArraySlot a = built_slot(name, where, r);
   a.role = "field";
-  a.varies = varies;
   a.units = units;
-  a.components = components;
   a.source = "callable:" + callable_id;
   a.output = output;
-  a.location = where;
+  a.data = Array();
   return add_slot(s, where, std::move(a));
+}
+
+}  // namespace
+
+ArraySlot& add_node_array(Support& s, const std::string& name,
+                          const std::vector<double>& values,
+                          const std::string& units, const Dims& dims) {
+  return add_array(s, Location::Node, name, values, units, dims);
+}
+
+ArraySlot& add_cell_array(Support& s, const std::string& name,
+                          const std::vector<double>& values,
+                          const std::string& units, const Dims& dims) {
+  return add_array(s, Location::Cell, name, values, units, dims);
+}
+
+ArraySlot& add_node_label(Support& s, const std::string& name,
+                          const std::vector<std::int64_t>& values,
+                          std::optional<std::string> category,
+                          const Dims& dims, DType dtype) {
+  return add_label(s, Location::Node, name, values, std::move(category),
+                   dims, dtype);
+}
+
+ArraySlot& add_cell_label(Support& s, const std::string& name,
+                          const std::vector<std::int64_t>& values,
+                          std::optional<std::string> category,
+                          const Dims& dims, DType dtype) {
+  return add_label(s, Location::Cell, name, values, std::move(category),
+                   dims, dtype);
+}
+
+ArraySlot& add_callable_node_array(Support& s, const std::string& name,
+                                   const std::string& units,
+                                   const Dims& dims,
+                                   const std::string& callable_id,
+                                   const std::string& output) {
+  return add_callable_array(s, Location::Node, name, units, dims,
+                            callable_id, output);
+}
+
+ArraySlot& add_callable_cell_array(Support& s, const std::string& name,
+                                   const std::string& units,
+                                   const Dims& dims,
+                                   const std::string& callable_id,
+                                   const std::string& output) {
+  return add_callable_array(s, Location::Cell, name, units, dims,
+                            callable_id, output);
 }
 
 Scalar& add_callable_scalar(Dataset& d, const std::string& name,
                             const std::string& units,
                             const std::string& callable_id,
                             const std::string& output) {
+  check_builder_name("/scalars/" + name, name);
   Scalar s;
   s.name = name;
   s.units = units;

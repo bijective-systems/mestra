@@ -47,6 +47,14 @@ std::string group_of_varies(const std::string& varies);
 // "callable:<id>" -> "<id>"; empty when `source` is not a callable.
 std::string callable_of_source(const std::string& source);
 
+// A units string raised to a power, and two of them multiplied
+// together: what an integration weight and an integral are measured
+// in.  The result is in the grammar the W10 parser accepts, so a
+// simple identifier gains an exponent ("m" cubed is "m3") and
+// anything else is bracketed first ("(m s-1)2"), and "1" stays "1".
+std::string units_power(const std::string& units, int power);
+std::string units_product(const std::string& a, const std::string& b);
+
 // Splits a space-separated attribute value, which is how section 18
 // spells a list of names.
 std::vector<std::string> split_spaces(const std::string& s);

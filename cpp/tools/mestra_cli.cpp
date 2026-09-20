@@ -19,10 +19,13 @@ int usage() {
       "\n"
       "  read FILE                        check, then read the whole file and say what\n"
       "                                   came back\n"
-      "  validate FILE                    rule ids, one per line;\n"
-      "                                   \"! path: why\" for a fault no\n"
-      "                                   rule of section 14 covers\n"
+      "  validate [--ids] FILE            one finding per line, as\n"
+      "                                   \"<id> <path>: <message>\", then\n"
+      "                                   \"<n> error(s), <m> warning(s)\";\n"
+      "                                   --ids prints the identifiers alone\n"
       "  info FILE                        what the file holds\n"
+      "  integrate FILE SLOT [WEIGHT]     one slot integrated over its support\n"
+      "  stats FILE SLOT [BY]             one slot summarised, grouped by a label\n"
       "  probe FILE SLOT ROW NODE COMPONENT [DRAW]\n"
       "                                   one stored value\n"
       "  support-id FILE SUPPORT          the digest of section 24\n"
@@ -77,16 +80,30 @@ std::vector<std::size_t> subscripts(const ProbeIndex& p) {
   return out;
 }
 
-// Prints a report as rule identifiers, one per line.
+// One finding per line, as "<id> <path>: <message>", which is the
+// form docs/api-conventions.md section 5 fixes for every language's
+// tool.  A failure no rule of section 14 covers carries no identifier
+// and is printed as "! ", so that a file is never reported clean
+// because the thing wrong with it has no name.
+void print_finding(const mestra::Finding& f) {
+  std::cout << (f.id.empty() ? std::string("!") : f.id) << " " << f.where
+            << ": " << f.message << "\n";
+}
+
 void print_report(const mestra::Report& r) {
+  for (const mestra::Finding& f : r.errors) print_finding(f);
+  for (const mestra::Finding& f : r.warnings) print_finding(f);
+  std::cout << r.errors.size() << " error(s), " << r.warnings.size()
+            << " warning(s)\n";
+}
+
+// The identifiers alone, which is what a script wants and what this
+// tool printed before there was a human form.
+void print_ids(const mestra::Report& r) {
   for (const std::string& id : r.error_ids()) std::cout << "E " << id << "\n";
   for (const std::string& id : r.warning_ids()) {
     std::cout << "W " << id << "\n";
   }
-  // A failure no rule of section 14 covers still has to be said out
-  // loud rather than leaving the file looking clean.  It is printed
-  // as "! " so that a caller reading rule identifiers off the "E "
-  // and "W " lines is not confused by one.
   for (const mestra::Finding& f : r.errors) {
     if (f.id.empty()) {
       std::cout << "! " << f.where << ": " << f.message << "\n";
@@ -94,9 +111,13 @@ void print_report(const mestra::Report& r) {
   }
 }
 
-int cmd_validate(const std::string& path) {
+int cmd_validate(const std::string& path, bool ids_only) {
   const mestra::Report r = mestra::validate(path);
-  print_report(r);
+  if (ids_only) {
+    print_ids(r);
+  } else {
+    print_report(r);
+  }
   // Exit 1 when the file is rejected, so that a shell can tell.
   return r.ok() ? 0 : 1;
 }
@@ -145,6 +166,68 @@ int cmd_read(const std::string& path) {
   return 0;
 }
 
+// A bound or a quantile as a reader would write it: the shortest
+// decimal that reads back as the same float64, so that 0.1 prints as
+// 0.1 and a bound a reader is checking W08 against is not quietly
+// rounded to six digits.
+std::string number_text(double v) {
+  char buffer[64];
+  for (int precision = 15; precision <= 17; ++precision) {
+    std::snprintf(buffer, sizeof(buffer), "%.*g", precision, v);
+    if (std::strtod(buffer, nullptr) == v) break;
+  }
+  return std::string(buffer);
+}
+
+// A slot's shape with its axes named: "(row, node, component) 6x8x1".
+// A first-time reader of a file they did not write wants to know how
+// big it is, and the dimension names are what makes the extents mean
+// anything (section 4).  A callable slot stores nothing and has no
+// shape to print.
+std::string shape_text(const mestra::Array& a) {
+  if (a.dims.empty() && a.shape.empty()) return std::string();
+  std::string out = "(";
+  for (std::size_t i = 0; i < a.dims.size(); ++i) {
+    if (i != 0) out += ", ";
+    out += a.dims[i].empty() ? "?" : a.dims[i];
+  }
+  out += ") ";
+  for (std::size_t i = 0; i < a.shape.size(); ++i) {
+    if (i != 0) out += "x";
+    out += std::to_string(a.shape[i]);
+  }
+  return out;
+}
+
+void print_slot(const char* kind, const mestra::ArraySlot& a) {
+  std::cout << "  " << kind;
+  if (a.name != kind) std::cout << " " << a.name;
+  const std::string shape = shape_text(a.data);
+  if (!shape.empty()) std::cout << " " << shape;
+  std::cout << " role=" << a.role << " varies=" << a.varies
+            << " components=" << a.components;
+  if (a.units.has_value()) std::cout << " units=" << *a.units;
+  if (a.category.has_value()) std::cout << " category=" << *a.category;
+  if (a.recomputed.has_value()) {
+    std::cout << " recomputed=" << (*a.recomputed ? "true" : "false");
+  }
+  std::cout << " source=" << a.source;
+  if (a.is_callable()) {
+    std::cout << " callable=" << a.callable_id();
+    if (a.output.has_value()) std::cout << " output=" << *a.output;
+  }
+  if (a.statistic.has_value()) std::cout << " statistic=" << *a.statistic;
+  if (a.of.has_value()) std::cout << " of=" << *a.of;
+  if (a.quantile.has_value()) {
+    std::cout << " quantile=" << number_text(*a.quantile);
+  }
+  if (a.derived_from.has_value()) {
+    std::cout << " derived_from=" << *a.derived_from;
+  }
+  if (a.recipe.has_value()) std::cout << " recipe=" << *a.recipe;
+  std::cout << "\n";
+}
+
 int cmd_info(const std::string& path) {
   if (refused(path)) return 1;
   const mestra::Dataset d = mestra::read_header(path);
@@ -159,14 +242,35 @@ int cmd_info(const std::string& path) {
   for (const mestra::Key& k : d.keys) {
     std::cout << "key " << k.name << " role=" << k.role;
     if (k.units.has_value()) std::cout << " units=" << *k.units;
-    if (k.lower.has_value()) std::cout << " lower=" << *k.lower;
-    if (k.upper.has_value()) std::cout << " upper=" << *k.upper;
+    if (k.lower.has_value()) {
+      std::cout << " lower=" << number_text(*k.lower);
+    }
+    if (k.upper.has_value()) {
+      std::cout << " upper=" << number_text(*k.upper);
+    }
     if (k.category.has_value()) std::cout << " category=" << *k.category;
+    // The attribute that makes a file a set of trajectories rather
+    // than a pile of rows, and the one that says a group nests.
+    if (k.trajectory_group.has_value()) {
+      std::cout << " trajectory_group=" << *k.trajectory_group;
+    }
+    if (k.parent.has_value()) std::cout << " parent=" << *k.parent;
     std::cout << "\n";
   }
   for (const mestra::Scalar& s : d.scalars) {
-    std::cout << "scalar " << s.name << " units=" << s.units
-              << " source=" << s.source << "\n";
+    std::cout << "scalar " << s.name;
+    if (!s.is_callable()) std::cout << " (row) " << d.n_rows;
+    std::cout << " units=" << s.units << " source=" << s.source;
+    if (s.is_callable()) {
+      std::cout << " callable=" << s.callable_id();
+      if (s.output.has_value()) std::cout << " output=" << *s.output;
+    }
+    if (s.statistic.has_value()) std::cout << " statistic=" << *s.statistic;
+    if (s.of.has_value()) std::cout << " of=" << *s.of;
+    if (s.quantile.has_value()) {
+      std::cout << " quantile=" << number_text(*s.quantile);
+    }
+    std::cout << "\n";
   }
   for (const mestra::CategoryTable& t : d.categories) {
     // `info` opens the file without reading a dataset (section 29), so
@@ -177,19 +281,12 @@ int cmd_info(const std::string& path) {
     std::cout << "support " << s.name << " kind=" << s.kind
               << " n_nodes=" << s.n_nodes << " n_cells=" << s.n_cells
               << " support_id=" << s.support_id << "\n";
-    if (s.coordinates.has_value()) {
-      std::cout << "  coordinates varies=" << s.coordinates->varies
-                << " components=" << s.coordinates->components << "\n";
-    }
+    if (s.coordinates.has_value()) print_slot("coordinates", *s.coordinates);
     for (const mestra::ArraySlot& a : s.node_arrays) {
-      std::cout << "  node_array " << a.name << " role=" << a.role
-                << " varies=" << a.varies << " components=" << a.components
-                << " source=" << a.source << "\n";
+      print_slot("node_array", a);
     }
     for (const mestra::ArraySlot& a : s.cell_arrays) {
-      std::cout << "  cell_array " << a.name << " role=" << a.role
-                << " varies=" << a.varies << " components=" << a.components
-                << " source=" << a.source << "\n";
+      print_slot("cell_array", a);
     }
   }
   for (const mestra::StoredCallable& c : d.callables) {
@@ -301,7 +398,64 @@ int cmd_evaluate(const std::string& path, const std::string& csv,
                  const std::string& out) {
   const mestra::Dataset d = mestra::read(path);
   const mestra::KeysTable keys = mestra::read_keys_csv(d, csv);
-  mestra::write(mestra::evaluate(d, keys), out);
+  const mestra::Dataset evaluated = mestra::evaluate(d, keys);
+  mestra::write(evaluated, out);
+  // Every other subcommand says something; this one used to succeed
+  // in silence.
+  std::cout << "wrote " << out << ": " << evaluated.n_rows << " row(s), "
+            << evaluated.callables.size() << " callable(s) evaluated\n";
+  return 0;
+}
+
+int cmd_integrate(const std::string& path, const std::string& slot,
+                  const std::string& weight) {
+  const mestra::Dataset d = mestra::read(path);
+  mestra::IntegrateOptions options;
+  options.weight = weight;
+  const mestra::Integral r = mestra::integrate(d, slot, options);
+  std::cout << "weight " << r.weight
+            << (r.weight_recomputed ? " (computed here: the file carries "
+                                      "none)"
+                                    : " (from the file)")
+            << "\n";
+  if (!r.units.empty()) std::cout << "units " << r.units << "\n";
+  for (std::size_t i = 0; i < r.dims.size(); ++i) {
+    std::cout << (i == 0 ? "dims " : " ") << r.dims[i];
+  }
+  std::cout << "\nshape";
+  for (const std::size_t e : r.shape) std::cout << " " << e;
+  std::cout << "\n";
+  char buffer[64];
+  for (const double v : r.values) {
+    std::snprintf(buffer, sizeof(buffer), "%.17e", v);
+    std::cout << buffer << "\n";
+  }
+  return 0;
+}
+
+int cmd_stats(const std::string& path, const std::string& slot,
+              const std::string& by) {
+  const mestra::Dataset d = mestra::read(path);
+  const mestra::FieldStatistics r = mestra::field_statistics(d, slot, by);
+  // The grouping column is named after the label and never by a fixed
+  // word (conventions section 4), and there is no such column at all
+  // when nothing was grouped by.
+  if (!r.group_by.empty()) std::cout << r.group_by << " ";
+  std::cout << "count missing minimum mean maximum deviation";
+  if (!r.units.empty()) std::cout << "   units " << r.units;
+  std::cout << "\n";
+  char buffer[64];
+  for (std::size_t i = 0; i < r.size(); ++i) {
+    if (!r.group_by.empty()) std::cout << r.groups[i] << " ";
+    std::cout << r.count[i] << " " << r.missing[i];
+    const double values[4] = {r.minimum[i], r.mean[i], r.maximum[i],
+                              r.deviation[i]};
+    for (const double v : values) {
+      std::snprintf(buffer, sizeof(buffer), " %.17e", v);
+      std::cout << buffer;
+    }
+    std::cout << "\n";
+  }
   return 0;
 }
 
@@ -311,8 +465,20 @@ int main(int argc, char** argv) {
   if (argc < 2) return usage();
   const std::string command = argv[1];
   try {
-    if (command == "validate" && argc == 3) return cmd_validate(argv[2]);
+    if (command == "validate" && argc == 3) {
+      return cmd_validate(argv[2], false);
+    }
+    if (command == "validate" && argc == 4 &&
+        std::string(argv[2]) == "--ids") {
+      return cmd_validate(argv[3], true);
+    }
     if (command == "info" && argc == 3) return cmd_info(argv[2]);
+    if (command == "integrate" && (argc == 4 || argc == 5)) {
+      return cmd_integrate(argv[2], argv[3], argc == 5 ? argv[4] : "");
+    }
+    if (command == "stats" && (argc == 4 || argc == 5)) {
+      return cmd_stats(argv[2], argv[3], argc == 5 ? argv[4] : "");
+    }
     if (command == "read" && argc == 3) return cmd_read(argv[2]);
     if (command == "probe") return cmd_probe(argc, argv);
     if (command == "support-id" && argc == 4) {
@@ -349,6 +515,9 @@ int main(int argc, char** argv) {
       return 0;
     }
   } catch (const mestra::Error& e) {
+    // Section 6: the rule identifier first, then the object path, then
+    // what to do.  Error puts the identifier in front of its own
+    // message already, so it is not repeated here.
     std::cerr << "mestra-cli: " << e.what() << "\n";
     return 1;
   } catch (const std::exception& e) {
