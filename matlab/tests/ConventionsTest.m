@@ -70,8 +70,8 @@ classdef ConventionsTest < matlab.unittest.TestCase
         function dimsSettlesWhatAnArrayVariesAlong(testCase)
         %dimsSettlesWhatAnArrayVariesAlong  Section 1: a `row` axis
         %   means row, a `group:<k>` axis means that group, neither
-        %   means none.  This is M1 of the ergonomics report: the old
-        %   default of `row` wrote a file the validator rejected.
+        %   means none.  A default of `row` instead would write a file
+        %   the validator rejects.
             d = ConventionsTest.twoRows();
             d.addNodeArray('s0', 'rowwise', [1 2 3 4 5 6; 7 8 9 10 11 12], ...
                            'field', '1', 'Dims', {'row', 'node'});
@@ -158,10 +158,9 @@ classdef ConventionsTest < matlab.unittest.TestCase
         end
 
         function boundsDefaultToTheObservedRange(testCase)
-        %boundsDefaultToTheObservedRange  Section 1, and X1 of the
-        %   ergonomics report: the same arrays written by any
-        %   implementation must give the same file, so that W04 and
-        %   W08 are decidable on every file.
+        %boundsDefaultToTheObservedRange  Section 1: the same arrays
+        %   written by any implementation must give the same file,
+        %   so that W04 and W08 are decidable on every file.
             d = mestra.Dataset();
             d.addKey('mach', [0.4 0.9 0.6], 'condition', '1');
             testCase.verifyEqual(d.key('mach').lower, 0.4);
@@ -235,9 +234,9 @@ classdef ConventionsTest < matlab.unittest.TestCase
         %   example of docs/example.md: build a file with no rows and
         %   two callable slots, write it, and evaluate it to 1.45.
         %
-        %   P8 of the ergonomics review is that no document said how
-        %   to write a callable file in any language.  This is that
-        %   file, built with addCallable and addCallableSlot.
+        %   It is the one place that shows how to write a callable
+        %   file in MATLAB, built with addCallable and
+        %   addCallableSlot.
             A = mestra.Affine({'mach', 'alpha'}, struct( ...
                 'cl', struct('A', [2.0 0.1], 'b', 0.05, 'shape', []), ...
                 'pressure', struct( ...
@@ -279,10 +278,9 @@ classdef ConventionsTest < matlab.unittest.TestCase
         % ------------------------------------- 2. writing
 
         function writeRefusesAFileItsOwnValidatorRejects(testCase)
-        %writeRefusesAFileItsOwnValidatorRejects  Section 2, and M1
-        %   and X2 of the ergonomics report.  A writer that produces
-        %   invalid files silently is the one failure mode an open
-        %   format cannot afford.
+        %writeRefusesAFileItsOwnValidatorRejects  Section 2.  A writer
+        %   that produces invalid files silently is the one failure
+        %   mode an open format cannot afford.
             d = ConventionsTest.twoRows();
             % Built past the builder's own check, which is the only
             % way to make an invalid dataset now.
@@ -353,9 +351,9 @@ classdef ConventionsTest < matlab.unittest.TestCase
         function anEvaluatedFileValidatesClean(testCase)
         %anEvaluatedFileValidatesClean  Section 2: a file this package
         %   writes validates clean, and an evaluated file is one of
-        %   them.  Finding 10 of the Phase 3 report is a chunk carried
-        %   over from a file of no rows onto a file of two, which
-        %   every validator then warns about (W12).  Section 23
+        %   them.  The trap is a chunk carried over from a file of no
+        %   rows onto a file of two, which every validator then
+        %   warns about (W12).  Section 23
         %   measures the default against the row dimension the leading
         %   axis is attached to, and after evaluation that is the
         %   table's row count and not the source file's.
@@ -386,9 +384,8 @@ classdef ConventionsTest < matlab.unittest.TestCase
         %anEvaluatedFileHasNoCallablesGroup  Section 7: evaluating
         %   turns every callable slot into a stored slot, so the
         %   result has no callable to keep and `/callables` is absent
-        %   from the file, not present and empty.  Finding 7 of the
-        %   Phase 3 report is four implementations leaving three
-        %   different things there; this is the one they settled on.
+        %   from the file, not present and empty.  Three different
+        %   things could be left there; this is the settled one.
             file = fullfile(corpusRoot(), 'callable_two_slots', 'case.mes');
             e = CorpusTest.expected('callable_two_slots');
             entry = e.evaluation;
@@ -450,9 +447,9 @@ classdef ConventionsTest < matlab.unittest.TestCase
         %theMetadataOpenNamesWhatTheReadNames  Section 30: opening a
         %   file for its metadata alone must refuse with the same ids
         %   as an operation that reads a slot, rather than return
-        %   something.  Finding 13 of the Phase 3 report is the two
-        %   entry points naming different rules; the nine structural
-        %   rules of section 2 of docs/api-conventions.md are decided
+        %   something.  Two entry points naming different rules is the
+        %   fault this guards against; the nine structural rules of
+        %   section 2 of docs/api-conventions.md are decided
         %   from attributes and dataspaces, so the open reaches the
         %   same verdict without reading an array.
         %
@@ -531,8 +528,7 @@ classdef ConventionsTest < matlab.unittest.TestCase
         function perRowRulesReportOnceWithACountAndRows(testCase)
         %perRowRulesReportOnceWithACountAndRows  Section 5: W02, W03
         %   and W04 could each fire once per row and fire once, with
-        %   the count and the first three row indices.  This is M6 of
-        %   the ergonomics report, and half of X10.
+        %   the count and the first three row indices.
             for probe = {{'warn_w02', 'W02'}, {'warn_w03', 'W03'}, ...
                          {'warn_w04', 'W04'}}
                 name = probe{1}{1};
@@ -683,8 +679,8 @@ classdef ConventionsTest < matlab.unittest.TestCase
         end
 
         function aNameThatIsNotInTheFileCarriesNoRuleId(testCase)
-        %aNameThatIsNotInTheFileCarriesNoRuleId  P4 of the ergonomics
-        %   report: the identifiers of section 14 say something about
+        %aNameThatIsNotInTheFileCarriesNoRuleId  The identifiers of
+        %   section 14 say something about
         %   a file, and a caller who catches one to detect a malformed
         %   file must not catch a typo as well.
             d = mestra.read(fullfile(corpusRoot(), 'mesh_two_rows', ...

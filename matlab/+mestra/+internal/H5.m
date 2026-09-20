@@ -156,7 +156,7 @@ classdef H5
         %crtOrderTrackedIndexed  H5P_CRT_ORDER_TRACKED | _INDEXED.
         %   The one creation property this format requires, on the
         %   dataset creation property list of every dimension scale
-        %   (specification section 21, decision 52).
+        %   (specification section 21).
             n = bitor(H5ML.get_constant_value('H5P_CRT_ORDER_TRACKED'), ...
                       H5ML.get_constant_value('H5P_CRT_ORDER_INDEXED'));
         end
@@ -845,7 +845,7 @@ classdef H5
 
         function map = scaleMap(fid)
         %scaleMap  Every dimension scale in a file, by object address.
-        %   Specification section 21, decision 51.  Asking the library
+        %   Specification section 21.  Asking the library
         %   for the path of a scale attached to an axis makes it search
         %   the group hierarchy for a name that leads there, and on a
         %   file with a deep chain of groups that search runs off the
@@ -861,10 +861,10 @@ classdef H5
         %     name       the link name, which is the dimension's name
         %     length     because the chunk default of section 23 is
         %                judged against the dimension's length and not
-        %                the dataset's own extent (decision 35)
+        %                the dataset's own extent (section 23)
         %     hasName    whether it carries a NAME attribute (E25)
         %     path       its HDF5 path, so that a finding can name it
-        %                and so that decision 43 can leave /private out
+        %                and so that section 14 can leave /private out
         %     unlimited  whether its own extent is unlimited (E43)
         %     order      the attribute creation order flags of its
         %                creation property list (E42)
@@ -1243,7 +1243,7 @@ classdef H5
         %   is chunked with chunk length one; a fixed one is chunked
         %   over its whole length, which is what the corpus carries.
         %
-        %   The creation property list is the point of decision 52.
+        %   The creation property list is the whole point here.
         %   Attribute creation order tracked and indexed gives the
         %   scale a version 2 object header, which is what lets its
         %   REFERENCE_LIST live in the file's heap instead of in an

@@ -593,7 +593,7 @@ std::string support_id_of(const std::string& path,
   std::vector<std::uint8_t> types;
   std::vector<std::int64_t> offsets;
   std::vector<std::int64_t> conn;
-  // Section 24, decision 27: for an axis support the digest is over
+  // Section 24: for an axis support the digest is over
   // the stored coordinate bytes as they are, even when `varies` is
   // wrong, so that such a file breaks E35 and nothing else.
   if (kind == "axis" && f.is_dataset(sp + "/coordinates")) {

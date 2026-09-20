@@ -261,7 +261,7 @@ def make_scale(group: h5py.Group, name: str, length: int,
     created through the low-level dcpl. Nothing else in the file is
     touched: the library version bounds stay at the default for
     every object, so the superblock and every non-scale object are
-    as they were (decision 53).
+    as they were (section 21).
     """
     dcpl = h5py.h5p.create(h5py.h5p.DATASET_CREATE)
     dcpl.set_attr_creation_order(SCALE_ATTR_ORDER)

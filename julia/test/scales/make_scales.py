@@ -9,13 +9,13 @@ it".
 That is not a hypothetical.  A scale created without attribute
 creation order tracked takes at most 4085 attachments, and the 4086th
 H5DSattach_scale deletes the REFERENCE_LIST it was extending before it
-fails (SPEC.md section 21, docs/scale/report.md 1.2).  What is left on
+fails (SPEC.md section 21).  What is left on
 disk is a file every reader and every validator accepts, with the
 forward references intact and the back references gone.  A reader that
 resolved an axis by asking the library whether a scale is attached --
 H5DSis_attached consults REFERENCE_LIST -- answers "no scale" on that
-file and calls the axis unknown.  `docs/scale/report.md` 6.5 measured
-exactly that.
+file and calls the axis unknown, which is exactly what this reader
+did before it built the map.
 
 So this file is `vectors/cases/mesh_two_rows/case.mes` with two edits
 and nothing else:

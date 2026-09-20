@@ -258,21 +258,37 @@ comparison, and a mismatch is an error before any data is read.
 9. Uncertainty
 --------------
 
-Model outputs are stored as arrays and scalars with the same roles as
-data, plus:
+Representing uncertainty is optional. A file that carries none is an
+ordinary file, and nothing in the format obliges a producer to
+quantify anything.
+
+Where it is carried, model outputs are stored as arrays and scalars
+with the same roles as data, plus:
 
   statistic    value | mean | std | quantile | draw
   of           the name of the base quantity this is a statistic of
   quantile     a number in (0, 1) when statistic = quantile
 
-Draws carry the `draw` dimension. Draws of a field are joint across
-nodes: draw k of pressure is one whole field. How many draws, from
-which seed, in what batches, are the producer's business and its
-records, not the format's; the file may repeat them as optional
-metadata, and nothing in the format depends on them.
+The slot's `statistic` and `of` are what say which of these an output
+is. A producer may serve none of `value`, `mean`, `std`, `quantile`
+and `draw`, some of them, or all five; a reader learns which from the
+slot's attributes and never has to ask the producer. These five are
+the summaries the format names. Any other summary is a derived array
+carrying `derived_from` and a `recipe` (section 3), so that every
+number in a file says where it came from.
 
-Summaries (mean, std, quantiles) are derived from draws by an open
-routine, so a card's numbers can be recomputed from the file.
+Draws carry the `draw` dimension. A draw is one whole field or one
+whole scalar: draw k of pressure is a complete field over every node,
+so whatever dependence the producer has across nodes is preserved in
+the file instead of being collapsed to a per-node number that cannot
+be put back. How many draws, from which seed, in what batches, are
+the producer's business and its records, not the format's; the file
+may repeat them as optional metadata, and nothing in the format
+depends on them.
+
+Where a file carries both draws and a summary of them, the summary is
+derived from the draws by an open routine, so it can be recomputed
+from the file.
 
 
 10. Callables
@@ -304,7 +320,13 @@ are given by where it sits in the file and are not attributes (section
 19); the
 content attribute `source` is `data` or `callable:<id>`, and for
 callables that serve several slots, `output` names which of the
-callable's outputs fills this slot. A callable is stored once under
+callable's outputs fills this slot. Named outputs are the whole of a
+callable's contract: it does not declare which statistic an output
+is, and the format never asks it to. What an output means is the
+slot's `statistic` and `of` (section 9), so a producer may serve none
+of `value`, `mean`, `std`, `quantile` and `draw`, some of them, or
+all five, with the same four-thing protocol in every case. A callable
+is stored once under
 `/callables/<id>` and may be referenced by any number of slots. A slot
 holding data is a dataset; a slot served by a callable is a group with
 the same attributes and no data (section 19).
@@ -625,249 +647,230 @@ in every language, runs the corpus in its own test suite. No
 implementation is the reference.
 
 
-16. Decisions taken on 2026-09-19, and what is still open
-----------------------------------------------------------
+16. Resolved questions
+----------------------
 
-Taken:
+An appendix rather than a rule. Each entry is a question the rest of
+this document once left open, answered two ways, or described in terms
+no file could satisfy; it gives what was settled and the one reason
+that matters, and names the section that carries the rule. Nothing
+here is normative on its own, and nothing in it is still open.
 
-  1. Extension `.mes`.
-  2. Units in the UDUNITS grammar; unparseable is a warning in v0.
-  3. Fixed-length UTF-8 strings for category tables.
-  4. `split` is a key role.
-  5. Coordinates are positions, one array per support; displacement
-     only as a derived array relative to a declared reference.
-  6. Hashes are support identity for cross-file checks, not an
-     in-file claim; alignment is structural.
-  7. A callable is exactly call, to_dict, from_dict, and an optional
-     repr; it fills slots, is stored once by the codec with a public
-     `type`, and everything else is inside its own dictionary.
-  8. Provenance, lineage, history, validation, sign-off, and
-     evaluation parameters are not part of the format; the file
-     carries format, writer, and created, plus optional notes.
+Layout:
 
-  9. `status` is a key role with an open category table; label
-     category tables are optional.
- 10. Bounds live on the key columns; there is no separate domain
-     group, and a file with callable slots may have zero rows.
+  - The file extension is `.mes`.
+  - Names, category entries and string ids stay ASCII in a file meant to
+    be read everywhere, because one binding in common use cannot carry a
+    fixed-length string that is not (section 25).
+  - Category tables hold fixed-length UTF-8 strings (section 19).
+  - float32 is not allowed anywhere; a producer that computes in single
+    precision widens on write (section 19).
+  - The component dimension is always present, with length 1 for a
+    single-component quantity (sections 4 and 19).
+  - `row` is an unlimited dimension in every file, which is what makes a
+    zero-row file a legal netCDF-4 file (section 21).
+  - Only `row`, file-level or support-local, may be unlimited; every other
+    dimension, `draw` included, is fixed (E43). The one exception is the
+    zero-length dictionary axis section 25 requires. Every dimension but
+    `row` carries its length in its name, so one that grows makes its own
+    name false, and implementations did not agree on what a file with an
+    appended draw held at the new draw. Draws are produced at evaluation
+    and never appended (sections 19 and 21).
+  - A dimension scale that is not unlimited is chunked with a chunk equal
+    to its length, which is what H5DSset_scale leaves behind (sections 21
+    and 23).
+  - The row count in the chunk default is the length of the row dimension
+    the leading axis is attached to, not the dataset's own extent (section
+    23).
+  - A reader resolves the link name of an attached dimension scale from a
+    map built during its own bounded walk, keyed by object address or
+    token, and never by asking the library for the scale object's path:
+    that search walks the group hierarchy and overflows the stack on a
+    deep file (section 21).
+  - A container group may be absent when empty, or present and empty; a
+    reader accepts both and a writer keeps what it found (section 13).
 
-Taken on 2026-09-19 while pinning the byte layout (sections 18 to 30):
+Roles and rules:
 
- 11. A file with callable slots may also carry rows, for example the
-     training design. What decides whether a slot holds data is its
-     `source` and never the row count. Said explicitly in section 22;
-     this closes the one item that was open.
- 12. The component dimension is always present, with length 1 for a
-     single-component quantity; the draw dimension is present only
-     when the slot holds draws.
- 13. `row` is an unlimited dimension in every file, which is what
-     makes a zero-row file a legal netCDF-4 file.
- 14. A slot served by a callable is a group; a slot holding data is a
-     dataset.
- 15. float32 is not allowed anywhere; a producer that computes in
-     single precision widens on write.
- 16. A zero-dimensional array in a callable's dictionary is stored as
-     an attribute, because no rule that preserved it as an array
-     could round-trip in MATLAB and C++ as well as in Python.
+  - Units are strings in the UDUNITS grammar; a string the validator
+    cannot parse is a warning in version 0 and not an error (section 3).
+  - `split` is a key role, and `status` is a key role with an open
+    category table. A label's category table is optional (section 3).
+  - Bounds live on the key columns. There is no separate domain group, so
+    extrapolation warnings are generic rather than a special case
+    (sections 3 and 14).
+  - Provenance, lineage, history, validation, sign-off and evaluation
+    parameters are not part of the format. A file carries `format`,
+    `writer` and `created`, plus optional notes; everything else of that
+    kind belongs to whatever produced the file (sections 11 and 12).
+  - `reference` is an attribute of the derived array and not of the
+    coordinates, written `row=<i>` or `group:<k>=<category name>`
+    (sections 5 and 19).
+  - E04 also covers a `varies` naming a group key the file does not
+    declare (section 14).
+  - W08 has a number where it once had a tolerance stated nowhere:
+    declared bounds wider than the observed range by more than a factor of
+    four in width. A value outside the bounds is W04 and not W08, and W08
+    does not apply when the observed width is zero (section 14).
+  - W07 is narrowed to a category table entry no row uses, because a group
+    value with no entry in the table was already E10 and the two could not
+    be told apart (section 14).
+  - W09 is retired: a floating-point categorical key is E20 by the dtype
+    table, so W09 could never be the only outcome (sections 14 and 19).
+  - E07 is retired for the same reason, and E37 is widened to `aligned`
+    disagreeing with the number of supports in either direction, which
+    also closes a case section 22 requires and no rule caught (section
+    14).
+  - E18 is a rule for a writer, because section 29 forbids the reader it
+    addressed to interpret `/private`, and it is reported beside the rule
+    that found the missing public thing in a file that also carries
+    `/private`; it was not decidable before. E39 was added for a required
+    attribute of section 19 that is simply absent, which nothing covered
+    (section 14).
+  - E11 covers units on a field and a scalar; E39 covers units on a key,
+    on coordinates and on a derived array; `weight` and `normal` need none
+    (section 14).
+  - E16 is about a row length, on a row-dimensioned slot, a key column or
+    `/row_support`, and it also catches a key or scalar dataset that is
+    not one-dimensional (section 14).
+  - E25 does not fire where the required dimension name follows from an
+    attribute another rule already checks, and a dimension scale is not
+    subject to it (section 14).
+  - W03 covers a derived array as well as a field and a scalar, and W12
+    applies only to a chunked dataset carrying a row dimension: a
+    contiguous dataset is E27 or nothing, and scales and dictionary
+    datasets are outside it. A zero-length axis is chunked with 1
+    (sections 14 and 23).
+  - W15 is decidable only in a file that carries `/row_support` (section
+    14).
+  - The byte-level rules of sections 18 to 25 are checked on the public
+    objects only (section 14).
+  - A reader treats a file as untrusted input: no crash, no hang, no
+    unbounded allocation; it never follows a link that is not a hard link
+    (E40); an object it cannot read is E41 and the pass continues;
+    recursion is capped and an eager read has a stated maximum element
+    count, 2^31 by default (sections 14 and 29).
 
-Taken on 2026-09-20, from building the conformance corpus. These are
-the fourteen places where writing one file for every rule of section
-14 showed the text was silent, self-contradictory, or describing
-something no file could do:
+Callables:
 
- 17. expected.json has a sixth field, `evaluation`, so that the
-     affine callable can be conformance tested at all. Section 30.
- 18. The probe schema names the leading dimension of a group-varying
-     array `instance`, and names the axes of a support's own cell
-     datasets. Neither had a name and the corpus must probe both.
-     Section 30.
- 19. A probe's `value` is a decimal string: the "%.17e" form for a
-     float64 slot and the plain decimal form for an integer slot.
-     Section 30.
- 20. W08 has a number where it had "a stated tolerance" that was
-     stated nowhere: declared bounds wider than the observed range by
-     more than a factor of four in width. A value outside the bounds
-     is W04 and not W08. Section 14.
- 21. W07 is narrowed to a category table entry no row uses, because a
-     group value with no entry in the table was already E10 and the
-     two could not be told apart. Section 14.
- 22. W09 is retired: a floating-point categorical key is E20 by the
-     dtype table, so W09 could never be the only outcome. Sections 14
-     and 19.
- 23. E07 is retired for the same reason, and E37 is widened to
-     `aligned` disagreeing with the number of supports in either
-     direction, which also closes the case section 22 required and no
-     rule caught. Section 14.
- 24. E18 is a rule for a writer, because section 29 forbids the
-     reader it addressed to interpret `/private`. E39 is added for a
-     required attribute of section 19 that is simply absent, which
-     nothing covered. Section 14.
- 25. The affine evaluation accumulates the dot product in the
-     declared key order and adds b last, with no fused multiply-add.
-     The formula alone left the last bit of the worked example open.
-     Section 27.
- 26. A support of kind `none` carries no `node` dimension scale,
-     because a zero-length fixed dimension is not legal. Sections 20
-     and 21.
- 27. The support_id of an axis support whose coordinates wrongly vary
-     is computed over the stored bytes as they are, so that such a
-     file breaks E35 and nothing else. Section 24.
- 28. `reference` is an attribute of the derived array and not of the
-     coordinates, written `row=<i>` or `group:<k>=<category name>`.
-     Sections 5 and 19.
- 29. A slot whose statistic is `draw` holds the base quantity itself
-     and does not carry `of`. Section 14.
- 30. In an unaligned file a row-varying array on a support has one
-     entry per row referencing that support, in the file's row order,
-     over a support-local `row` dimension. Nothing said what such an
-     array held for a row on another support. Sections 14, 21 and 22.
+  - A callable is exactly `call`, `to_dict`, `from_dict` and an optional
+    `repr`. It fills slots, is stored once by the codec under a public
+    `type`, and everything else it knows is inside its own dictionary, so
+    that a model the format has never heard of integrates by conforming to
+    four things (sections 10 and 17).
+  - A slot served by a callable is a group; a slot holding data is a
+    dataset (section 19).
+  - A file with callable slots may have zero rows and may also carry rows,
+    for example the training design. What decides whether a slot holds
+    data is its `source` and never the row count (section 22).
+  - A zero-dimensional array in a callable's dictionary is stored as an
+    attribute, because no rule that preserved it as an array could
+    round-trip in MATLAB and C++ as well as in Python (section 17).
+  - The affine evaluation accumulates the dot product in the declared key
+    order and adds `b` last, with no fused multiply-add. The formula alone
+    left the last bit of the worked example open (section 27).
+  - The keys table in C++ holds the names beside the columns and is looked
+    up by name, because C++ has no run-time member names; Julia uses a
+    dictionary from name to column (section 26).
 
-Taken on 2026-09-20, second batch, from four independent
-implementations built against the corpus. Every one of these was a
-place where two of the four read the same sentence differently, or
-where all four had to invent the same missing rule:
+Alignment and supports:
 
- 31. A dimension scale that is not unlimited is chunked with a chunk
-     equal to its length, which is what H5DSset_scale leaves behind.
-     The text said contiguous and every file in the corpus said
-     otherwise. Sections 21 and 23.
- 32. E18 is reported beside the rule that found the missing public
-     thing, in a file that also carries `/private`. It was not
-     decidable before. Section 14.
- 33. E25 does not fire where the required dimension name follows from
-     an attribute another rule already checks, and a dimension scale
-     is not subject to it. Section 14.
- 34. W12 applies only to a chunked dataset carrying a row dimension.
-     A contiguous dataset is E27 or nothing, and scales and
-     dictionary datasets are outside it. A zero-length axis is
-     chunked with 1. Sections 14 and 23.
- 35. The row count in the chunk default is the length of the row
-     dimension the leading axis is attached to, not the dataset's own
-     extent. Section 23.
- 36. W08 does not apply when the observed width is zero. Section 14.
- 37. E11 covers units on a field and a scalar; E39 covers units on a
-     key, on coordinates and on a derived array; `weight` and
-     `normal` need none. Section 14.
- 38. E16 is restated: it is about a row length, on a row-dimensioned
-     slot, a key column or `/row_support`, and it also catches a key
-     or scalar dataset that is not one-dimensional. Section 14.
- 39. W03 covers a derived array as well as a field and a scalar.
-     Section 14.
- 40. E38 covers any cell dataset or a `cell` dimension on an `axis`
-     or `none` support, and the declared kind decides which steps of
-     section 24 contribute bytes, so the digest still matches.
-     Sections 14 and 24.
- 41. A probe on a dataset inside a callable's dictionary has no
-     logical dimension names; its index fields are applied in a fixed
-     order to the axes in file order. `cell` and `cell_plus_one` join
-     the probe field list. Section 30.
- 42. W15 is decidable only in a file that carries `/row_support`.
-     Section 14.
- 43. The byte-level rules of sections 18 to 25 are checked on the
-     public objects only. Section 14.
- 44. A container group may be absent when empty or present and empty;
-     a reader accepts both and a writer keeps what it found.
-     Section 13.
- 45. The keys table in C++ holds the names beside the columns and is
-     looked up by name, because C++ has no run-time member names, and
-     Julia is added with a Dict from name to column. Section 26.
- 46. A producer that wants every language to read its file keeps
-     names, category entries and string ids to ASCII, because one
-     binding in common use cannot carry a fixed-length string that is
-     not. Section 25.
- 47. E04 also covers a `varies` naming a group key the file does not
-     declare. Section 14.
- 48. A reader treats a file as untrusted input: no crash, no hang, no
-     unbounded allocation; it never follows a link that is not a hard
-     link (E40); an object it cannot read is E41 and the pass
-     continues; recursion is capped and an eager read has a stated
-     maximum element count, 2^31 by default. Sections 14 and 29.
- 49. The corpus gains a hostile subset under vectors/hostile, with a
-     looser contract: the required ids must appear, more are allowed,
-     and the run must finish cleanly inside ten seconds. Section 30.
- 50. Implementations link different libhdf5 versions and do not agree
-     byte for byte; structural equality is the comparison and byte
-     identity is not tested. Section 30.
+  - Coordinates are positions, one array per support. A displacement is
+    carried only as a derived array relative to a declared reference
+    (sections 3 and 5).
+  - A support hash is an identity for cross-file checks and not an in-file
+    claim; alignment itself is structural (sections 8 and 24).
+  - The support_id of an axis support whose coordinates wrongly vary is
+    computed over the stored bytes as they are, so that such a file breaks
+    E35 and nothing else (section 24).
+  - E38 covers any cell dataset, and a `cell` dimension on an `axis` or
+    `none` support; the declared kind decides which steps of section 24
+    contribute bytes, so the digest still matches (sections 14 and 24).
+  - A support of kind `none` carries no `node` dimension scale, because a
+    zero-length fixed dimension is not legal (sections 20 and 21).
+  - In an unaligned file a row-varying array on a support has one entry
+    per row referencing that support, in the file's row order, over a
+    support-local `row` dimension (sections 14, 21 and 22).
 
- 51. A reader resolves the link name of an attached dimension scale
-     from a map built during its own bounded walk, keyed by object
-     address or token, and never by asking the library for the scale
-     object's path: that search walks the group hierarchy and
-     overflows the stack on a deep file. Section 21.
+Uncertainty:
 
-Taken on 2026-09-20, third batch, from a study that measured the
-format at size for the first time (docs/scale/report.md) and from
-four findings of docs/verification/phase-3.md. These are the first
-decisions in this document taken from measurement rather than from
-reading:
+  - Representing uncertainty at all is optional; a file that carries none
+    is an ordinary file (section 9).
+  - A slot's `statistic` and `of` say what the slot means, and a producer
+    may serve any subset of `value`, `mean`, `std`, `quantile` and `draw`
+    (sections 9 and 14).
+  - A slot whose statistic is `draw` holds the base quantity itself and
+    carries no `of` (section 14).
+  - The `draw` dimension is present only when the slot holds draws
+    (sections 9 and 19).
 
- 52. A dimension scale is created with attribute creation order
-     tracked and indexed and with object time tracking off (E42).
-     Without it a scale takes at most 4085 attachments, which is a
-     ceiling on the container and not on any reader: the 4086th
-     attachment fails after destroying the REFERENCE_LIST it was
-     extending, and leaves a file every reader and every validator
-     accepts. This is the only decision in three rounds that changes
-     the bytes of every golden file. Sections 21 and 23.
- 53. H5Pset_attr_phase_change asks for the same thing and is silently
-     ignored under the default library version bounds; a writer must
-     not rely on it. The library version bounds stay at the default
-     for every object, so the superblock and every non-scale object
-     are unchanged. REFERENCE_LIST is informational: a reader
-     resolves an axis through DIMENSION_LIST and the map of decision
-     51, and a scale whose REFERENCE_LIST is missing or short is not
-     an error. Section 21.
- 54. Only `row`, file-level or support-local, may be unlimited; every
-     other dimension, `draw` included, is fixed (E43). The exception
-     is the zero-length dictionary axis section 25 requires. Every
-     dimension but `row` carries its length in its name, so one that
-     grows makes its own name false: on a file with an appended draw,
-     two implementations refused it and two returned the value at the
-     new draw. Draws are produced at evaluation and never appended.
-     Sections 19 and 21.
- 55. Section 21's claim that a round trip through netCDF-C changes
-     nothing was not true and is corrected: the layout is the one
-     netCDF-C reads as an unlimited dimension, which is a claim about
-     reading. What netCDF-C writes differently is listed there, so
-     that a reader knows a netCDF-C-written file is not a conforming
-     file. Section 21.
- 56. The corpus gains a case with a compressed field, one with 4200
-     row-dimensioned datasets, and one carrying /notes and /private.
-     The first would have caught two writers dropping gzip from a
-     710 MB file, the second is the only case that reaches the
-     ceiling decision 52 lifts, and the third covers two groups that
-     thirty valid cases never exercised. Section 30.
+Scale:
 
-Taken on 2026-09-20, fourth batch, from the cleanup that Phase 3
-left open. Two of them say what a rule does not cover; the third
-writes down an algorithm that four implementations had each invented
-for themselves:
+  - A dimension scale is created with attribute creation order tracked and
+    indexed, and with object time tracking off (E42). Without it a scale
+    takes at most 4085 attachments: the 4086th fails after destroying the
+    REFERENCE_LIST it was extending and leaves a file that every reader
+    and every validator accepts. This is a ceiling on the container and
+    not on any reader, and it is the only entry in this appendix that
+    changes the bytes of every golden file (sections 21 and 23).
+  - E42 is about attribute creation order alone. Object time tracking off
+    stays a writer requirement of section 21 and is not validated, because
+    HDF5 stores the flag only in a version 2 object header: read back from
+    anything else it reports tracking as on whatever the writer asked, so
+    a check of it would fault only the files E42 already rejects (sections
+    14 and 21).
+  - H5Pset_attr_phase_change asks for the same thing and is silently
+    ignored under the default library version bounds, so a writer must not
+    rely on it. The bounds stay at the default for every object, so the
+    superblock and every non-scale object are unchanged. REFERENCE_LIST is
+    informational: an axis is resolved through DIMENSION_LIST and the
+    reader's own address map, and a scale whose REFERENCE_LIST is missing
+    or short is not an error (section 21).
+  - A round trip through netCDF-C does not leave a file unchanged, and
+    section 21 no longer claims it does: the layout is the one netCDF-C
+    reads as an unlimited dimension, which is a claim about reading. What
+    netCDF-C writes differently is listed there, so that a reader knows a
+    netCDF-C-written file is not a conforming file (section 21).
 
- 57. E42 is about attribute creation order alone. Object time
-     tracking off stays a writer requirement of section 21 and is
-     not validated, because HDF5 stores the flag only in a version 2
-     object header: read back from anything else it says tracking is
-     on whatever the writer asked, so a check of it would fault only
-     the files E42 already rejects. vectors/check.py now reports it
-     as a warning line rather than a failure. Sections 14 and 21.
- 58. `grouped_split` has one portable algorithm, so that a seed
-     names the same split in every language: the units ordered by
-     their category names as bytes, one splitmix64 draw each, the
-     units sorted by the draw, and part sizes by largest remainder
-     with a floor of one unit per part. Each of the four
-     implementations shuffled with its own language's generator,
-     which agrees with nobody else's. New section 31.
- 59. The three questions the API conventions left open are answered
-     there and not by a new rule: a metadata open may also read
-     `/row_support`, because it is a column rather than a slot and
-     E16 needs it in an unaligned file; an evaluated file does not
-     carry `/private`, because the result is a new dataset whose
-     producer attaches its own records; and an unknown dataset
-     inside a known group is not carried through a rewrite, which is
-     phase-3 finding 12. A reader lists it as lossy and a write
-     refuses it unless checking is off, so nothing is dropped in
-     silence. Section 14 gains no rule and section 29 is unchanged.
+Conformance:
 
-Still open: nothing.
+  - expected.json has a sixth field, `evaluation`, without which the
+    affine callable could not be conformance tested at all (section 30).
+  - The probe schema names the leading dimension of a group-varying array
+    `instance` and names the axes of a support's own cell datasets;
+    neither had a name, and the corpus must probe both. A probe's `value`
+    is a decimal string: the "%.17e" form for a float64 slot and the plain
+    decimal form for an integer slot (section 30).
+  - A probe on a dataset inside a callable's dictionary has no logical
+    dimension names; its index fields are applied in a fixed order to the
+    axes in file order, and `cell` and `cell_plus_one` join the probe
+    field list (section 30).
+  - Implementations link different libhdf5 versions and do not agree byte
+    for byte, so structural equality is the comparison and byte identity
+    is not tested (section 30).
+  - The corpus carries a hostile subset under vectors/hostile with a
+    looser contract: the required ids must appear, more are allowed, and
+    the run must finish cleanly inside ten seconds (section 30).
+  - The corpus also carries a case with a compressed field, one with 4200
+    row-dimensioned datasets, and one carrying `/notes` and `/private`.
+    The first catches a writer that drops gzip from a large file, the
+    second is the only case that reaches the attachment ceiling above, and
+    the third covers two groups no other valid case exercises (section
+    30).
+  - `grouped_split` has one portable algorithm, so that a seed names the
+    same split in every language: the units ordered by their category
+    names as bytes, one splitmix64 draw each, the units sorted by the
+    draw, and part sizes by largest remainder with a floor of one unit per
+    part (section 31).
+  - Three questions about the interfaces are answered by the API
+    conventions and not by any rule here: a metadata open may also read
+    `/row_support`, because it is a column rather than a slot and E16
+    needs it in an unaligned file; an evaluated file does not carry
+    `/private`, because the result is a new dataset whose producer
+    attaches its own records; and an unknown dataset inside a known group
+    is not carried through a rewrite, but is listed as lossy so that
+    nothing is dropped in silence. Section 14 gains no rule and section 29
+    is unchanged.
 
 
 17. Dictionary codec

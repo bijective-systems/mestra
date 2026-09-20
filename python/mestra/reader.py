@@ -56,8 +56,8 @@ __all__ = ["read", "support_ids", "REFUSED"]
 #: describing itself badly, and the values still mean what they say.
 #: It is the set section 2 of docs/api-conventions.md fixes.
 #:
-#: One set decides every entry point, which is finding 13 of the
-#: Phase 3 report: the metadata open, an eager read, `mestra info`
+#: One set decides every entry point: the metadata open, an eager
+#: read, `mestra info`
 #: and any operation that reads a slot all go through `_refuse`
 #: below and all name the same rule for the same file. A file this
 #: reader opens is a file it will read, and a file it refuses to

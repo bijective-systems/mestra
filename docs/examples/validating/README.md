@@ -29,8 +29,15 @@ Run it
 ------
 
     python python.py
+    matlab -nodisplay -batch "addpath('<repo>/matlab'); run('matlab.m')"
+    ../../../cpp/build/examples/validating
+    julia --project=../../../julia julia.jl
 
 It writes `family.mes` in the working directory and validates it.
+
+Run from this directory. The C++ programs are CMake targets: build
+them once with `cmake -S cpp -B cpp/build` and
+`cmake --build cpp/build -j`.
 
 Expected output
 ---------------

@@ -99,18 +99,27 @@ with callable slots has zero rows and the same keys, and extrapolation
 warnings are generic rather than a library special case.
 
 
-Uncertainty is draws, because transform error must be included
---------------------------------------------------------------
+Uncertainty is optional, and a draw is a whole field
+-----------------------------------------------------
 
-Summaries computed in coefficient space are not honest in field space
-(in our experience, bands with full coverage in coefficient space
-decode to a small fraction of that pointwise). So model outputs carry
-joint draws over nodes
-under a `draw` dimension, summaries are derived from them by an open
-routine, and the parameters that change the numbers (draw count,
-seed, batch size) are recorded with the result. Whether draws are
-produced at all is a property of the producer; the format only holds
-them when asked.
+Whether a producer represents uncertainty at all is its own decision.
+The format holds it when asked and is complete without it; a file
+that carries none is an ordinary file.
+
+What the format does fix is the shape. A draw is one whole field or
+one whole scalar under the `draw` dimension, not a number per node,
+so whatever dependence the producer has across nodes is preserved in
+the file rather than collapsed into something that cannot be put
+back. Summaries follow from the draws by an open routine, and any
+summary the format does not name is a derived array with a recipe.
+The parameters that change the numbers (draw count, seed, batch size)
+are recorded with the result.
+
+A callable's contract is its named outputs and nothing more. The
+slot's `statistic` and `of` say what an output means, so a producer
+may serve none of value, mean, std, quantile and draw, some of them,
+or all five, and the format never needs to know how any of them were
+made.
 
 
 The public/private boundary

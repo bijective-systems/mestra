@@ -52,9 +52,9 @@ classdef ExamplesTest < matlab.unittest.TestCase
         end
 
         function everyExampleIsUnderThirtyLines(testCase, example)
-        %everyExampleIsUnderThirtyLines  Phase 5 of docs/plan.md: one
-        %   example per concept, each under thirty lines, so that the
-        %   concept is what the reader meets and not the code.
+        %everyExampleIsUnderThirtyLines  One example per concept, each
+        %   under thirty lines, so that the concept is what the
+        %   reader meets and not the code.
             text = fileread(fullfile(ExamplesTest.root(), example, ...
                                      'matlab.m'));
             lines = strsplit(text, newline);

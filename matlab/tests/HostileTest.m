@@ -274,9 +274,9 @@ classdef HostileTest < matlab.unittest.TestCase
         function deepNestingIsBounded(testCase)
         %deepNestingIsBounded  Committed depth, and thirty thousand.
         %   The committed files are a thousand levels, which is enough
-        %   to prove the bound.  The thirty thousand the review asked
-        %   for is built here instead of committed, because it is four
-        %   megabytes of object headers and nothing else.
+        %   to prove the bound.  The thirty thousand case is built
+        %   here instead of committed, because it is four megabytes
+        %   of object headers and nothing else.
             for name = {'deep_callables', 'deep_root'}
                 d = mestra.read(HostileTest.caseFile(name{1}), 'Strict', false);
                 testCase.verifyNotEmpty(d.skipped, ...

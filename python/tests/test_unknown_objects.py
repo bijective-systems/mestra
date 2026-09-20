@@ -1,11 +1,10 @@
 """What this version does not know, and which rule covers it.
 
-Finding 12 of the Phase 3 report, on which the four implementations
-split two against two: an ordinary contiguous dataset named `row`
-inside a support group, attached to the file's `row` scale. Two
-report E27, one of those also W11, and two report nothing. The report
-says "the text should say whether an unknown dataset inside a known
-group is checked". It already does, in two steps.
+The case is an ordinary contiguous dataset named `row` inside a
+support group, attached to the file's `row` scale. It can be read
+as E27, as E27 with W11, or as nothing at all, so whether an unknown
+dataset inside a known group is checked is worth stating plainly.
+The text already does, in two steps.
 
 Section 14 exempts two things by name from the byte-level rules of
 sections 18 to 25: "`/private` is not checked, and neither is any

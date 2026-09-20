@@ -63,7 +63,7 @@ function out = validate(path)
     ctx.rep = rep;
     ctx.fid = fid;
     ctx.root = root;
-    % Section 21, decision 51: scale names come from a map built by a
+    % Section 21: scale names come from a map built by a
     % bounded walk of our own and never from a path lookup.
     ctx.scales = mestra.internal.H5.scaleMap(fid);
 
@@ -585,7 +585,7 @@ function checkKeyValues(ctx, did, path, role, values)
         if isempty(finite), return, end
         observed = max(finite) - min(finite);
         declared = upper - lower;
-        % Decision 36: the rule does not apply when the observed width
+        % The rule does not apply when the observed width
         % is zero, which covers a file with no rows, a key with one
         % distinct value, and a key with no finite value at all.
         if observed > 0 && declared > 4 * observed
@@ -1361,7 +1361,7 @@ function checkDimensionScales(ctx)
 %   about anything attached to them, and the map of section 21 has
 %   already seen every one of them, so this pass reads nothing more.
 %
-%   Decision 43 keeps it to the public objects: the byte-level rules
+%   Section 14 keeps it to the public objects: the byte-level rules
 %   of sections 18 to 25 are not checked inside /private, which
 %   section 29 forbids a reader to interpret at all.
     want = mestra.internal.H5.crtOrderTrackedIndexed();
@@ -1401,7 +1401,7 @@ end
 function checkScales(ctx, did, info, path)
 %checkScales  E25 for every axis of a dataset.
 %   A dimension scale is not itself subject to this rule and carries
-%   no scale on its own axis (decision 33), so this is called only on
+%   no scale on its own axis (section 14), so this is called only on
 %   the datasets the format defines.
     H5 = mestra.internal.H5;
     for axis = 1:numel(info.dims)
@@ -1526,7 +1526,7 @@ function checkChunking(ctx, did, info, path, nRows)
     rest = info.dims(2:end);
     itemsize = mestra.internal.Writer.itemSize(info.type);
     if strcmp(info.type, 'string'), itemsize = info.strSize; end
-    % Decision 35: the row count in the default is the length of the
+    % Section 23: the row count in the default is the length of the
     % row dimension the leading axis is attached to, and not the
     % dataset's own leading extent.
     attached = mestra.internal.H5.scaleNames(did, 0, ctx.scales);
@@ -1573,7 +1573,7 @@ function checkUnknown(ctx)
 end
 
 function checkPrivate(ctx)
-%checkPrivate  E18, as decision 32 makes it decidable.
+%checkPrivate  E18, decided from what a reader can see.
 %   A required public attribute or object absent, by any of E02, E11,
 %   E13, E15, E17, E31 or E39, in a file that also carries a
 %   `/private` group.  It is reported beside that rule and never by

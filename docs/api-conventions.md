@@ -1,10 +1,10 @@
 API conventions across the four implementations
 ================================================
 
-Decided 2026-09-20 from the Phase 3 ergonomics review. These are
-conventions for the reader, writer, builder, and helper APIs; they do
-not change the file format. Every implementation follows them, so a
-user moving between languages meets the same names, the same order,
+These are conventions for the reader, writer, builder, and helper
+APIs; they do not change the file format. Every implementation
+follows them, so a user moving between languages meets the same
+names, the same order,
 the same defaults, and the same messages. Where a language's idiom
 forces a difference (keyword arguments, name-value pairs, a struct),
 the difference is in syntax only.
@@ -117,8 +117,8 @@ do. A builder error says which argument to change. The models are the
 Python E04 and W01 messages.
 
 
-7. Decisions from the verification round
------------------------------------------
+7. Questions the four languages once answered differently
+----------------------------------------------------------
 
 What an evaluated file carries. Evaluating a file turns every callable
 slot into a stored slot, so the result has no callable to keep: the

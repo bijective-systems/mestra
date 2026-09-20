@@ -23,9 +23,8 @@ format does not want to pay:
     root group's header is the library's and the property list it was
     created from is this one;
   - every reader pays for it.  `vectors/README.md` rejects the layout
-    for the corpus, and the Phase 3 report measured a C++ validator
-    taking 4.98 s on a thousand-key file in it against 0.68 s in the
-    default one.
+    for the corpus, and a C++ validator takes 4.98 s on a
+    thousand-key file in it against 0.68 s in the default one.
 
 Asking for the earliest low bound puts this writer back on the layout
 the corpus files have.  The high bound stays `:latest`, so nothing
