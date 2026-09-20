@@ -28,17 +28,23 @@ classdef Dataset < handle
 %   Building one
 %
 %       d = mestra.Dataset();
-%       d.addCategory('member', {'wing_a', 'wing_b'});
-%       d.addKey('mach', 'condition', [0.4 0.8], 'Units', '1', ...
-%                'Lower', 0.1, 'Upper', 0.9);
-%       d.addKey('member', 'group', int32([0 1]), 'Category', 'member');
-%       d.generalisationGroup = 'member';
+%       d.addCategoryTable('member', {'wing_a', 'wing_b'});
+%       d.addKey('mach', [0.4 0.8], 'condition', '1');
+%       d.addKey('member', int32([0 1]), 'group', 'Category', 'member');
+%       d.setGeneralisationGroup('member');
 %       d.addMeshSupport('s0', coords, uint8([9 9]), int64([0 4 8]), ...
-%                        int64([0 1 4 3 1 2 5 4]), 'Varies', 'group:member');
-%       d.addNodeArray('s0', 'pressure', p, 'field', 'Units', 'Pa', ...
+%                        int64([0 1 4 3 1 2 5 4]), 'm', ...
+%                        'Dims', {'component', 'node', 'group:member'});
+%       d.addNodeArray('s0', 'pressure', p, 'field', 'Pa', ...
 %                      'Dims', {'row', 'node'});
-%       d.addScalar('cl', [0.25 0.55], 'Units', '1');
+%       d.addScalar('cl', [0.25 0.55], '1');
 %       mestra.write(d, 'two_rows.mes');
+%
+%   The argument order is the one every implementation uses
+%   (docs/api-conventions.md, section 1): the name, the values, then
+%   the role and the units, and a name-value pair for everything
+%   else.  'Dims' names the axes of the array you hand over and
+%   settles what it varies along and how many components it has.
 %
 %   Reading one
 %
@@ -288,13 +294,24 @@ classdef Dataset < handle
 
         % -------------------------------------------------- builders
 
-        function addCategory(obj, name, entries, varargin)
-        %addCategory  A category table.  Ids are the positions, so the
-        %   first entry is id 0 (section 21).
+        function addCategoryTable(obj, name, entries, varargin)
+        %addCategoryTable  A category table.  Ids are the positions,
+        %   so the first entry is id 0 (section 21).
+        %
+        %   addCategoryTable(NAME, ENTRIES) is the one way to attach a
+        %   category table to a file; the key or the label that uses
+        %   it then names it with 'Category'.  There is no inline
+        %   alternative, in this language or in any other
+        %   (docs/api-conventions.md, section 1).
+        %
+        %       d.addCategoryTable('member', {'wing_a', 'wing_b'});
+        %       d.addKey('member', int32([0 1]), 'group', ...
+        %                'Category', 'member');
             p = inputParser();
             p.addParameter('Size', []);
             p.parse(varargin{:});
             if isstring(entries), entries = cellstr(entries); end
+            if ischar(entries), entries = {entries}; end
             rec = mestra.Dataset.emptyCategory();
             rec(1).name = name;
             rec(1).entries = reshape(entries, 1, []);
@@ -302,10 +319,43 @@ classdef Dataset < handle
             obj.categories = mestra.Dataset.append(obj.categories, rec, name);
         end
 
-        function addKey(obj, name, role, values, varargin)
-        %addKey  A key column.  The dtype follows the role
-        %   (section 19) unless Dtype says otherwise.
+        function addCategory(obj, varargin) %#ok<INUSD>
+        %addCategory  Renamed to addCategoryTable.
+            error('mestra:renamed', ...
+                  ['addCategory is now addCategoryTable, which is the ' ...
+                   'name every implementation uses ' ...
+                   '(docs/api-conventions.md, section 1); the ' ...
+                   'arguments are unchanged']);
+        end
+
+        function addKey(obj, name, values, varargin)
+        %addKey  A key column: addKey(NAME, VALUES, ROLE, UNITS).
+        %
+        %   The order is the one every implementation uses
+        %   (docs/api-conventions.md, section 1): the name, the
+        %   values, the role, the units.  ROLE and UNITS may be given
+        %   positionally or as 'Role' and 'Units'; everything else is
+        %   a name-value pair.
+        %
+        %       d.addKey('mach', [0.4 0.8], 'condition', '1');
+        %       d.addKey('member', int32([0 1]), 'group', ...
+        %                'Category', 'member');
+        %
+        %   A key of role design, condition or time requires units
+        %   (E39).  A categorical, group, split or status key names
+        %   its category table with 'Category' instead (E10).
+        %
+        %   BOUNDS.  When neither 'Lower' nor 'Upper' is given, a
+        %   design, condition or time key records the observed finite
+        %   minimum and maximum, so that the same arrays written by
+        %   any implementation give the same file and W04 and W08 are
+        %   decidable.  A caller who wants a wider domain of validity
+        %   passes them.
+        %
+        %   The dtype follows the role (section 19) unless Dtype says
+        %   otherwise.
             p = inputParser();
+            p.addParameter('Role', '');
             p.addParameter('Units', '');
             p.addParameter('Lower', []);
             p.addParameter('Upper', []);
@@ -314,12 +364,41 @@ classdef Dataset < handle
             p.addParameter('Parent', '');
             p.addParameter('Dtype', '');
             p.addParameter('Chunk', []);
-            p.parse(varargin{:});
+            mestra.Dataset.refuseOldOrder('addKey', name, values, ...
+                @mestra.internal.Args.isKeyRole, ...
+                'addKey(name, values, role, units)');
+            [pos, rest] = mestra.internal.Args.positional(varargin, ...
+                {{'', @mestra.internal.Args.isText}, ...
+                 {'', @mestra.internal.Args.isText}}, ...
+                mestra.internal.Args.parameterNames(p));
+            p.parse(rest{:});
             r = p.Results;
+            role = mestra.Dataset.oneOf(pos{1}, r.Role, 'Role');
+            units = mestra.Dataset.oneOf(pos{2}, r.Units, 'Units');
+            path = ['/keys/' name];
+            if isempty(role)
+                error('mestra:E02', ...
+                      ['E02: %s: a key needs a role; give one of %s as ' ...
+                       'the third argument'], path, ...
+                      strjoin(mestra.internal.Args.keyRoles, ', '));
+            end
+            if ~mestra.internal.Args.isKeyRole(role)
+                error('mestra:E02', ...
+                      ['E02: %s: "%s" is not a key role; the roles of ' ...
+                       'section 3 are %s'], path, role, ...
+                      strjoin(mestra.internal.Args.keyRoles, ', '));
+            end
+            if any(strcmp(role, {'design', 'condition', 'time'})) && ...
+                    isempty(units)
+                error('mestra:E39', ...
+                      ['E39: %s: a key of role %s requires units; give ' ...
+                       'them as the fourth argument, "1" when it is ' ...
+                       'dimensionless'], path, role);
+            end
             rec = mestra.Dataset.emptyKey();
             rec(1).name = name;
             rec(1).role = role;
-            rec(1).units = r.Units;
+            rec(1).units = units;
             rec(1).lower = r.Lower;
             rec(1).upper = r.Upper;
             rec(1).category = r.Category;
@@ -335,28 +414,83 @@ classdef Dataset < handle
                     rec(1).dtype = mestra.Dataset.dtypeForRole(role, values);
                 end
                 rec(1).values = reshape(values, 1, []);
+                [rec(1).lower, rec(1).upper] = ...
+                    mestra.Dataset.observedBounds(role, rec(1).values, ...
+                                                  r.Lower, r.Upper);
             end
             obj.noteRows(numel(rec(1).values));
             obj.keys = mestra.Dataset.append(obj.keys, rec, name);
         end
 
+        function setGeneralisationGroup(obj, name)
+        %setGeneralisationGroup  Name the unit of generalisation.
+        %
+        %   The unit of generalisation is a property of the dataset in
+        %   every implementation (docs/api-conventions.md, section 1)
+        %   and names a key of role group (section 7).  Exactly one
+        %   group key is the unit of generalisation (E03).
+        %
+        %       d.setGeneralisationGroup('member');
+        %
+        %   Setting the generalisationGroup property does the same
+        %   thing; this is the spelling the documents show.
+            if isstring(name), name = char(name); end
+            if ~isempty(name)
+                i = find(strcmp({obj.keys.name}, name), 1);
+                if ~isempty(i) && ~strcmp(obj.keys(i).role, 'group')
+                    error('mestra:E03', ...
+                          ['E03: /keys/%s: the unit of generalisation ' ...
+                           'must be a key of role group and "%s" has ' ...
+                           'role %s; name a group key instead'], ...
+                          name, name, obj.keys(i).role);
+                end
+            end
+            obj.generalisationGroup = name;
+        end
+
         function addScalar(obj, name, values, varargin)
-        %addScalar  A per-row quantity of interest.  Units are
-        %   required (E11).
+        %addScalar  A per-row quantity of interest:
+        %   addScalar(NAME, VALUES, UNITS).
+        %
+        %   The order is the one every implementation uses
+        %   (docs/api-conventions.md, section 1).  UNITS may be given
+        %   positionally or as 'Units', and is required (E11).
+        %
+        %       d.addScalar('cl', [0.25 0.55], '1');
+        %
+        %   A scalar served by a callable takes no values:
+        %
+        %       d.addScalar('cl', [], '1', 'Callable', 'm1', ...
+        %                   'Output', 'cl');
             p = inputParser();
             p.addParameter('Units', '');
             p.addParameter('Source', 'data');
+            p.addParameter('Callable', '');
             p.addParameter('Output', '');
             p.addParameter('Statistic', '');
             p.addParameter('Of', '');
             p.addParameter('Quantile', []);
             p.addParameter('Chunk', []);
-            p.parse(varargin{:});
+            [pos, rest] = mestra.internal.Args.positional(varargin, ...
+                {{'', @mestra.internal.Args.isText}}, ...
+                mestra.internal.Args.parameterNames(p));
+            p.parse(rest{:});
             r = p.Results;
+            units = mestra.Dataset.oneOf(pos{1}, r.Units, 'Units');
+            source = r.Source;
+            if ~isempty(r.Callable)
+                source = ['callable:' r.Callable];
+            end
+            if isempty(units)
+                error('mestra:E11', ...
+                      ['E11: /scalars/%s: a scalar requires units; give ' ...
+                       'them as the third argument, "1" when it is ' ...
+                       'dimensionless'], name);
+            end
             rec = mestra.Dataset.emptyScalar();
             rec(1).name = name;
-            rec(1).units = r.Units;
-            rec(1).source = r.Source;
+            rec(1).units = units;
+            rec(1).source = source;
             rec(1).output = r.Output;
             rec(1).statistic = r.Statistic;
             rec(1).of = r.Of;
@@ -365,7 +499,7 @@ classdef Dataset < handle
             rec(1).dtype = 'float64';
             rec(1).values = reshape(double(values), 1, []);
             rec(1).dims = {'row'};
-            if ~strcmp(r.Source, 'data')
+            if ~strcmp(source, 'data')
                 rec(1).values = [];
             else
                 obj.noteRows(numel(rec(1).values));
@@ -404,21 +538,29 @@ classdef Dataset < handle
                                 cellOffsets, cellConnectivity, varargin)
         %addMeshSupport  A mesh support and its coordinates in one call.
         %   `coordinates` is given in MATLAB axis order, or in the
-        %   order named by Dims.  The support id is computed for you.
+        %   order named by Dims.  The support id is computed for you,
+        %   and Dims settles what the coordinates vary along.
+        %
+        %       d.addMeshSupport('s0', coords, types, offsets, conn, ...
+        %                        'm', 'Dims', {'component', 'node'});
             p = inputParser();
-            p.KeepUnmatched = true;
-            p.addParameter('Units', 'm');
-            p.addParameter('Varies', 'none');
+            p.addParameter('Units', '');
+            p.addParameter('Varies', '');
             p.addParameter('Dims', {});
             p.addParameter('Components', []);
-            p.parse(varargin{:});
+            [pos, rest] = mestra.internal.Args.positional(varargin, ...
+                {{'', @mestra.internal.Args.isText}}, ...
+                mestra.internal.Args.parameterNames(p));
+            p.parse(rest{:});
             r = p.Results;
+            units = mestra.Dataset.oneOf(pos{1}, r.Units, 'Units');
+            if isempty(units), units = 'm'; end
             nNodes = mestra.Dataset.countNodes(coordinates, r.Dims);
             obj.addSupport(name, 'mesh', nNodes, ...
                            'CellTypes', cellTypes, ...
                            'CellOffsets', cellOffsets, ...
                            'CellConnectivity', cellConnectivity);
-            obj.setCoordinates(name, coordinates, 'Units', r.Units, ...
+            obj.setCoordinates(name, coordinates, units, ...
                                'Varies', r.Varies, 'Dims', r.Dims, ...
                                'Components', r.Components);
         end
@@ -427,19 +569,32 @@ classdef Dataset < handle
         %addAxisSupport  An axis support and its coordinates.  The
         %   coordinates of an axis support never vary (E35).
             p = inputParser();
-            p.addParameter('Units', '1');
+            p.addParameter('Units', '');
             p.addParameter('Dims', {});
-            p.parse(varargin{:});
+            [pos, rest] = mestra.internal.Args.positional(varargin, ...
+                {{'', @mestra.internal.Args.isText}}, ...
+                mestra.internal.Args.parameterNames(p));
+            p.parse(rest{:});
             r = p.Results;
+            units = mestra.Dataset.oneOf(pos{1}, r.Units, 'Units');
+            if isempty(units), units = '1'; end
+            derived = mestra.Dataset.variesFromDims(r.Dims, obj);
+            if ~strcmp(derived, 'none')
+                error('mestra:E35', ...
+                      ['E35: /supports/%s/coordinates: the coordinates ' ...
+                       'of an axis support never vary and Dims names a ' ...
+                       '%s axis; drop that axis from Dims'], name, derived);
+            end
             nNodes = mestra.Dataset.countNodes(coordinates, r.Dims);
             obj.addSupport(name, 'axis', nNodes);
-            obj.setCoordinates(name, coordinates, 'Units', r.Units, ...
+            obj.setCoordinates(name, coordinates, units, ...
                                'Varies', 'none', 'Dims', r.Dims, ...
                                'Components', 1);
         end
 
         function setCoordinates(obj, supportName, values, varargin)
-        %setCoordinates  The one coordinates array of a support.
+        %setCoordinates  The one coordinates array of a support:
+        %   setCoordinates(SUPPORT, VALUES, UNITS).
             slot = obj.makeSlot('coordinates', values, 'coordinates', ...
                                 supportName, 'node', varargin{:});
             i = obj.supportIndex(supportName);
@@ -447,22 +602,100 @@ classdef Dataset < handle
             obj.refreshSupportId(supportName);
         end
 
-        function addNodeArray(obj, supportName, name, values, role, varargin)
-        %addNodeArray  A node array on a support.
-            slot = obj.makeSlot(name, values, role, supportName, 'node', ...
+        function addNodeArray(obj, supportName, name, values, varargin)
+        %addNodeArray  A node array on a support:
+        %   addNodeArray(SUPPORT, NAME, VALUES, ROLE, UNITS, 'Dims', ...).
+        %
+        %   The order is the one every implementation uses
+        %   (docs/api-conventions.md, section 1).  ROLE and UNITS may
+        %   be given positionally or as 'Role' and 'Units'; ROLE
+        %   defaults to 'field', which is what an array usually is.
+        %
+        %       d.addNodeArray('s0', 'pressure', p, 'field', 'Pa', ...
+        %                      'Dims', {'row', 'node'});
+        %       d.addNodeArray('s0', 'cad_face_id', ids, 'label', ...
+        %                      'Category', 'faces', 'Dims', {'node'});
+        %
+        %   'Dims' names the axes of the array you hand over, in that
+        %   array's own order.  It settles what the array varies
+        %   along: a 'row' axis means row, a 'group:<k>' axis means
+        %   that group, neither means none.  It also settles the
+        %   component count.
+            slot = obj.makeSlot(name, values, '', supportName, 'node', ...
                                 varargin{:});
             i = obj.supportIndex(supportName);
             obj.supports(i).nodeArrays = ...
                 mestra.Dataset.append(obj.supports(i).nodeArrays, slot, name);
         end
 
-        function addCellArray(obj, supportName, name, values, role, varargin)
-        %addCellArray  A cell array on a support.
-            slot = obj.makeSlot(name, values, role, supportName, 'cell', ...
+        function addCellArray(obj, supportName, name, values, varargin)
+        %addCellArray  A cell array on a support, with the same
+        %   argument order as addNodeArray.
+            slot = obj.makeSlot(name, values, '', supportName, 'cell', ...
                                 varargin{:});
             i = obj.supportIndex(supportName);
             obj.supports(i).cellArrays = ...
                 mestra.Dataset.append(obj.supports(i).cellArrays, slot, name);
+        end
+
+        function addCallableSlot(obj, supportName, name, role, varargin)
+        %addCallableSlot  An array slot served by a callable:
+        %   addCallableSlot(SUPPORT, NAME, ROLE, UNITS, CALLABLE,
+        %   OUTPUT).
+        %
+        %   The argument order is the array builders' with the values
+        %   left out and the callable id and the output name added
+        %   (docs/api-conventions.md, section 1).  A callable slot has
+        %   no data and no shape, so it must declare its width with
+        %   'Components' (E31), and 'Location' says whether it is a
+        %   node array or a cell array.
+        %
+        %       d.addCallable('m1', A);
+        %       d.addCallableSlot('s0', 'pressure', 'field', 'Pa', ...
+        %                         'm1', 'pressure', 'Components', 1);
+            p = inputParser();
+            p.addParameter('Units', '');
+            p.addParameter('Callable', '');
+            p.addParameter('Output', '');
+            p.addParameter('Location', 'node');
+            p.addParameter('Components', []);
+            p.addParameter('Varies', 'row');
+            p.addParameter('Category', '');
+            p.addParameter('Statistic', '');
+            p.addParameter('Of', '');
+            p.addParameter('Quantile', []);
+            [pos, rest] = mestra.internal.Args.positional(varargin, ...
+                {{'', @mestra.internal.Args.isText}, ...
+                 {'', @mestra.internal.Args.isText}, ...
+                 {'', @mestra.internal.Args.isText}}, ...
+                mestra.internal.Args.parameterNames(p));
+            p.parse(rest{:});
+            r = p.Results;
+            units = mestra.Dataset.oneOf(pos{1}, r.Units, 'Units');
+            id = mestra.Dataset.oneOf(pos{2}, r.Callable, 'Callable');
+            output = mestra.Dataset.oneOf(pos{3}, r.Output, 'Output');
+            if isempty(id)
+                error('mestra:E14', ...
+                      ['E14: /supports/%s/%s_arrays/%s: a callable slot ' ...
+                       'must name the callable that serves it; give its ' ...
+                       'id as the fifth argument'], supportName, ...
+                      r.Location, name);
+            end
+            slot = obj.makeSlot(name, [], role, supportName, r.Location, ...
+                                'Units', units, 'Varies', r.Varies, ...
+                                'Components', r.Components, ...
+                                'Source', ['callable:' id], ...
+                                'Output', output, 'Category', r.Category, ...
+                                'Statistic', r.Statistic, 'Of', r.Of, ...
+                                'Quantile', r.Quantile);
+            i = obj.supportIndex(supportName);
+            if strcmp(r.Location, 'cell')
+                obj.supports(i).cellArrays = mestra.Dataset.append( ...
+                    obj.supports(i).cellArrays, slot, name);
+            else
+                obj.supports(i).nodeArrays = mestra.Dataset.append( ...
+                    obj.supports(i).nodeArrays, slot, name);
+            end
         end
 
         function addCallable(obj, id, callableOrDict, varargin)
@@ -493,7 +726,9 @@ classdef Dataset < handle
             end
             if isempty(rec(1).type)
                 error('mestra:E15', ...
-                      'a callable needs a type (E15)');
+                      ['E15: /callables/%s: a callable needs a type; ' ...
+                       'pass ''Type'', or hand over a mestra.Callable, ' ...
+                       'which names its own'], id);
             end
             obj.callables = mestra.Dataset.append(obj.callables, rec, id);
         end
@@ -562,10 +797,12 @@ classdef Dataset < handle
         function slot = makeSlot(obj, name, values, role, supportName, ...
                                  location, varargin)
             p = inputParser();
+            p.addParameter('Role', '');
             p.addParameter('Units', '');
             p.addParameter('Varies', '');
             p.addParameter('Components', []);
             p.addParameter('Source', 'data');
+            p.addParameter('Callable', '');
             p.addParameter('Output', '');
             p.addParameter('Statistic', '');
             p.addParameter('Of', '');
@@ -578,13 +815,48 @@ classdef Dataset < handle
             p.addParameter('Dims', {});
             p.addParameter('Dtype', '');
             p.addParameter('Chunk', []);
-            p.parse(varargin{:});
+            names = mestra.internal.Args.parameterNames(p);
+            if isempty(role)
+                specs = {{'', @mestra.internal.Args.isArrayRole}, ...
+                         {'', @mestra.internal.Args.isText}};
+            else
+                specs = {{'', @mestra.internal.Args.isText}};
+            end
+            [pos, rest] = mestra.internal.Args.positional(varargin, specs, ...
+                                                          names);
+            p.parse(rest{:});
             r = p.Results;
+            if isempty(role)
+                role = mestra.Dataset.oneOf(pos{1}, r.Role, 'Role');
+                units = mestra.Dataset.oneOf(pos{2}, r.Units, 'Units');
+                if isempty(role), role = 'field'; end
+            else
+                units = mestra.Dataset.oneOf(pos{1}, r.Units, 'Units');
+            end
+            path = mestra.Dataset.slotPath(supportName, location, name);
+            if ~mestra.internal.Args.isArrayRole(role)
+                error('mestra:E02', ...
+                      ['E02: %s: "%s" is not an array role; the roles ' ...
+                       'of section 3 are %s'], path, ...
+                      mestra.internal.Args.text(role), ...
+                      strjoin(mestra.internal.Args.arrayRoles, ', '));
+            end
+            if any(strcmp(role, {'field', 'derived'})) && isempty(units)
+                error('mestra:E11', ...
+                      ['E11: %s: an array of role %s requires units; ' ...
+                       'give them after the role, "1" when it is ' ...
+                       'dimensionless'], path, role);
+            end
+            if strcmp(role, 'coordinates') && isempty(units)
+                error('mestra:E39', ...
+                      ['E39: %s: coordinates require units; give them ' ...
+                       'after the values'], path);
+            end
 
             slot = mestra.Dataset.emptySlot();
             slot(1).name = name;
             slot(1).role = role;
-            slot(1).units = r.Units;
+            slot(1).units = units;
             slot(1).source = r.Source;
             slot(1).output = r.Output;
             slot(1).statistic = r.Statistic;
@@ -598,9 +870,28 @@ classdef Dataset < handle
             slot(1).location = location;
             slot(1).support = supportName;
             slot(1).chunk = r.Chunk;
+            if ~isempty(r.Callable)
+                slot(1).source = ['callable:' r.Callable];
+            end
 
-            varies = r.Varies;
-            if isempty(varies)
+            % Dims settles what the array varies along.  A 'row' axis
+            % means row, a 'group:<k>' axis means that group, neither
+            % means none (docs/api-conventions.md, section 1).  This
+            % is what keeps a builder from writing a file its own
+            % validator rejects: `Varies` no longer has a default that
+            % contradicts the array that was handed over.
+            given = r.Dims;
+            if ischar(given), given = {given}; end
+            if isstring(given), given = cellstr(given); end
+            given = reshape(given, 1, []);
+            varies = mestra.Dataset.oneOf(r.Varies, '', 'Varies');
+            if ~isempty(given)
+                derived = mestra.Dataset.variesFromDims(given, obj);
+                if ~isempty(varies) && ~strcmp(varies, derived)
+                    mestra.Dataset.refuseVaries(path, varies, derived, given);
+                end
+                varies = derived;
+            elseif isempty(varies)
                 if strcmp(role, 'coordinates')
                     varies = 'none';
                 else
@@ -609,15 +900,16 @@ classdef Dataset < handle
             end
             slot(1).varies = varies;
 
-            if ~strcmp(r.Source, 'data')
+            if ~strcmp(slot(1).source, 'data')
                 slot(1).values = [];
                 slot(1).dims = {};
                 slot(1).dtype = '';
                 slot(1).components = r.Components;
                 if isempty(slot(1).components)
                     error('mestra:E31', ...
-                          ['a callable slot must declare Components ' ...
-                           '(E31)']);
+                          ['E31: %s: a callable slot has no shape of ' ...
+                           'its own, so it must declare its width; pass ' ...
+                           '''Components'''], path);
                 end
                 return
             end
@@ -629,7 +921,6 @@ classdef Dataset < handle
             % Dims names the axes of the array the caller passes, in
             % that array's own order.  With no Dims the array is taken
             % to be in the order a reader hands one back.
-            given = r.Dims;
             if isempty(given)
                 given = wanted;
             else
@@ -637,6 +928,9 @@ classdef Dataset < handle
             end
             slot(1).values = mestra.permute(values, given, wanted);
             slot(1).dims = wanted;
+            sz = size(slot(1).values);
+            sz = [sz ones(1, numel(wanted) - numel(sz))];
+            slot(1).shape = fliplr(sz(1:numel(wanted)));
             slot(1).dtype = r.Dtype;
             if isempty(slot(1).dtype)
                 slot(1).dtype = mestra.Dataset.dtypeForArrayRole(role, values);
@@ -702,8 +996,8 @@ classdef Dataset < handle
                        'statistic', {}, 'of', {}, 'quantile', {}, ...
                        'category', {}, 'recomputed', {}, 'derivedFrom', {}, ...
                        'recipe', {}, 'reference', {}, 'values', {}, ...
-                       'dims', {}, 'dtype', {}, 'location', {}, ...
-                       'support', {}, 'chunk', {});
+                       'dims', {}, 'shape', {}, 'dtype', {}, ...
+                       'location', {}, 'support', {}, 'chunk', {});
         end
 
         function s = emptyCallable()
@@ -761,6 +1055,139 @@ classdef Dataset < handle
                     out{i} = varies;
                 end
             end
+        end
+
+        function v = variesFromDims(given, obj)
+        %variesFromDims  What an array varies along, from the names of
+        %   its own axes.  A 'row' axis means row, a 'group:<k>' axis
+        %   means that group, neither means none
+        %   (docs/api-conventions.md, section 1).  'instance' is the
+        %   corpus's name for a group axis and is accepted when the
+        %   file declares exactly one group key.
+            v = 'none';
+            if ischar(given), given = {given}; end
+            if isstring(given), given = cellstr(given); end
+            for i = 1:numel(given)
+                name = given{i};
+                if strcmp(name, 'row')
+                    v = 'row';
+                    return
+                elseif strncmp(name, 'group:', 6)
+                    v = name;
+                    return
+                elseif strcmp(name, 'instance')
+                    v = mestra.Dataset.theOneGroupKey(obj);
+                    return
+                end
+            end
+        end
+
+        function v = theOneGroupKey(obj)
+        %theOneGroupKey  'group:<k>' when the dataset declares exactly
+        %   one group key, and an error naming the choice otherwise.
+            groups = {};
+            if ~isempty(obj) && ~isempty(obj.keys)
+                groups = {obj.keys(strcmp({obj.keys.role}, 'group')).name};
+            end
+            if numel(groups) == 1
+                v = ['group:' groups{1}];
+                return
+            end
+            if isempty(groups)
+                error('mestra:E04', ...
+                      ['E04: an axis called "instance" means the group ' ...
+                       'key the array varies along, and this dataset ' ...
+                       'declares none; name the axis "group:<key>" in ' ...
+                       'Dims after adding the key']);
+            end
+            error('mestra:E04', ...
+                  ['E04: an axis called "instance" is ambiguous when ' ...
+                   'the file declares more than one group key (%s); ' ...
+                   'name the axis "group:<key>" in Dims'], ...
+                  strjoin(groups, ', '));
+        end
+
+        function refuseVaries(path, given, derived, dims)
+        %refuseVaries  A Varies that disagrees with Dims, refused at
+        %   build time with the rule the validator would report.
+        %
+        %   The row count is what goes wrong when one of the two says
+        %   `row` and the other does not, so that disagreement is E16;
+        %   any other is a leading dimension that disagrees with
+        %   `varies`, which is E04.
+            if strcmp(given, 'row') || strcmp(derived, 'row')
+                id = 'E16';
+            else
+                id = 'E04';
+            end
+            error(['mestra:' id], ...
+                  ['%s: %s: Dims names the axes %s, so this array ' ...
+                   'varies along %s, and Varies says %s; the two ' ...
+                   'disagree. Drop Varies and let Dims settle it, or ' ...
+                   'name a %s axis in Dims'], id, path, ...
+                  ['{' strjoin(dims, ', ') '}'], derived, given, given);
+        end
+
+        function p = slotPath(supportName, location, name)
+        %slotPath  Where a slot will sit in the file.
+            if strcmp(name, 'coordinates')
+                p = ['/supports/' supportName '/coordinates'];
+            else
+                p = ['/supports/' supportName '/' location '_arrays/' name];
+            end
+        end
+
+        function out = oneOf(positional, named, what)
+        %oneOf  One value from a positional argument and its name-value
+        %   twin, refusing the two together.
+            positional = mestra.internal.Args.text(positional);
+            named = mestra.internal.Args.text(named);
+            if ~isempty(positional) && ~isempty(named) && ...
+                    ~strcmp(positional, named)
+                error('mestra:arguments', ...
+                      ['%s was given twice, as "%s" positionally and ' ...
+                       'as "%s" by name; give it once'], what, ...
+                      positional, named);
+            end
+            if ~isempty(positional)
+                out = positional;
+            else
+                out = named;
+            end
+        end
+
+        function refuseOldOrder(fname, name, values, isRole, shape) %#ok<INUSL>
+        %refuseOldOrder  Catch a call written in the order this
+        %   package used before the conventions, and say the new one.
+            v = values;
+            if isstring(v) && isscalar(v), v = char(v); end
+            if ~(ischar(v) && isrow(v)), return, end
+            if ~isRole(v), return, end
+            error('mestra:arguments', ...
+                  ['%s now takes its arguments in the order every ' ...
+                   'implementation uses, %s, so the values come before ' ...
+                   'the role; "%s" arrived where the values belong'], ...
+                  fname, shape, v);
+        end
+
+        function [lower, upper] = observedBounds(role, values, lower, upper)
+        %observedBounds  The bounds a key records when the caller gives
+        %   none: the observed finite minimum and maximum.
+        %
+        %   Section 1 of docs/api-conventions.md: every implementation
+        %   fills them in, so that the same arrays give the same file
+        %   and W04 and W08 are decidable on every file.  Bounds are a
+        %   domain of validity, which only the continuous roles have:
+        %   a categorical, group, split, status or id key is bounded
+        %   by its category table (E10) and takes none.
+            if ~any(strcmp(role, {'design', 'condition', 'time'}))
+                return
+            end
+            if ~isnumeric(values) || isempty(values), return, end
+            finite = double(values(isfinite(double(values))));
+            if isempty(finite), return, end
+            if isempty(lower), lower = min(finite); end
+            if isempty(upper), upper = max(finite); end
         end
 
         function name = logicalDim(diskName)
@@ -831,7 +1258,8 @@ classdef Dataset < handle
                 i = find(strcmp(dims, 'node'), 1);
                 if isempty(i)
                     error('mestra:dims', ...
-                          'the coordinates Dims must name "node"');
+                          ['the coordinates Dims must name "node"; it ' ...
+                           'names {%s}'], strjoin(dims, ', '));
                 end
                 n = size(coordinates, i);
             end
