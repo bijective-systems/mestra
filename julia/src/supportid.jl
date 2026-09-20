@@ -55,17 +55,17 @@ function support_id(s::Support)
             "this reader could not read, so it has no support_id"))
     end
     if s.kind == "axis" &&
-       (s.coordinates === nothing || s.coordinates.data === nothing)
+       (s.coordinates === nothing || raw_data(s.coordinates) === nothing)
         throw(MestraError("E41",
             "support $(s.name) is an axis whose coordinates this reader " *
             "could not read, so it has no support_id"))
     end
     coords = nothing
     if s.kind == "axis" && s.coordinates !== nothing &&
-       s.coordinates.data !== nothing
+       raw_data(s.coordinates) !== nothing
         # The Julia array's linear memory is the file's own byte
         # order, so no permutation is needed here.
-        coords = vec(s.coordinates.data)
+        coords = vec(raw_data(s.coordinates))
     end
     # Section 24: an `axis` or `none` support has no cell arrays, so
     # steps 2 to 4 contribute no bytes at all for it, even where a file

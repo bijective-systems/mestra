@@ -262,13 +262,13 @@ end
 @testset "corpus: a lazy read touches no array" begin
     ds = Mestra.read(case_file("mesh_two_rows"))
     @test ds.nrows == 2
-    @test ds["pressure"].data === nothing
+    @test !Mestra.materialised(ds["pressure"])
     @test ds.supports[1].support_id[1:8] == "96df395d"
     # one slot, one row range, and nothing else
     v = Mestra.rows(ds, ds["pressure"], 2:2)
     @test size(v) == (1, 6, 1)
     @test Mestra.at(v; row = 1, node = 4, component = 1) == 204.0
-    @test ds["pressure"].data === nothing
+    @test !Mestra.materialised(ds["pressure"])
     big = Mestra.read(case_file("cascade_varying_geometry"))
     w = Mestra.rows(big, big["mach"], 2:3)
     @test size(w) == (1, 6, 2)
@@ -276,6 +276,26 @@ end
                           (:row, :node, :component))
     @test Mestra.permute(w, (:row, :node, :component))[1, :, 1] ==
           full[2, :, 1]
+    # and reaching for the empty field says what to call instead,
+    # rather than handing back `nothing` for the next line to trip on
+    e = try
+        ds.keys["mach"].values[2]
+    catch err
+        err
+    end
+    @test e isa Mestra.MestraError
+    @test occursin("Mestra.values", sprint(showerror, e))
+    @test occursin("/keys/mach", sprint(showerror, e))
+    e2 = try
+        ds["pressure"].data
+    catch err
+        err
+    end
+    @test e2 isa Mestra.MestraError
+    @test occursin("Mestra.values", sprint(showerror, e2))
+    eager = Mestra.read(case_file("mesh_two_rows"); lazy = false)
+    @test Mestra.materialised(eager.keys["mach"])
+    @test eager.keys["mach"].values[2] == 0.8
 end
 
 @testset "axis order and permuting by name" begin
@@ -824,7 +844,7 @@ end
     # slot does not lose the file
     tight = Mestra.read(huge; lazy = false, max_elements = 10)
     @test any(f -> f.rule == "E41", tight.findings)
-    @test tight.scalars["huge"].data === nothing
+    @test !Mestra.materialised(tight.scalars["huge"])
 
     # a link this reader will not follow is reported, not followed
     ds2 = Mestra.read(joinpath(hostile, "link_external.mes"))

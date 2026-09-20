@@ -6,16 +6,32 @@
 # each axis, and `values(ds, slot)` returns a DimArray carrying those
 # names in the Julia order, so nothing downstream counts axes.
 
-"""An error this package raises, naming the rule of section 14 that
-the caller broke where there is one."""
+"""
+    MestraError(rule, path, msg)
+    MestraError(rule, msg)
+
+An error this package raises.  It says the rule of section 14 the
+caller broke where there is one, then the path of the object it is
+about where there is one, then what to do about it, which for a
+builder means which argument to change (`docs/api-conventions.md`
+section 6).
+"""
 struct MestraError <: Exception
     rule::Union{String,Nothing}
+    path::Union{String,Nothing}
     msg::String
 end
 
+MestraError(rule::Union{String,Nothing}, msg::AbstractString) =
+    MestraError(rule, nothing, String(msg))
+
 function Base.showerror(io::IO, e::MestraError)
     print(io, "mestra: ")
-    e.rule === nothing || print(io, e.rule, ": ")
+    if e.rule !== nothing
+        print(io, e.rule)
+        print(io, e.path === nothing ? ": " : " ")
+    end
+    e.path === nothing || print(io, e.path, ": ")
     print(io, e.msg)
 end
 
@@ -27,8 +43,10 @@ struct Finding
     message::String
 end
 
+# `<id> <path>: <message>`, which is the one line every language
+# prints (`docs/api-conventions.md` section 5).
 Base.show(io::IO, f::Finding) =
-    print(io, f.rule, "  ", f.path, ": ", f.message)
+    print(io, f.rule, " ", f.path, ": ", f.message)
 
 const KEY_ROLES = (:design, :condition, :time, :categorical, :group,
                    :split, :id, :status)
@@ -119,6 +137,52 @@ end
 
 is_callable_slot(s::Slot) = startswith(s.source, "callable:")
 callable_id(s::Slot) = is_callable_slot(s) ? s.source[10:end] : nothing
+
+# ------------------------------------------- reaching for the numbers
+#
+# Opening a file reads no array (section 29), so a key's `values` and
+# a slot's `data` are empty until something asks for them.  Reaching
+# for the empty field used to hand back `nothing` and the next index
+# raised a Julia error that never mentioned this package; it now says
+# what to call instead.  Inside the package the field itself is
+# `raw_values` and `raw_data`, which are allowed to be `nothing`.
+
+raw_values(k::KeyColumn) = getfield(k, :values)
+raw_data(s::Slot) = getfield(s, :data)
+
+"""
+    materialised(key | slot) -> Bool
+
+Whether the numbers are in memory already.  `Mestra.values` reads them
+when they are not, and `Mestra.materialise!(ds)` reads all of them.
+"""
+materialised(k::KeyColumn) = raw_values(k) !== nothing
+materialised(s::Slot) = raw_data(s) !== nothing
+
+function Base.getproperty(k::KeyColumn, name::Symbol)
+    if name === :values && getfield(k, :values) === nothing
+        n = getfield(k, :name)
+        throw(MestraError(nothing, getfield(k, :path),
+            "this key has not been read: ask for its values with " *
+            "`Mestra.values(ds, ds.keys[\"$(n)\"])`, or open the file " *
+            "with `Mestra.read(path; lazy = false)`"))
+    end
+    return getfield(k, name)
+end
+
+function Base.getproperty(s::Slot, name::Symbol)
+    if name === :data && getfield(s, :data) === nothing
+        n = getfield(s, :name)
+        throw(MestraError(nothing, getfield(s, :path),
+            is_callable_slot(s) ?
+            "this slot is served by callable `$(callable_id(s))` and " *
+            "holds no data: `Mestra.evaluate(ds, table)` produces it" :
+            "this slot has not been read: ask for its values with " *
+            "`Mestra.values(ds, ds[\"$(n)\"])`, or open the file with " *
+            "`Mestra.read(path; lazy = false)`"))
+    end
+    return getfield(s, name)
+end
 
 """The logical name of each axis in the Julia order."""
 julia_dims(s::Slot) = Tuple(reverse(s.ldims))

@@ -146,16 +146,16 @@ function write(ds::Dataset, path::AbstractString)
 end
 
 any_unread(ds::Dataset) =
-    any(s -> !is_callable_slot(s) && s.data === nothing, all_slots(ds)) ||
-    any(k -> k.values === nothing, Base.values(ds.keys))
+    any(s -> !is_callable_slot(s) && raw_data(s) === nothing, all_slots(ds)) ||
+    any(k -> raw_values(k) === nothing, Base.values(ds.keys))
 
 slot_data(ds::Dataset, s::Slot, src) =
-    s.data !== nothing ? s.data :
+    raw_data(s) !== nothing ? raw_data(s) :
     src === nothing ? throw(MestraError(nothing,
         "slot $(s.name) holds no data")) : HDF5.read(src[s.path])
 
 key_values(ds::Dataset, k::KeyColumn, src) =
-    k.values !== nothing ? k.values :
+    raw_values(k) !== nothing ? raw_values(k) :
     src === nothing ? throw(MestraError(nothing,
         "key $(k.name) holds no data")) : read_column(src[k.path])
 
