@@ -150,6 +150,35 @@ everything at once if you would rather have it all in memory, and
 `Mestra.read(path; lazy = false)` does that on opening.
 
 
+Strict by default, and what that refuses
+----------------------------------------
+
+`Mestra.read` refuses a file that breaks one of the structural rules
+of `docs/api-conventions.md` section 2 -- `Mestra.STRUCTURAL_RULES`,
+which is **E01, E16, E19, E25, E26, E29, E30, E40** and **E41** --
+with a `MestraError` naming the first it finds. Those rules are what a
+file is made of rather than what it means, so deciding them costs
+attributes, dataspaces, link types and dimension scales and not one
+array element: a strict read still opens a file that declares a
+trillion numbers it does not hold, and `Mestra.read(path;
+max_elements = 8)` opens a file whose smallest array has more.
+
+A semantic fault never stops a read. A missing unit, a split that
+leaks, a support id that does not match its cells: those are what a
+user opens a file to find out, and `Mestra.validate` and `Mestra.info`
+are how they find out.
+
+    Mestra.read(path; strict = false)
+
+opens a structurally broken file too, and lists what the reader would
+not follow or could not read in `ds.findings`. That is the call for a
+file you are inspecting rather than trusting, and it is the one the
+hostile corpus exercises.
+
+`Mestra.validate(path; structural = true)` is the same pass on its
+own, for when you want the findings rather than the refusal.
+
+
 Checking a file
 ---------------
 
@@ -252,10 +281,12 @@ because they never materialise the whole dataset, so a file may be
 readable one way and E41 the other. That is what section 29 says, and
 the corpus states which is which.
 
-Where the reader can carry on it does: `Mestra.read` returns the
-dataset and puts what it would not follow or could not read in
-`ds.findings`, each a `Finding` with its rule, its path and a
-sentence. `Mestra.validate` never throws on a file it can open, and
+Where the reader can carry on it does: `Mestra.read(path;
+strict = false)` returns the dataset and puts what it would not follow
+or could not read in `ds.findings`, each a `Finding` with its rule, its
+path and a sentence. A strict read, which is the default, refuses the
+same file instead, with the first of those rules it finds.
+`Mestra.validate` never throws on a file it can open, and
 answers one it cannot with E01. Opening a file that is not HDF5 at all
 raises a `MestraError` with rule E01.
 
@@ -535,6 +566,7 @@ The public API
 --------------
 
     Reading    read, values, rows, materialise!, materialised, info
+    Rules      STRUCTURAL_RULES, the ones a strict read refuses with
     Writing    write
     Checking   validate, report, structural_diff, structurally_equal
     Axes       DimArray, dimnames, permute, at

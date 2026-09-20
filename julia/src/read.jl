@@ -53,7 +53,7 @@ battr(a::Dict{String,RawAttr}, name) =
     haskey(a, name) ? (a[name].value === true) : nothing
 
 """
-    Mestra.read(path; lazy = true) -> Dataset
+    Mestra.read(path; lazy = true, strict = true) -> Dataset
 
 Open a `.mes` file.  With `lazy = true`, which is the default, this
 reads attributes and dataspaces only, so it reports the row count, the
@@ -63,11 +63,32 @@ array with `Mestra.values(ds, slot)`, or for a range of rows with
 `Mestra.rows(ds, slot, 1:10)`.
 
 With `lazy = false` every stored array is read at once.
+
+A strict read, which is the default, refuses a file that breaks one of
+the structural rules of `docs/api-conventions.md` section 2 --
+`Mestra.STRUCTURAL_RULES`, which is E01, E16, E19, E25, E26, E29, E30,
+E40 and E41 -- with a `MestraError` naming the first it finds.  Those
+are what a file is made of rather than what it means, so deciding them
+costs attributes, dataspaces, link types and dimension scales and not
+one array element: a strict read still opens a file that declares a
+trillion numbers it does not hold.
+
+A semantic fault never stops a read, strict or not: a missing unit, a
+bad split, a support id that does not match its cells are all things a
+user opens a file to find out, and `Mestra.validate` and `Mestra.info`
+are how they find out.  `strict = false` returns the dataset for a
+structurally broken file too, with what the reader would not follow or
+could not read listed in `ds.findings`.
 """
-function read(path::AbstractString; lazy::Bool = true,
+function read(path::AbstractString; lazy::Bool = true, strict::Bool = true,
               max_elements::Integer = DEFAULT_MAX_ELEMENTS)
     isfile(String(path)) || throw(MestraError("E01",
         "no file at $(path)"))
+    if strict
+        r = validate(String(path); max_elements = max_elements,
+                     structural = true)
+        isempty(r.findings) || refuse(first(r.findings), path)
+    end
     f = try
         HDF5.h5open(String(path), "r")
     catch e
@@ -81,6 +102,14 @@ function read(path::AbstractString; lazy::Bool = true,
         close(f)
     end
 end
+
+"""How a strict read refuses: the first structural rule it found, the
+object it was about, and what it says."""
+refuse(f::Finding, path) = throw(MestraError(f.rule, f.path,
+    f.message * ". $(basename(String(path))) breaks a rule of section " *
+    "14 that says what a file is made of; `Mestra.report(\"$(path)\")` " *
+    "says what else it breaks, and `Mestra.read(path; strict = false)` " *
+    "opens it anyway"))
 
 note!(ds::Dataset, rule, path, msg) =
     push!(ds.findings, Finding(rule, String(path), String(msg)))

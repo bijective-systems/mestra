@@ -70,11 +70,25 @@ end
 report(path::AbstractString; io::IO = stdout, kwargs...) =
     report(validate(path; kwargs...); io = io)
 
+"""The rules a strict read refuses a file with
+(`docs/api-conventions.md` section 2): what the file is made of,
+rather than what it means.  Every one of them is decidable from
+attributes, dataspaces, link types and dimension scales, which is why
+a strict read can refuse a file without reading an array."""
+const STRUCTURAL_RULES = ("E01", "E16", "E19", "E25", "E26", "E29", "E30",
+                          "E40", "E41")
+
+"""How many string records a structural pass will read to decide E26.
+It is a bounded look, not a pass over the file: a longer dataset is
+left to `validate`."""
+const STRUCTURAL_STRING_ELEMENTS = 4096
+
 mutable struct Validator
     f::HDF5.File
     idx::ScaleIndex
     findings::Vector{Finding}
     seen::Set{Tuple{String,String}}
+    structural::Bool
     nrows::Int
     supports::Vector{String}
     row_support::Vector{Int}
@@ -93,6 +107,7 @@ end
 first finding already said it."""
 function report!(v::Validator, rule, path, msg)
     key = (String(rule), String(path))
+    v.structural && !(key[1] in STRUCTURAL_RULES) && return v.findings
     key in v.seen && return v.findings
     push!(v.seen, key)
     return push!(v.findings, Finding(key[1], key[2], String(msg)))
@@ -106,6 +121,21 @@ function rows_tail(rows::Vector{Int}, n::Int = length(rows))
     n <= 3 && return "; $(n) row" * (n == 1 ? "" : "s") * ": " *
                      join(rows[1:min(n, end)], ", ")
     return "; $(n) rows, the first three: " * join(rows[1:3], ", ")
+end
+
+"""What a structural pass will read of a string dataset, which is its
+own bound and not the caller's: a strict read decides E26 on a look,
+not on a pass over the file."""
+look_limit(v::Validator) =
+    v.structural ? min(v.max_elements, STRUCTURAL_STRING_ELEMENTS) :
+    v.max_elements
+
+"""Whether a structural pass should leave a string dataset alone: it
+decides E26 on a bounded number of records, never on a whole file."""
+function too_long_to_look(v::Validator, d)
+    v.structural || return false
+    cdims, _ = disk_shape(d)
+    return prod(vcat(cdims, 1)) > STRUCTURAL_STRING_ELEMENTS
 end
 
 """Run one object's checks, and turn anything thrown into E41 against
@@ -178,13 +208,20 @@ const DTYPE_BY_ROLE = Dict{String,Vector{DataType}}(
     "label" => [Int32, Int64])
 
 """
-    validate(path) -> ValidationReport
+    validate(path; structural = false) -> ValidationReport
 
 Check a file against section 14.  The report names rules by identifier
 and nothing else, as the conformance corpus does.
+
+`structural = true` checks only what a file is made of -- the rules of
+`Mestra.STRUCTURAL_RULES` -- and reads no array to do it, which is the
+pass a strict `Mestra.read` refuses a file with.  Everything a value
+decides, from a support id to a non-finite number, is left to the full
+pass.
 """
 function validate(path::AbstractString;
-                  max_elements::Integer = DEFAULT_MAX_ELEMENTS)
+                  max_elements::Integer = DEFAULT_MAX_ELEMENTS,
+                  structural::Bool = false)
     if !isfile(String(path))
         return ValidationReport(["E01"], String[],
             [Finding("E01", String(path), "there is no file here")])
@@ -199,7 +236,7 @@ function validate(path::AbstractString;
     end
     try
         v = Validator(f, ScaleIndex(collect_scales(f)), Finding[],
-                      Set{Tuple{String,String}}(), 0,
+                      Set{Tuple{String,String}}(), structural, 0,
                       String[], Int[], true, Dict{String,Vector{String}}(),
                       Dict{String,String}(), Dict{String,Any}(),
                       Dict{String,String}(), nothing, false,
@@ -459,8 +496,9 @@ function collect_categories!(v::Validator)
                 "a category table is a dataset")
             continue
         end
+        too_long_to_look(v, d) && continue
         guard!(v, "/categories/$(name)") do
-        ti, recs = read_string_records(d; max_elements = v.max_elements)
+        ti, recs = read_string_records(d; max_elements = look_limit(v))
         if ti.class !== :string || ti.vlen
             report!(v, "E20", "/categories/$(name)",
                     "a category table must be a fixed-length UTF-8 string")
@@ -495,8 +533,11 @@ function collect_keys!(v::Validator)
                 (v.keyroles[name] = a["role"].value)
             haskey(a, "category") && a["category"].value isa AbstractString &&
                 (v.keycat[name] = a["category"].value)
-            v.keyvals[name] = vec(safe_read(d;
-                                            max_elements = v.max_elements))
+            # A structural pass decides nothing from a value, so it
+            # reads none (`docs/api-conventions.md` section 2).
+            v.structural ||
+                (v.keyvals[name] = vec(safe_read(d;
+                                       max_elements = v.max_elements)))
         end
     end
     return v
@@ -806,7 +847,7 @@ function check_scalars!(v::Validator)
             isempty(cdims) || cdims[1] == v.nrows ||
                 report!(v, "E16", path,
                     "$(cdims[1]) elements in a file of $(v.nrows) rows")
-            if ti.class === :float && ti.size == 8
+            if ti.class === :float && ti.size == 8 && !v.structural
                 guard!(v, path) do
                     x = vec(safe_read(obj; max_elements = v.max_elements))
                     report_nonfinite!(v, path, x, true)
@@ -881,8 +922,9 @@ function check_row_support!(v::Validator)
         ti = type_info(HDF5.datatype(d))
         (ti.class === :int && ti.signed && ti.size == 4) ||
             report!(v, "E20", "/row_support", "/row_support must be int32")
-        v.row_support = Int.(vec(safe_read(d;
-                                           max_elements = v.max_elements)))
+        v.structural ||
+            (v.row_support = Int.(vec(safe_read(d;
+                                      max_elements = v.max_elements))))
     end
     n = length(v.supports)
     for x in v.row_support
@@ -986,7 +1028,7 @@ function check_cells!(v::Validator, path, g, kind, n_nodes, n_cells)
         end
     end
     all(has) || return (UInt8[], Int64[], Int64[])
-    read3 = guard!(v, path) do
+    read3 = v.structural ? nothing : guard!(v, path) do
         (UInt8.(vec(safe_read(g["cell_types"];
                               max_elements = v.max_elements))),
          Int64.(vec(safe_read(g["cell_offsets"];
@@ -1068,6 +1110,7 @@ function check_coordinates!(v::Validator, path, g, kind, n_nodes)
     d isa HDF5.Dataset || return nothing
     # Section 24 hashes the stored bytes as they are, so that a file
     # whose axis coordinates wrongly vary breaks E35 and nothing else.
+    v.structural && return nothing
     return guard!(v, "$(path)/coordinates") do
         vec(safe_read(d; max_elements = v.max_elements))
     end
@@ -1165,7 +1208,7 @@ function check_label_categories!(v::Validator, spath, obj, a, role)
     end
     obj isa HDF5.Dataset || return v
     n = length(v.categories[table])
-    vals = guard!(v, spath) do
+    vals = v.structural ? nothing : guard!(v, spath) do
         vec(safe_read(obj; max_elements = v.max_elements))
     end
     vals === nothing && return v
@@ -1230,7 +1273,12 @@ function check_array_shape!(v::Validator, spath, d, a, role, loc, sname,
         cdims[axis] == want || report!(v, "E05", spath,
             "$(cdims[axis]) $(loc)s where the support declares $(want)")
     end
-    if lead == "row"
+    # In an unaligned file the count is how many rows reference this
+    # support, which only the values of /row_support say (section 22).
+    # A structural pass does not read them, so it leaves that half of
+    # E16 to the full pass and decides the aligned half, which is the
+    # row count in an attribute.
+    if lead == "row" && (v.aligned || !v.structural)
         want = v.aligned ? v.nrows : rows_on_support(v, sindex)
         cdims[1] == want || report!(v, "E16", spath,
             "a leading dimension of $(cdims[1]) where $(want) rows " *
@@ -1245,7 +1293,7 @@ function check_array_shape!(v::Validator, spath, d, a, role, loc, sname,
         end
     end
     if (role == "field" || role == "derived") && ti.class === :float &&
-       ti.size == 8
+       ti.size == 8 && !v.structural
         guard!(v, spath) do
             report_nonfinite!(v, spath,
                               safe_read(d; max_elements = v.max_elements),
@@ -1359,6 +1407,7 @@ function check_dict!(v::Validator, path, g, toplevel::Bool, depth::Int)
         ti = type_info(HDF5.datatype(obj))
         if ti.class === :string
             ti.vlen && report!(v, "E32", p, "a variable-length string")
+            v.structural && return
             _, recs = read_string_records(obj;
                                           max_elements = v.max_elements)
             for r in recs
@@ -1442,9 +1491,10 @@ function check_every_dataset!(v::Validator)
         end
         ti = type_info(HDF5.datatype(obj))
         if ti.class === :string && !ti.vlen &&
-           !startswith(path, "/categories/") && !startswith(path, "/callables/")
+           !startswith(path, "/categories/") &&
+           !startswith(path, "/callables/") && !too_long_to_look(v, obj)
             _, recs = read_string_records(obj;
-                                          max_elements = v.max_elements)
+                                          max_elements = look_limit(v))
             for r in recs
                 check_string_bytes(r) || report!(v, "E26", path,
                     "a string that is not UTF-8 or holds a NUL byte " *

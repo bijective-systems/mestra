@@ -177,7 +177,9 @@ end
     for name in case_names()
         e = expected(name)
         isempty(e.support_ids) && continue
-        ds = Mestra.read(case_file(name))
+        # the corpus carries files that break a structural rule on
+        # purpose, and probing one is a non-strict read
+        ds = Mestra.read(case_file(name); strict = false)
         for (sname, want) in e.support_ids
             i = Mestra.support_by_name(ds, String(sname))
             @test i !== nothing
@@ -191,7 +193,9 @@ end
     for name in case_names()
         e = expected(name)
         isempty(e.probes) && continue
-        ds = Mestra.read(case_file(name))
+        # the corpus carries files that break a structural rule on
+        # purpose, and probing one is a non-strict read
+        ds = Mestra.read(case_file(name); strict = false)
         for p in e.probes
             @test check_probe(ds, p)
             n += 1
@@ -206,7 +210,9 @@ end
     for name in case_names()
         e = expected(name)
         isempty(e.codec) && continue
-        ds = Mestra.read(case_file(name))
+        # the corpus carries files that break a structural rule on
+        # purpose, and probing one is a non-strict read
+        ds = Mestra.read(case_file(name); strict = false)
         for (id, want) in e.codec
             @test tagged_ok(ds.callables[String(id)].dict, want)
             n += 1
@@ -221,7 +227,9 @@ end
     for name in case_names()
         e = expected(name)
         isempty(e.evaluation) && continue
-        ds = Mestra.read(case_file(name))
+        # the corpus carries files that break a structural rule on
+        # purpose, and probing one is a non-strict read
+        ds = Mestra.read(case_file(name); strict = false)
         for ev in e.evaluation
             table = Dict{String,Vector{Float64}}(
                 String(k) => [parse_expected(String(x)) for x in v]
@@ -685,6 +693,47 @@ end
     @test isempty(Mestra.structural_diff(path, path))
 end
 
+@testset "a strict read refuses a broken file, and reads no array" begin
+    structural = Set(Mestra.STRUCTURAL_RULES)
+    refused = 0
+    for name in case_names()
+        want = intersect(Set(String.(expected(name).validator.errors)),
+                         structural)
+        e = refusal(() -> Mestra.read(case_file(name)))
+        if isempty(want)
+            # nothing structural to refuse it with, so it opens, whatever
+            # else it breaks: a missing unit or a leaking split is what a
+            # user opens a file to find out
+            @test e === nothing
+        else
+            @test e !== nothing && e.rule in want
+            refused += 1
+        end
+        # and a non-strict read opens every one of them
+        @test Mestra.read(case_file(name); strict = false) isa Mestra.Dataset
+    end
+    @test refused >= 6            # E01, E16, E19, E25, E26, E29, E30
+    # the refusal names the rule, the object and the way past it
+    e = refusal(() -> Mestra.read(case_file("err_e30")))
+    @test e.rule == "E30" && occursin("strict = false", e.msg)
+
+    # deciding those rules reads no array element: a strict read of a
+    # good file goes through with room for eight elements, which is
+    # fewer than any array in it
+    ds = Mestra.read(case_file("mesh_two_rows"); max_elements = 8)
+    @test ds.nrows == 2
+    @test !Mestra.materialised(ds["pressure"])
+    @test_throws Mestra.MestraError Mestra.values(ds, ds["pressure"])
+    # and the structural pass is the nine rules and no others
+    for name in case_names()
+        r = Mestra.validate(case_file(name); structural = true)
+        @test all(f -> f.rule in structural, r.findings)
+        @test issubset(Set(f.rule for f in r.findings),
+                       Set(vcat(String.(expected(name).validator.errors),
+                                String.(expected(name).validator.warnings))))
+    end
+end
+
 @testset "write validates before it writes (section 2)" begin
     ds, s = six_node_dataset()
     Mestra.add_node_array!(ds, s, "pressure", rand(2, 6); units = "Pa")
@@ -1124,13 +1173,17 @@ end
     @test "E36" in r.errors            # z_errors, after that
     @test "E39" in r.errors            # and a key after both
 
-    # a claim of a trillion elements costs nothing to refuse
+    # a claim of a trillion elements costs nothing to refuse.  The
+    # file also says it in a scalar of a length no row count matches,
+    # which is E16, so a strict read refuses it on the structure
+    # alone; this is about what it costs to carry on with it.
     huge = joinpath(hostile, "huge_declared.mes")
     Mestra.validate(huge)              # warm
     @test (@allocated Mestra.validate(huge)) < 64_000_000
-    Mestra.read(huge)
-    @test (@allocated Mestra.read(huge)) < 16_000_000
-    ds = Mestra.read(huge)
+    @test refusal(() -> Mestra.read(huge)).rule == "E16"
+    Mestra.read(huge; strict = false)
+    @test (@allocated Mestra.read(huge; strict = false)) < 16_000_000
+    ds = Mestra.read(huge; strict = false)
     # the whole slot is refused
     @test_throws Mestra.MestraError Mestra.values(ds, ds.scalars["huge"])
     e = try
@@ -1152,12 +1205,17 @@ end
         ds.scalars["huge_chunk"], 1:1)
     # an eager read reports rather than throws, so that one refused
     # slot does not lose the file
-    tight = Mestra.read(huge; lazy = false, max_elements = 10)
+    tight = Mestra.read(huge; lazy = false, max_elements = 10,
+                        strict = false)
     @test any(f -> f.rule == "E41", tight.findings)
     @test !Mestra.materialised(tight.scalars["huge"])
 
-    # a link this reader will not follow is reported, not followed
-    ds2 = Mestra.read(joinpath(hostile, "link_external.mes"))
+    # a link this reader will not follow is reported by a non-strict
+    # read and refused by a strict one; neither follows it
+    @test refusal(() -> Mestra.read(joinpath(hostile,
+              "link_external.mes"))).rule == "E40"
+    ds2 = Mestra.read(joinpath(hostile, "link_external.mes");
+                      strict = false)
     @test any(f -> f.rule == "E40", ds2.findings)
     @test !haskey(ds2.scalars, "elsewhere")
     @test !haskey(ds2.scalars, "neighbour")
