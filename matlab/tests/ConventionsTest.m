@@ -114,6 +114,49 @@ classdef ConventionsTest < matlab.unittest.TestCase
             testCase.verifyTrue(startsWith(err.message, 'E04: '));
         end
 
+        function anArrayTheWrongWayRoundIsRefusedAtBuildTime(testCase)
+        %anArrayTheWrongWayRoundIsRefusedAtBuildTime  Section 1: every
+        %   builder refuses at build time, with the rule id, what the
+        %   validator would refuse.  An array whose node count
+        %   disagrees with its support is E05, and the commonest way
+        %   to arrive at one is to hand over an array the wrong way
+        %   round; the message says so.
+            d = ConventionsTest.twoRows();
+            err = ConventionsTest.errorFrom(testCase, ...
+                @() d.addNodeArray('s0', 'p', ones(2, 5), 'field', 'Pa', ...
+                                   'Dims', {'row', 'node'}), 'mestra:E05');
+            testCase.verifyTrue(startsWith(err.message, 'E05: '));
+            testCase.verifySubstring(err.message, 'a support of 6');
+            testCase.verifySubstring(err.message, 'Dims');
+
+            % An array named the other way round is caught the same
+            % way, because its node axis then has the length of the
+            % row axis.
+            ConventionsTest.errorFrom(testCase, ...
+                @() d.addCellArray('s0', 'q', ones(2, 6), 'field', '1', ...
+                                   'Dims', {'row', 'cell'}), 'mestra:E05');
+        end
+
+        function aCategoryValueOutsideItsTableIsRefused(testCase)
+        %aCategoryValueOutsideItsTableIsRefused  E10, at build time,
+        %   for a key and for a label.
+            d = mestra.Dataset();
+            d.addCategoryTable('member', {'wing_a', 'wing_b'});
+            err = ConventionsTest.errorFrom(testCase, ...
+                @() d.addKey('member', int32([0 2]), 'group', ...
+                             'Category', 'member'), 'mestra:E10');
+            testCase.verifyTrue(startsWith(err.message, 'E10: '));
+            testCase.verifySubstring(err.message, 'ids 0 to 1');
+
+            e = ConventionsTest.twoRows();
+            e.addCategoryTable('faces', {'upper', 'lower'});
+            ConventionsTest.errorFrom(testCase, ...
+                @() e.addNodeArray('s0', 'f', int32([0 1 2 0 1 0]), ...
+                                   'label', 'Category', 'faces', ...
+                                   'Dims', {'component', 'node'}), ...
+                'mestra:E10');
+        end
+
         function boundsDefaultToTheObservedRange(testCase)
         %boundsDefaultToTheObservedRange  Section 1, and X1 of the
         %   ergonomics report: the same arrays written by any
@@ -185,6 +228,52 @@ classdef ConventionsTest < matlab.unittest.TestCase
             testCase.verifyEqual(slot.output, 'p');
             testCase.verifyEqual(slot.units, 'Pa');
             testCase.verifyEqual(slot.components, 1);
+        end
+
+        function aCallableFileCanBeBuiltFromArrays(testCase)
+        %aCallableFileCanBeBuiltFromArrays  End to end, on the worked
+        %   example of docs/example.md: build a file with no rows and
+        %   two callable slots, write it, and evaluate it to 1.45.
+        %
+        %   P8 of the ergonomics review is that no document said how
+        %   to write a callable file in any language.  This is that
+        %   file, built with addCallable and addCallableSlot.
+            A = mestra.Affine({'mach', 'alpha'}, struct( ...
+                'cl', struct('A', [2.0 0.1], 'b', 0.05, 'shape', []), ...
+                'pressure', struct( ...
+                    'A', [1 0; 2 0; 3 0.5; 4 0.5; 5 1; 6 1], ...
+                    'b', [0; 0.1; 0.2; 0.3; 0.4; 0.5], 'shape', [6 1])));
+
+            d = mestra.Dataset();
+            d.writer = 'mestra matlab tests';
+            d.created = '2026-09-19T00:00:00Z';
+            d.addKey('mach', [], 'condition', '1', ...
+                     'Lower', 0.1, 'Upper', 0.9);
+            d.addKey('alpha', [], 'condition', 'degree', ...
+                     'Lower', -2, 'Upper', 10);
+            d.addMeshSupport('s0', [0 1 2 0 1 2; 0 0 0 1 1 1], ...
+                             uint8([9 9]), int64([0 4 8]), ...
+                             int64([0 1 4 3 1 2 5 4]), 'm', ...
+                             'Dims', {'component', 'node'});
+            d.addCallable('m1', A);
+            d.addScalar('cl', [], '1', 'Callable', 'm1', 'Output', 'cl');
+            d.addCallableSlot('s0', 'pressure', 'field', 'Pa', ...
+                              'm1', 'pressure', 'Components', 1);
+
+            out = [tempname() '.mes'];
+            cleanup = onCleanup(@() ConventionsTest.removeIfPresent(out));
+            mestra.write(d, out);
+            r = mestra.validate(out);
+            testCase.verifyEmpty(r.errors, strjoin(r.errors, ','));
+
+            back = mestra.read(out);
+            t = table(0.5, 4.0, 'VariableNames', {'mach', 'alpha'});
+            e = mestra.evaluate(back, t);
+            testCase.verifyEqual(e.scalar('cl').values, 1.45, ...
+                                 'AbsTol', 1e-12);
+            p = e.nodeArray('s0', 'pressure');
+            q = mestra.permute(p.values, p.dims, {'row', 'node'});
+            testCase.verifyEqual(q(1, 3), 3.7, 'AbsTol', 1e-12);
         end
 
         % ------------------------------------- 2. writing
@@ -259,6 +348,48 @@ classdef ConventionsTest < matlab.unittest.TestCase
             r = mestra.validate(out);
             testCase.verifyEmpty(r.errors, strjoin(r.errors, ','));
             testCase.verifyEmpty(r.warnings, strjoin(r.warnings, ','));
+        end
+
+        function aStrictReadRefusesAStructuralFault(testCase)
+        %aStrictReadRefusesAStructuralFault  Section 2: a read is
+        %   strict by default and refuses a file that breaks a
+        %   structural rule, because half of such a file is worse
+        %   than none of it.
+            for probe = {{'err_e01', 'E01'}, {'err_e16', 'E16'}, ...
+                         {'err_e25', 'E25'}, {'err_e29', 'E29'}, ...
+                         {'err_e30', 'E30'}}
+                name = probe{1}{1};
+                rule = probe{1}{2};
+                file = fullfile(corpusRoot(), name, 'case.mes');
+                err = [];
+                try
+                    mestra.read(file);
+                catch err %#ok<CTCH>
+                end
+                testCase.verifyNotEmpty(err, ...
+                    sprintf('%s was read without a word', name));
+                testCase.verifyTrue(startsWith(err.identifier, 'mestra:E'), ...
+                                    err.identifier);
+                if ~strcmp(rule, 'E01')
+                    d = mestra.read(file, 'Strict', false);
+                    testCase.verifyTrue( ...
+                        any(startsWith(d.skipped, [rule ' '])), ...
+                        sprintf('%s: %s', name, strjoin(d.skipped, '; ')));
+                end
+            end
+        end
+
+        function aSemanticFaultNeverStopsARead(testCase)
+        %aSemanticFaultNeverStopsARead  Section 2: a missing unit or a
+        %   bad split is a finding about a file that still opens, so
+        %   that mestra.info works on the files a user most needs to
+        %   inspect.
+            for name = {'err_e02', 'err_e11', 'err_e39', 'warn_w01'}
+                file = fullfile(corpusRoot(), name{1}, 'case.mes');
+                d = mestra.read(file);
+                testCase.verifyClass(d, 'mestra.Dataset');
+                testCase.verifyNotEmpty(mestra.info(file, 'String', true));
+            end
         end
 
         % ------------------------------------- 5. validator output

@@ -170,6 +170,18 @@ disagrees with `Dims` is refused when you build the array, with the
 identifier of the rule the file would have broken, and not by the
 validator after the file is on disk.
 
+A builder refuses what it can see at the time you call it, always
+with the rule identifier: a role that is not a role (E02), a field, a
+scalar or a coordinates array with no units (E11, E39), a `Varies`
+that disagrees with `Dims` (E16 or E04), a callable slot that does not
+declare its width (E31) or does not name its callable (E14), an array
+whose node or cell count disagrees with its support (E05), a value
+outside the category table it names (E10), an axis support whose
+coordinates would vary (E35), a callable with no type (E15) and a unit
+of generalisation that is not a group key (E03). Everything else the
+validator knows is checked when you write, because that is where a
+file can be seen whole.
+
 
 Writing refuses to write a bad file
 -----------------------------------
@@ -503,6 +515,15 @@ What the reader refuses, and under which rule:
     fixed-length string wider than `maxStringSize` is E41 too;
   * a filter that is not gzip or shuffle, E29, which section 23 tells
     a reader to refuse;
+  * a slot whose `source` says data and which is stored as a group, or
+    whose `source` names a callable and which is stored as a dataset,
+    E30. Section 19 makes the two kinds of slot tell themselves apart
+    without reading any data, and a reader that takes one for the
+    other hands back an array that is not there;
+  * a leading extent that disagrees with the `row` dimension it is
+    attached to, E16. A dataset that says it holds three rows in a
+    file of two cannot be lined up against the keys, and handing it
+    back would be worse than refusing it;
   * an axis with no dimension scale, more than one, or one this
     reader cannot name, E25;
   * a string whose stored bytes are not valid UTF-8, E26;

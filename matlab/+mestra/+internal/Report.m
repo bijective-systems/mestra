@@ -95,40 +95,40 @@ classdef Report < handle
     methods (Static)
 
         function s = someRows(idx, total)
-        %someRows  How a per-row rule says how much and where.
+        %someRows  How much: "1 of 2 rows", "4 of 1800 rows".
         %
         %   W02, W03 and W04 could each fire once per row, and
         %   docs/api-conventions.md section 5 has them fire once with
         %   the count and the first three row indices instead, so that
-        %   a report on a file of 1,800 rows is still a report.  The
-        %   indices are the file's, counted from 0.
+        %   a report on a file of 1,800 rows is still a report.
+            n = numel(idx);
+            if nargin >= 2 && ~isempty(total)
+                s = sprintf('%d of %d rows', n, total);
+            else
+                s = sprintf('%d rows', n);
+            end
+        end
+
+        function s = whichRows(idx)
+        %whichRows  Where: the first three, and how many are left.
+        %   The indices are the file's, counted from 0, so that two
+        %   implementations name the same row by the same number.
             idx = reshape(double(idx), 1, []);
             n = numel(idx);
             if n == 0
-                s = '';
+                s = 'no row';
                 return
             end
             show = idx(1:min(3, n));
             bits = strjoin(arrayfun(@(v) sprintf('%d', v), show, ...
                                     'UniformOutput', false), ', ');
             if n == 1
-                where = sprintf('row %s', bits);
+                s = sprintf('row %s', bits);
             elseif n > 3
-                where = sprintf('rows %s and %d more', bits, n - 3);
+                s = sprintf('rows %s and %d more', bits, n - 3);
             else
-                where = sprintf('rows %s', bits);
+                s = sprintf('rows %s', bits);
             end
-            if nargin >= 2 && ~isempty(total)
-                s = sprintf('%d of %d %s', n, total, where);
-            else
-                s = sprintf('%d %s', n, where);
-            end
-        end
-
-        function s = countOf(idx, total, what)
-        %countOf  "2 of 6 rows (rows 1, 4)" for a per-row rule.
-            s = sprintf('%s: %s', what, ...
-                        mestra.internal.Report.someRows(idx, total));
         end
     end
 end

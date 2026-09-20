@@ -418,6 +418,7 @@ classdef Dataset < handle
                     mestra.Dataset.observedBounds(role, rec(1).values, ...
                                                   r.Lower, r.Upper);
             end
+            obj.checkCategories(rec(1).category, rec(1).values, path);
             obj.noteRows(numel(rec(1).values));
             obj.keys = mestra.Dataset.append(obj.keys, rec, name);
         end
@@ -931,6 +932,8 @@ classdef Dataset < handle
             sz = size(slot(1).values);
             sz = [sz ones(1, numel(wanted) - numel(sz))];
             slot(1).shape = fliplr(sz(1:numel(wanted)));
+            obj.checkExtent(slot(1), supportName, location, path, given);
+            obj.checkCategories(r.Category, slot(1).values, path);
             slot(1).dtype = r.Dtype;
             if isempty(slot(1).dtype)
                 slot(1).dtype = mestra.Dataset.dtypeForArrayRole(role, values);
@@ -942,6 +945,63 @@ classdef Dataset < handle
             if strcmp(varies, 'row')
                 obj.noteRows(size(slot(1).values, numel(wanted)));
             end
+        end
+
+        function checkCategories(obj, table, values, path)
+        %checkCategories  E10 at build time: a value outside the table
+        %   it names.  The table has to be there already, which is the
+        %   order the documents show; one added later is checked by
+        %   the validator when the file is written.
+            if isempty(table) || isempty(values) || ~isnumeric(values)
+                return
+            end
+            i = find(strcmp({obj.categories.name}, table), 1);
+            if isempty(i), return, end
+            n = numel(obj.categories(i).entries);
+            v = double(values(:)');
+            bad = v(v < 0 | v > n - 1 | v ~= floor(v));
+            if isempty(bad), return, end
+            error('mestra:E10', ...
+                  ['E10: %s: the value %g is outside the category table ' ...
+                   '"%s", whose %d entries are ids 0 to %d; add the ' ...
+                   'entry or correct the values'], path, bad(1), table, ...
+                  n, n - 1);
+        end
+
+        function checkExtent(obj, slot, supportName, location, path, given)
+        %checkExtent  E05 at build time: an array whose node or cell
+        %   count disagrees with its support.
+        %
+        %   This is the commonest way to hand over an array the wrong
+        %   way round, and the message says so rather than leaving it
+        %   to the validator after the file is on disk.  The model is
+        %   Python's E04 message: state the reading, state what the
+        %   support is, and say which argument settles it.
+            i = find(strcmp({obj.supports.name}, supportName), 1);
+            if isempty(i), return, end
+            s = obj.supports(i);
+            if strcmp(location, 'cell')
+                want = s.nCells;
+            else
+                want = s.nNodes;
+            end
+            if want == 0, return, end
+            axis = find(strcmp(slot.dims, location), 1);
+            if isempty(axis), return, end
+            got = size(slot.values, axis);
+            if got == want, return, end
+            if isempty(given)
+                advice = ['name the axes of the array you passed with ' ...
+                          'Dims'];
+            else
+                advice = sprintf(['Dims says the axes are {%s}; check ' ...
+                                  'that against the array'], ...
+                                 strjoin(given, ', '));
+            end
+            error('mestra:E05', ...
+                  ['E05: %s: an array of shape %s reads as %d %s(s) on ' ...
+                   'a support of %d; %s'], path, ...
+                  mat2str(size(slot.values)), got, location, want, advice);
         end
 
         function out = sliceInMemory(obj, slotPath, first, count)

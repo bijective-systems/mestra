@@ -129,11 +129,6 @@ classdef Args
             if isempty(s), s = ''; end
         end
 
-        function tf = isValues(a)
-        %isValues  True for something that could be a column of data.
-            tf = isnumeric(a) || islogical(a) || iscell(a) || isstring(a);
-        end
-
         function names = parameterNames(p)
         %parameterNames  The parameter names an inputParser accepts.
             names = p.Parameters;
