@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 64"
+     width="220" height="64" role="img" aria-labelledby="mestra-wordmark"
+     fill="currentColor">
+  <title id="mestra-wordmark">mestra</title>
+  <text x="6" y="46" textLength="208" lengthAdjust="spacingAndGlyphs"
+        font-family="'Helvetica Neue', Helvetica, Arial,
+                     'Liberation Sans', 'DejaVu Sans', sans-serif"
+        font-size="48" font-weight="500" letter-spacing="-0.5"
+        fill="currentColor">mestra</text>
+</svg>
