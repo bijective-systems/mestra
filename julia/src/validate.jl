@@ -1055,12 +1055,15 @@ function check_supports!(v::Validator)
         for n in vchildren!(v, g, path)
             obj = hard_child(g, n)
             obj === nothing && continue
+            # W11 is "an attribute or a group this reader does not
+            # know", and section 28 makes an attribute and a group the
+            # two things a later version may add.  A dataset is
+            # neither, so an unknown one draws no warning here; what
+            # the byte-level rules say about it, they say through
+            # `check_every_dataset!` and through nothing else.
             if obj isa HDF5.Group
                 n in ("node_arrays", "cell_arrays") || report!(v, "W11",
                     "$(path)/$(n)", "a group this reader does not know")
-            elseif !is_scale(obj)
-                n in SUPPORT_DATASETS || report!(v, "W11", "$(path)/$(n)",
-                    "a dataset this reader does not know")
             end
         end
         end
@@ -1606,12 +1609,12 @@ function check_unknown!(v::Validator)
     for name in vchildren!(v, v.f, "")
         obj = hard_child(v.f, name)
         obj === nothing && continue
+        # Section 28 adds attributes and groups, never datasets, so
+        # W11 is about those two and an unknown root dataset draws no
+        # warning of its own.
         if obj isa HDF5.Group
             name in ROOT_GROUPS || report!(v, "W11", "/$(name)",
                 "a root group this reader does not know")
-        elseif !is_scale(obj)
-            name == "row_support" || report!(v, "W11", "/$(name)",
-                "a root dataset this reader does not know")
         end
     end
     return v
