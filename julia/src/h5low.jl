@@ -735,19 +735,32 @@ end
 HDF5.jl wraps H5DSget_num_scales, H5DSis_attached, H5DSis_scale,
 H5DSset_scale and H5DSattach_scale, but not H5DSiterate_scales, so the
 attached scale is found by testing the file's scales with
-H5DSis_attached rather than by iterating.  Nothing here needs a ccall.
+H5DSis_attached rather than by iterating.
+
+Section 21, decision 51: the candidates come from `collect_scales`,
+which is this package's own bounded walk of the file, and every name
+was read from a link during a walk that stopped at MAX_DEPTH.  Nothing
+here asks the library for the path of a scale object, because that
+search walks the group hierarchy and runs off the stack on a deeply
+nested file, taking the process with it.
 """
-function attached_scale_name(d::HDF5.Dataset, axis::Integer,
-                             candidates::Vector{Pair{String,HDF5.Dataset}})
+function attached_scale(d::HDF5.Dataset, axis::Integer,
+                        candidates::Vector{Pair{String,HDF5.Dataset}})
     for (name, s) in candidates
         attached = try
             HDF5.API.h5ds_is_attached(d, s, axis)
         catch
             false
         end
-        attached && return name
+        attached && return (name, s)
     end
     return nothing
+end
+
+function attached_scale_name(d::HDF5.Dataset, axis::Integer,
+                             candidates::Vector{Pair{String,HDF5.Dataset}})
+    got = attached_scale(d, axis, candidates)
+    return got === nothing ? nothing : got[1]
 end
 
 """Every dimension scale in the file, as link name => dataset, nearest

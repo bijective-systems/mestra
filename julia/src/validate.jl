@@ -477,6 +477,9 @@ function check_keys!(v::Validator)
         d === nothing && continue
         if !(d isa HDF5.Dataset)
             report!(v, "E30", path, "a key must be a dataset")
+            report!(v, "E41", path,
+                    "this is a group, so there is no key column here to " *
+                    "read at all")
             continue
         end
         guard!(v, path) do
@@ -496,6 +499,12 @@ function check_keys!(v::Validator)
             report!(v, "E02", path, "`$(role)` is not a role of section 3")
             return
         end
+        kdims, _ = disk_shape(d)
+        length(kdims) == 1 || report!(v, "E16", path,
+            "a dataset under /keys has exactly one dimension, `row`, " *
+            "and this one has $(length(kdims))")
+        length(kdims) == 1 && kdims[1] != v.nrows && report!(v, "E16", path,
+            "$(kdims[1]) values in a file of $(v.nrows) rows")
         ti = type_info(HDF5.datatype(d))
         check_key_dtype!(v, path, role, ti)
         if role in ("design", "condition", "time")
@@ -605,6 +614,10 @@ function check_key_bounds!(v::Validator, path, name, a)
     end
     observed = maximum(nums) - minimum(nums)
     declared = hi - lo
+    # Section 14: the rule does not apply when the observed width is
+    # zero, which covers a file with no rows, a key with one distinct
+    # value, and a key with no finite value at all.
+    observed == 0 && return v
     if declared > 4 * observed
         report!(v, "W08", path,
                 "declared bounds are wider than the observed range by " *
@@ -709,8 +722,9 @@ function check_scalars!(v::Validator)
             (ti.class === :float && ti.size == 8) || report!(v, "E20", path,
                 "a scalar must be float64")
             cdims, _ = disk_shape(obj)
-            length(cdims) == 1 || report!(v, "E04", path,
-                "a scalar has exactly one dimension, `row`")
+            length(cdims) == 1 || report!(v, "E16", path,
+                "a dataset under /scalars has exactly one dimension, " *
+                "`row`, and this one has $(length(cdims))")
             isempty(cdims) || cdims[1] == v.nrows ||
                 report!(v, "E16", path,
                     "$(cdims[1]) elements in a file of $(v.nrows) rows")
@@ -818,9 +832,13 @@ function check_supports!(v::Validator)
     sg === nothing && return v
     for name in vchildren!(v, sg, "/supports")
         obj = hard_child(sg, name)
-        obj isa HDF5.Group || (obj === nothing ||
+        if obj !== nothing && !(obj isa HDF5.Group)
             report!(v, "E30", "/supports/$(name)",
-                    "a support is a group, not a dataset"))
+                    "a support is a group, not a dataset")
+            report!(v, "E41", "/supports/$(name)",
+                    "this is a dataset, so there is no support here to " *
+                    "read at all")
+        end
     end
     for (i, name) in pairs(v.supports)
         g = hard_child(sg, name)
@@ -883,8 +901,12 @@ function check_cells!(v::Validator, path, g, kind, n_nodes, n_cells)
             "a mesh support needs cell_types, cell_offsets and " *
             "cell_connectivity")
     else
-        any(has) && report!(v, "E38", path,
-            "an `$(kind)` support carries a cell dataset")
+        cellscale = hard_child(g, "cell")
+        if any(has) || cellscale isa HDF5.Dataset
+            report!(v, "E38", path,
+                    "an `$(kind)` support carries a cell dataset or a " *
+                    "`cell` dimension")
+        end
     end
     all(has) || return (UInt8[], Int64[], Int64[])
     read3 = guard!(v, path) do
@@ -1032,6 +1054,7 @@ function check_support_arrays!(v::Validator, path, g, sname, sindex, kind,
            !(haskey(a, "derived_from") && haskey(a, "recipe"))
             report!(v, "E13", spath,
                     "a derived array needs `derived_from` and `recipe`")
+            v.missing_public = true
         end
         if role in ("weight", "normal") && !haskey(a, "recomputed")
             report!(v, "W06", spath,
@@ -1089,6 +1112,12 @@ function check_array_shape!(v::Validator, spath, d, a, role, loc, sname,
     end
     varies = haskey(a, "varies") && a["varies"].value isa AbstractString ?
              a["varies"].value : nothing
+    if varies !== nothing && startswith(varies, "group:")
+        k = varies[7:end]
+        get(v.keyroles, k, nothing) == "group" || report!(v, "E04", spath,
+            "`varies = $(varies)` names a group key the file does not " *
+            "declare")
+    end
     lead = isempty(names) ? nothing : names[1]
     if varies !== nothing && lead !== nothing
         want = varies == "none" ? nothing :
@@ -1110,9 +1139,12 @@ function check_array_shape!(v::Validator, spath, d, a, role, loc, sname,
     # the component dimension is always last (section 19)
     comp = isempty(cdims) ? 0 : cdims[end]
     if haskey(a, "components") && a["components"].value isa Integer
-        Int(a["components"].value) == comp || report!(v, "E31", spath,
-            "`components` is $(a["components"].value) over a component " *
-            "dimension of $(comp)")
+        if Int(a["components"].value) != comp
+            report!(v, "E31", spath,
+                    "`components` is $(a["components"].value) over a " *
+                    "component dimension of $(comp)")
+            v.missing_public = true
+        end
     end
     # the node or cell extent, found by the dimension's name
     axis = findfirst(n -> n == (loc === :cell ? "cell" : "node"), names)
@@ -1135,7 +1167,8 @@ function check_array_shape!(v::Validator, spath, d, a, role, loc, sname,
                 "$(cdims[1]) instances over a group key of $(n) categories")
         end
     end
-    if role == "field" && ti.class === :float && ti.size == 8
+    if (role == "field" || role == "derived") && ti.class === :float &&
+       ti.size == 8
         guard!(v, spath) do
             any(x -> !isfinite(x),
                 safe_read(d; max_elements = v.max_elements)) &&
@@ -1280,6 +1313,18 @@ function check_every_dataset!(v::Validator)
                 report!(v, "E25", path,
                         "axis $(axis - 1) carries a scale called `$(n)`, " *
                         "which section 21 does not name")
+            elseif n !== nothing
+                # Section 21 gives a scale both CLASS and NAME.  One
+                # with only CLASS is half a scale, and the axis it is
+                # attached to does not carry the thing the rule asks
+                # for.
+                got = attached_scale(obj, axis - 1, v.idx.all)
+                if got !== nothing && !haskey(HDF5.attributes(got[2]), "NAME")
+                    report!(v, "E25", path,
+                            "axis $(axis - 1) carries a scale `$(n)` with " *
+                            "CLASS and no NAME, which is half of what " *
+                            "makes a dimension scale (section 21)")
+                end
             end
         end
         if !isempty(names) && names[1] == "row"
