@@ -971,6 +971,35 @@ end
     end
 end
 
+@testset "4200 row-dimensioned datasets cost seconds, not minutes" begin
+    # `wide_keys` is the case that would not exist without decision
+    # 52: 100 keys and 4100 scalars on one `row` scale, past the 4085
+    # attachments a scale carried before it.  What is asserted here is
+    # that the open, the validate and one lazy row range are all
+    # linear-ish in the dataset count rather than quadratic in it, so
+    # the bound is generous: it is there to catch a reader that went
+    # back to asking the library which scale is attached, which cost
+    # 516 s at four thousand datasets (docs/scale/report.md 2.3).
+    src = case_file("wide_keys")
+    @test isfile(src)   # generated on demand; see vectors/README.md
+    open_s = @elapsed ds = Mestra.read(src)
+    @test ds.nrows == 2
+    @test length(ds.keys) == 100
+    @test length(ds.scalars) == 4100
+    validate_s = @elapsed r = Mestra.validate(src)
+    @test r.errors == String[]
+    @test r.warnings == String[]
+    range_s = @elapsed v = Mestra.rows(ds, ds.scalars["s2100"], 2:2)
+    @test size(v) == (1,)
+    @test v[1] == 4200.25
+    @info "wide_keys" open_s validate_s range_s
+    @test open_s < 30
+    @test validate_s < 60
+    @test range_s < 10
+    # and the metadata open reads no array, whatever the file's width
+    @test !Mestra.materialised(ds.scalars["s2100"])
+end
+
 @testset "an evaluated file carries no /callables (conventions 7)" begin
     # Evaluating turns every callable slot into a stored slot, so the
     # result has no callable to keep: the group is absent, not present

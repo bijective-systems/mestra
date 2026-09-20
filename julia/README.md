@@ -217,9 +217,10 @@ value, W04 on a key outside its bounds -- fires once, and the message
 carries how many rows it is about and the first three of them. Row
 indices in a finding count from zero, as the file's own rows do.
 
-The rules are E01 to E41 and W01 to W15. E07 and W09 are retired and
-are never emitted. Four of them are easy to confuse with each other,
-so, as section 14 now settles them:
+The rules are E01 to E43 and W01 to W15. E07 and W09 are retired and
+are never emitted. Six of them are easy to confuse with each other or
+are about something no other rule looks at, so, as section 14 settles
+them:
 
   - **E11** is units absent from a field or a scalar. Units on a key,
     on coordinates and on a derived array are **E39**, and `weight`
@@ -236,7 +237,28 @@ so, as section 14 now settles them:
     with `CLASS` and no `NAME` is;
   - **E18** is reported beside the rule that found a missing public
     attribute, in a file that also carries `/private`. Nothing here
-    interprets `/private`, which section 29 forbids.
+    interprets `/private`, which section 29 forbids;
+  - **E42** is the one rule in this format decided by a property list
+    rather than by a byte position: a dimension scale created without
+    attribute creation order tracked and indexed. That property is
+    what gives the scale a version 2 object header, and so what lets
+    its `REFERENCE_LIST` live in the file's heap instead of in an
+    object header message, where an attribute may not exceed 64 KiB.
+    Without it a scale takes 4085 attachments and the 4086th fails
+    *after* deleting the `REFERENCE_LIST` it was extending, leaving a
+    file every other rule here accepts. Section 14 words the rule as
+    the creation order and nothing else, so object time tracking,
+    which section 21 also requires of a writer, draws no finding;
+  - **E43** is an unlimited dimension other than `row`, file-level or
+    support-local, on the scale itself or on an axis attached to it.
+    The one exception is the zero-length axis of a dataset inside a
+    callable's dictionary, which section 25 requires to be unlimited
+    because HDF5 has no other legal way to write it.
+
+Neither E42 nor E43 is a rule a strict `Mestra.read` refuses a file
+with: `Mestra.STRUCTURAL_RULES` is unchanged, and a file that breaks
+one still opens. `Mestra.write` refuses to leave one behind, because
+every write validates what it wrote.
 
 **E40** and **E41** are the two that a well-formed file never needs;
 the next section is what they are for.
@@ -447,7 +469,35 @@ records when it was written is not byte reproducible. The layout also
 costs every other implementation: the Phase 3 report measured a C++
 validator taking 4.98 s on a thousand-key file in the newer layout
 against 0.68 s in this one. Files this package writes have the same
-object header version as the corpus's golden files, which is 1.
+object header version as the corpus's golden files, object for object.
+
+One object in every file is the exception, and section 21 makes it:
+each dimension scale is created with attribute creation order tracked
+and indexed, and with object times off, on its own dataset creation
+property list. That is the only property list in this format that is
+not the library's default, and it is the only place a `.mes` file
+carries a version 2 object header. It is not decoration. A scale
+created with the defaults keeps its `REFERENCE_LIST` in an object
+header message, an attribute there may not exceed 64 KiB, the list
+grows sixteen bytes per attachment, and the 4086th `H5DSattach_scale`
+fails *after* deleting the list it was extending. Every key, every
+scalar, every row-varying array and `/row_support` attaches to the one
+`row` scale, so that is a ceiling on the file at 4085 row-dimensioned
+datasets, and what a failed write leaves on disk is a file every
+reader and every validator accepts. The second call is not optional
+either: a version 2 object header records four timestamps unless it is
+told not to. `vectors/cases/wide_keys` is the corpus case that could
+not be written without the rule -- 4200 row-dimensioned datasets on
+one scale -- and `vectors/cases/err_e42` is the one that breaks it on
+purpose.
+
+A group this format does not own -- `/notes`, `/private`, or a group a
+later version adds -- is copied out again exactly as it came in:
+dtypes as they were stored, float32 included, with their filters,
+their chunking, and any dimension scale of the producer's own still
+attached to the axes that used it. Section 29 forbids interpreting
+`/private`, and a round trip that quietly widened a dtype or dropped
+an attachment would be interpreting it.
 
 
 Callables, and evaluating a file
@@ -623,8 +673,33 @@ Running the tests
     julia --project=julia -e 'using Pkg; Pkg.test()'
 
 The suite runs the whole conformance corpus: the validator's outcome
-for all 70 cases against expected.json, every probe, every support id,
+for all 75 cases against expected.json, every probe, every support id,
 every codec round trip, every worked evaluation, and a read, write and
 compare of every case that must validate cleanly. It also opens two
 written files with NCDatasets to check that they are netCDF-4 files
 with the dimension names the specification asks for.
+
+Three of the corpus's files are generated on demand rather than
+committed, because of their size, and `vectors/README.md` says so.
+Write them once, before the suite runs and never while it is running:
+
+    python vectors/generate.py --wide --hostile-deep
+
+`cases/wide_keys` is the 4200-dataset file of the paragraph on scale
+creation properties, and the suite times an open, a validate and one
+lazy row range on it against a generous bound; the two deep hostile
+files are thirty thousand nested groups each. Without them those tests
+fail on a missing file rather than silently passing.
+
+One fixture of this package's own sits beside the suite:
+`julia/test/scales/lost_reference_list.mes`, written by
+`julia/test/scales/make_scales.py` and committed. It is the corpus's
+`mesh_two_rows` with one scale's `REFERENCE_LIST` deleted and
+another's truncated, which is what a failed attachment leaves behind.
+Section 21 calls that attribute informational, so the file is valid
+and every axis of it must still be named: this package resolves an
+axis through the dataset's own `DIMENSION_LIST` and the map of scale
+addresses it builds during its own walk, and never through
+`REFERENCE_LIST` or `H5DSis_attached`, which reads one. A reader that
+does it the other way calls those axes `unknown`, which is what
+`docs/scale/report.md` 6.5 measured this one doing.
