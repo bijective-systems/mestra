@@ -116,7 +116,37 @@ def row_strings(group, name, values, scale_, n_rows):
 
 
 def scale(group, name, length, unlimited=False):
-    """A dimension scale, written as netCDF-C writes one (21)."""
+    """A dimension scale, written as netCDF-C writes one (21).
+
+    The creation property list is the point of this function. A scale
+    is created with attribute creation order tracked and indexed,
+    which gives it a version 2 object header, which is what lets its
+    REFERENCE_LIST live in the file's heap. Without it a scale takes
+    at most 4085 attachments: REFERENCE_LIST grows sixteen bytes each
+    time and an object header message may not exceed 64 KiB. Object
+    time tracking has to be turned off in the same list, because a
+    version 2 object header records four timestamps unless it is told
+    not to, and a file that records when it was written is not byte
+    reproducible. No other object's property list is touched.
+    """
+    dcpl = h5py.h5p.create(h5py.h5p.DATASET_CREATE)
+    dcpl.set_attr_creation_order(h5py.h5p.CRT_ORDER_TRACKED |
+                                 h5py.h5p.CRT_ORDER_INDEXED)
+    dcpl.set_obj_track_times(False)
+    dcpl.set_chunk((1,) if unlimited else (max(1, length),))
+    space = h5py.h5s.create_simple(
+        (length,), (h5py.h5s.UNLIMITED,) if unlimited else (length,))
+    tid = h5py.h5t.py_create(np.dtype(">f4"), logical=True)
+    d = h5py.Dataset(h5py.h5d.create(group.id, name.encode("utf-8"),
+                                     tid, space, dcpl=dcpl))
+    d.make_scale("%s%10d" % (DIM_NAME, length))
+    return d
+
+
+def scale_plain(group, name, length, unlimited=False):
+    """A dimension scale created with the library's default property
+    list, which is what every writer did before the rule of section
+    21. Only the E42 case wants one."""
     d = group.create_dataset(
         name, shape=(length,), dtype=">f4",
         maxshape=(None,) if unlimited else (length,),
@@ -376,13 +406,20 @@ def mesh_base(f, o):
     if g("unknown_root_attr", False):
         sattr(f, "comment", "an attribute no version 0 reader knows")
 
-    row = scale(f, "row", n_rows, unlimited=True)
-    component_1 = scale(f, "component_1", 1)
-    component_2 = scale(f, "component_2", 2)
+    plain = g("plain_scales", ())
+    endless = g("unlimited_scales", ())
+
+    def sc(name, length, unlimited=False):
+        maker = scale_plain if name in plain else scale
+        return maker(f, name, length, unlimited or name in endless)
+
+    row = sc("row", n_rows, unlimited=True)
+    component_1 = sc("component_1", 1)
+    component_2 = sc("component_2", 2)
     member_cats = g("member_cats", ["wing_a", "wing_b"])
-    group_member = scale(f, "group_member", g("n_group", 2))
-    category_member = scale(f, "category_member", len(member_cats))
-    category_region = scale(f, "category_region", 2)
+    group_member = sc("group_member", g("n_group", 2))
+    category_member = sc("category_member", len(member_cats))
+    category_region = sc("category_region", 2)
     extra_scales = {}
     for name, length in g("extra_scales", []):
         extra_scales[name] = scale(f, name, length)
@@ -430,7 +467,9 @@ def mesh_base(f, o):
         cl_values = g("cl_values", [0.25, 0.55])
         cl = dataset(scalars, "cl", cl_values, "<f8", [row],
                      n_rows=n_rows,
-                     contiguous=g("cl_contiguous", False))
+                     contiguous=g("cl_contiguous", False),
+                     gzip=g("cl_gzip", None),
+                     shuffle=g("cl_shuffle", False))
         if g("cl_units_vlen", False):
             vattr(cl, "units", "1")
         elif g("cl_units", "1") is not None:
@@ -462,7 +501,9 @@ def mesh_base(f, o):
                      None if g("pressure_no_component_scale", False)
                      else component_1],
                     n_rows=n_rows, chunks=g("pressure_chunks", None),
-                    fletcher32=g("pressure_fletcher32", False))
+                    fletcher32=g("pressure_fletcher32", False),
+                    gzip=g("pressure_gzip", None),
+                    shuffle=g("pressure_shuffle", False))
     sattr(p, "role", g("pressure_role", "field"))
     sattr(p, "varies", g("pressure_varies", "row"))
     if g("pressure_units", "Pa") is not None:
@@ -1920,6 +1961,123 @@ def case_two_supports_row_varying(f):
         ])
 
 
+def case_notes_and_private(f):
+    """Finding 20: no valid case carried /notes or /private."""
+    n_rows = 2
+    mach = np.array([0.40, 0.80])
+    cl = np.array([0.25, 0.55])
+
+    sattr(f, "created", CREATED)
+    sattr(f, "format", "mestra/0")
+    sattr(f, "writer", WRITER)
+    battr(f, "aligned", True)
+
+    row = scale(f, "row", n_rows, unlimited=True)
+
+    keys = f.create_group("keys")
+    k = dataset(keys, "mach", mach, "<f8", [row], n_rows=n_rows)
+    sattr(k, "role", "condition")
+    sattr(k, "units", "1")
+
+    scalars = f.create_group("scalars")
+    sc = dataset(scalars, "cl", cl, "<f8", [row], n_rows=n_rows)
+    sattr(sc, "units", "1")
+    sattr(sc, "source", "data")
+
+    # /notes is free-form, and its attributes still obey section 18.
+    notes = f.create_group("notes")
+    sattr(notes, "solver", "an open solver, version 3")
+    sattr(notes, "licence", "CC-BY-4.0")
+    iattr(notes, "iterations", 480)
+    fattr(notes, "residual", 1e-9)
+    battr(notes, "converged", True)
+
+    # /private is opaque. The byte-level rules of sections 18 to 25
+    # are not checked inside it (section 14), so it deliberately
+    # holds things that would be errors in the public part: a float32
+    # dataset, a dimension scale of its own, and a nested group.
+    private = f.create_group("private")
+    pscale = scale(private, "sample", 4)
+    pd = private.create_dataset("residuals", data=np.float32(
+        [1.0, 0.5, 0.25, 0.125]), dtype="<f4", track_times=False)
+    pd.dims[0].attach_scale(pscale)
+    history = private.create_group("history")
+    sattr(history, "note", "whatever the producer keeps here")
+
+    return expect(
+        "A valid file carrying both optional groups: /notes with "
+        "free-form attributes, and /private holding a float32 "
+        "dataset, a dimension scale of its own and a nested group, "
+        "none of which the byte-level rules reach.",
+        probes=[probe("/scalars/cl", cl, row=1),
+                probe("/keys/mach", mach, row=0)])
+
+
+WIDE_KEYS = 100
+WIDE_SCALARS = 4100
+
+
+def wide_key(i):
+    return np.array([1.0 * i, 1.0 * i + 0.5])
+
+
+def wide_scalar(j):
+    return np.array([2.0 * j, 2.0 * j + 0.25])
+
+
+def case_wide_keys(f):
+    """4200 row-dimensioned datasets, which is past the 4085
+    attachments one dimension scale could carry before the creation
+    property rule of section 21.
+
+    Like the two deep hostile files this one is generated on demand
+    and not committed: it is about seventeen megabytes of object
+    headers. Its expected.json is committed, so an implementation
+    knows it exists and knows to generate it first."""
+    n_rows = 2
+    if f is None:
+        return wide_expectation()
+    sattr(f, "created", CREATED)
+    sattr(f, "format", "mestra/0")
+    sattr(f, "writer", WRITER)
+    battr(f, "aligned", True)
+
+    row = scale(f, "row", n_rows, unlimited=True)
+
+    keys = f.create_group("keys")
+    for i in range(WIDE_KEYS):
+        k = dataset(keys, "k%04d" % i, wide_key(i), "<f8", [row],
+                    n_rows=n_rows)
+        sattr(k, "role", "design")
+        sattr(k, "units", "1")
+
+    scalars = f.create_group("scalars")
+    for j in range(WIDE_SCALARS):
+        sc = dataset(scalars, "s%04d" % j, wide_scalar(j), "<f8",
+                     [row], n_rows=n_rows)
+        sattr(sc, "units", "1")
+        sattr(sc, "source", "data")
+
+    return wide_expectation()
+
+
+def wide_expectation():
+    return expect(
+        "Two rows and %d row-dimensioned datasets, %d keys and %d "
+        "scalars, all attached to one `row` scale. Before the "
+        "creation property rule of section 21 the 4086th attachment "
+        "failed, so this file could not be written at all. It is "
+        "generated on demand and not committed."
+        % (WIDE_KEYS + WIDE_SCALARS, WIDE_KEYS, WIDE_SCALARS),
+        probes=[
+            probe("/keys/k0000", wide_key(0), row=0),
+            probe("/keys/k0099", wide_key(99), row=1),
+            probe("/scalars/s0000", wide_scalar(0), row=0),
+            probe("/scalars/s2100", wide_scalar(2100), row=1),
+            probe("/scalars/s4099", wide_scalar(4099), row=1),
+        ])
+
+
 # --------------------------------------- one file per rule identifier
 
 PRESSURE_3 = pressures(3)
@@ -1967,6 +2125,21 @@ CASES = {
     "derived_displacement": case_derived_displacement,
     "support_kind_none": case_support_kind_none,
     "two_supports_row_varying": case_two_supports_row_varying,
+    "notes_and_private": case_notes_and_private,
+    "wide_keys": case_wide_keys,
+    "compressed_field": mk(
+        mesh_base, {"pressure_gzip": 4, "pressure_shuffle": True,
+                    "cl_gzip": 4},
+        "A field compressed with shuffle and gzip at level 4, and a "
+        "scalar with gzip alone. Section 23 allows both, and a "
+        "writer that drops a filter on a round trip fails the "
+        "structural comparison against this file.",
+        support_ids={"s0": MESH_SID},
+        probes=[
+            probe("/supports/s0/node_arrays/pressure", PRESSURE_2,
+                  row=1, node=3, component=0),
+            probe("/scalars/cl", np.array([0.25, 0.55]), row=1),
+        ]),
 
     # ---------------------------------------------------------- errors
     "err_e01": mk(
@@ -2187,6 +2360,19 @@ CASES = {
         "An axis support carrying a cell_types dataset and a cell "
         "dimension.",
         errors=["E38"], support_ids={"s0": E_AXIS_SID}),
+    "err_e42": mk(
+        mesh_base, {"plain_scales": ("component_1",)},
+        "A dimension scale created with the library's default "
+        "property list, which is what every writer did before "
+        "section 21 fixed it. Such a scale takes at most 4085 "
+        "attachments.",
+        errors=["E42"], support_ids={"s0": MESH_SID}),
+    "err_e43": mk(
+        mesh_base, {"unlimited_scales": ("component_1",)},
+        "A dimension other than `row` left unlimited. The dimension "
+        "that showed this in practice was `draw`, whose name carries "
+        "its own length and stops being true when it grows.",
+        errors=["E43"], support_ids={"s0": MESH_SID}),
     "err_e39": mk(
         mesh_base, {"mach_units": None},
         "A condition key with no units, which section 19 requires "
@@ -2567,6 +2753,10 @@ HOSTILE = {
 # two deep files keep the default group layout.
 HOSTILE_LIBVER = {}
 
+# wide_keys is about seventeen megabytes and is not committed
+# either; --wide produces it. See case_wide_keys.
+WIDE = {"wide_keys"}
+
 # The two deep files are 31 MB each and are not committed. They are
 # generated on demand, with --hostile-deep, and their chain hangs
 # below the group named here. Their expected.json is committed like
@@ -2603,12 +2793,14 @@ def write_case(parent, name, builder, libver=None, data=True):
 
 def main(argv):
     deep = "--hostile-deep" in argv
+    wide = "--wide" in argv
     rest = [a for a in argv[1:] if not a.startswith("--")]
     out = (rest[0] if rest
            else os.path.dirname(os.path.abspath(__file__)))
     entries = []
     for name in sorted(CASES):
-        exp = write_case(os.path.join(out, "cases"), name, CASES[name])
+        exp = write_case(os.path.join(out, "cases"), name, CASES[name],
+                         data=(wide or name not in WIDE))
         entries.append({"name": name,
                         "description": exp["description"]})
     hostile = []
@@ -2622,10 +2814,12 @@ def main(argv):
               encoding="utf-8", newline="\n") as fh:
         fh.write(canonical({"corpus": 0, "cases": entries,
                             "hostile": hostile}))
+    missing = ([] if wide else ["--wide"]) + \
+        ([] if deep else ["--hostile-deep"])
     print("%d cases and %d hostile files written under %s%s"
           % (len(entries), len(hostile), out,
-             "" if deep else
-             " (the %d deep files need --hostile-deep)" % len(DEEP)))
+             "" if not missing else
+             " (%s not written)" % " and ".join(missing)))
     return 0
 
 

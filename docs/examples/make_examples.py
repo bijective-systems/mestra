@@ -64,11 +64,24 @@ def strings(group, name, values, scale):
 
 
 def scale(group, name, length, unlimited=False):
-    """A dimension scale, written as netCDF-C writes one (section 21)."""
-    d = group.create_dataset(
-        name, shape=(length,), dtype=">f4",
-        maxshape=(None,) if unlimited else (length,),
-        chunks=(1,) if unlimited else None, track_times=False)
+    """A dimension scale, written as netCDF-C writes one (section 21).
+
+    Attribute creation order is tracked and indexed so that the
+    scale's REFERENCE_LIST can live in the file's heap; without it a
+    scale takes at most 4085 attachments. Object time tracking is off
+    in the same property list, because the version 2 object header
+    the first call brings records four timestamps otherwise.
+    """
+    dcpl = h5py.h5p.create(h5py.h5p.DATASET_CREATE)
+    dcpl.set_attr_creation_order(h5py.h5p.CRT_ORDER_TRACKED |
+                                 h5py.h5p.CRT_ORDER_INDEXED)
+    dcpl.set_obj_track_times(False)
+    dcpl.set_chunk((1,) if unlimited else (max(1, length),))
+    space = h5py.h5s.create_simple(
+        (length,), (h5py.h5s.UNLIMITED,) if unlimited else (length,))
+    tid = h5py.h5t.py_create(np.dtype(">f4"), logical=True)
+    d = h5py.Dataset(h5py.h5d.create(group.id, name.encode("utf-8"),
+                                     tid, space, dcpl=dcpl))
     d.make_scale("%s%10d" % (DIM_NAME, length))
     return d
 

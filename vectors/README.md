@@ -22,7 +22,7 @@ somebody's code.
 What is in it
 -------------
 
-70 cases, one directory each, holding exactly the two files section
+75 cases, one directory each, holding exactly the two files section
 30 requires:
 
     cases/<case>/case.mes        the golden file
@@ -43,7 +43,10 @@ sorted by name. The cases fall into five groups:
     callable filling two slots, two supports, a row-varying field in
     an unaligned file, draws with their summaries, labels with and
     without a category table, a family with time, a derived array,
-    and a support of kind none;
+    a support of kind none, a compressed field, a file carrying
+    /notes and /private, and `wide_keys`, whose 4200 row-dimensioned
+    datasets are past the ceiling that one dimension scale had
+    before section 21 fixed how a scale is created;
   - one file per error identifier of section 14, named `err_<id>`,
     each violating that rule and, where the rule cannot be reached
     alone, saying so in its description. E37 has two, `err_e37` and
@@ -67,16 +70,20 @@ Regenerating and checking
 -------------------------
 
     python generate.py                   # rewrite every case
-    python generate.py --hostile-deep    # and the two deep files,
-                                         # which are not committed
+    python generate.py --wide --hostile-deep   # and the three large
+                                         # files, which are not
+                                         # committed
     python check.py                      # compare the committed
                                          # corpus with a fresh run,
                                          # one line per case
 
-Run the second command before running the hostile subset. The two
-deep files are 31 MB each and are generated on demand rather than
-committed; `check.py` writes them into place itself if they are
-missing.
+Three golden files are generated on demand rather than committed,
+because of their size: `cases/wide_keys` at 16 MB and the two deep
+hostile files at 31 MB each. Their expected.json is committed like
+every other one, so an implementation knows they exist and knows to
+generate them first, and `check.py` writes them into place itself if
+they are missing. Because they come from whatever libhdf5 the person
+running has, they are compared structurally rather than by bytes.
 
 `check.py` regenerates everything into a temporary directory and
 compares. It compares bytes first. When the bytes differ it falls back
@@ -259,3 +266,20 @@ scale names the obvious way passes all seventy cases and dies on
 `deep_groups_keys`. `check.py` does it the safe way, and its walk is
 depth capped and follows hard links only, which is what section 29
 requires of anything reading a file it did not write.
+
+
+What a check verifies beyond the bytes
+--------------------------------------
+
+`check.py` also reads back, for every case that is not `err_e42`, the
+dataset creation property list of every dimension scale, and refuses
+a file whose scales are not created with attribute creation order
+tracked and indexed and with object times off. That rule is section
+21's, and it is the one thing in this format that a property list
+rather than a byte position decides. A writer that forgets it
+produces files that are correct until the 4086th dataset attaches to
+one scale, at which point HDF5 fails the attachment after deleting
+the REFERENCE_LIST it was extending, and leaves a file that every
+reader and every validator still accepts. `cases/wide_keys` is the
+case that would not exist without the rule, and `cases/err_e42` is
+the case that breaks it on purpose.
