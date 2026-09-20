@@ -35,9 +35,15 @@ Run it
 ------
 
     python python.py
+    matlab -nodisplay -batch "addpath('<repo>/matlab'); run('matlab.m')"
+    ../../../cpp/build/examples/callables-and-evaluation
 
 It writes `model.mes` in the working directory, reads it back and
 evaluates it. The evaluated dataset holds data and no callables.
+
+Run from this directory. The C++ programs are CMake targets: build
+them once with `cmake -S cpp -B cpp/build` and
+`cmake --build cpp/build -j`.
 
 Expected output
 ---------------
