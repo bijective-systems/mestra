@@ -1,10 +1,17 @@
 classdef Report < handle
 %Report  What a validation run found, by rule identifier.
 %
-%   Every finding carries the rule id of specification section 14, the
-%   HDF5 path it was found at, and one line of plain language.  The
-%   identifier lists come back sorted and without duplicates, which is
-%   the form the conformance corpus compares against.
+%   Every finding carries an identifier, the HDF5 path it was found
+%   at, and one line of plain language.  The identifier lists come
+%   back sorted and without duplicates, which is the form the
+%   conformance corpus compares against.
+%
+%   An identifier beginning with E or W is a rule of specification
+%   section 14.  One beginning with U is this reader's own, for
+%   something section 14 has no rule for: an object that would not
+%   read (U01), a link this reader does not follow (U02), or a limit
+%   of this reader (U03).  Those are kept in their own list so that
+%   they can never be mistaken for a rule of the specification.
 %
 %   See also mestra.validate.
 
@@ -39,6 +46,11 @@ classdef Report < handle
             out = obj.byKind('W');
         end
 
+        function out = unclassified(obj)
+        %unclassified  This reader's own identifiers, sorted, unique.
+            out = obj.byKind('U');
+        end
+
         function out = byKind(obj, letter)
             ids = {obj.findings.id};
             keep = false(1, numel(ids));
@@ -54,6 +66,7 @@ classdef Report < handle
         %result  The struct mestra.validate returns.
             s.errors = obj.errors();
             s.warnings = obj.warnings();
+            s.unclassified = obj.unclassified();
             s.findings = obj.findings;
             s.valid = isempty(s.errors);
         end

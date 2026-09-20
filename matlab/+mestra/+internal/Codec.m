@@ -27,15 +27,30 @@ classdef Codec
 
     methods (Static)
 
-        function [dict, problems] = read(gid, isTop)
+        function [dict, problems] = read(gid, isTop, depth)
         %read  Rebuild a dictionary from an HDF5 group.
         %   `problems` lists the section 25 violations found, by rule
         %   identifier and reason, so that the validator can report
-        %   E32 without a second pass.
+        %   E32 without a second pass.  A problem that is this
+        %   reader's limit rather than the file's mistake is prefixed
+        %   "U03 ", because a dictionary nested past what this reader
+        %   follows is not a breach of section 25.
+        %
+        %   The nesting of a dictionary is the file's choice, so the
+        %   walk stops at maxDepth levels rather than descending until
+        %   the stack gives out, and it never follows a soft or an
+        %   external link.
             if nargin < 2, isTop = false; end
+            if nargin < 3, depth = 0; end
             dict = containers.Map('KeyType', 'char', 'ValueType', 'any');
             problems = {};
             H5 = mestra.internal.H5;
+            if depth > mestra.internal.Limits.get('maxDepth')
+                problems = {sprintf(['U03 a dictionary nested past %d ' ...
+                    'levels was not followed'], ...
+                    mestra.internal.Limits.get('maxDepth'))};
+                return
+            end
 
             for name = H5.publicAttrNames(gid)
                 key = name{1};
@@ -43,7 +58,23 @@ classdef Codec
                     continue    % the container's own, not the dictionary's
                 end
                 if mestra.internal.Text.reserved(key), continue, end
-                info = H5.attrInfo(gid, key);
+                try
+                    info = H5.attrInfo(gid, key);
+                catch
+                    problems{end + 1} = sprintf( ...
+                        '%s: an attribute that would not be described', ...
+                        key); %#ok<AGROW>
+                    continue
+                end
+                if ~info.scalar
+                    % Section 25 stores a number, a boolean, a string
+                    % and a null as attributes, and every one of them
+                    % is one value.
+                    problems{end + 1} = sprintf( ...
+                        '%s: an attribute that is not a scalar', ...
+                        key); %#ok<AGROW>
+                    continue
+                end
                 switch info.type
                     case 'int8'
                         dict(key) = logical(H5.readAttr(gid, key));
@@ -78,19 +109,35 @@ classdef Codec
             for name = H5.children(gid)
                 key = name{1};
                 if mestra.internal.Text.reserved(key), continue, end
-                if strcmp(H5.childType(gid, key), 'group')
+                kind = H5.childType(gid, key);
+                if ~any(strcmp(kind, {'group', 'dataset'}))
+                    problems{end + 1} = sprintf( ...
+                        'U03 %s: a %s, which this reader does not follow', ...
+                        key, kind); %#ok<AGROW>
+                    continue
+                end
+                if strcmp(kind, 'group')
                     if isTop && (strcmp(key, 'type') || strcmp(key, 'repr'))
                         problems{end + 1} = sprintf( ...
                             '%s: a top-level key the container owns', ...
                             key); %#ok<AGROW>
                     end
                     sub = H5G.open(gid, key);
-                    [dict(key), subProblems] = mestra.internal.Codec.read(sub);
+                    [dict(key), subProblems] = ...
+                        mestra.internal.Codec.read(sub, false, depth + 1);
                     H5G.close(sub);
                     problems = [problems subProblems]; %#ok<AGROW>
                 else
                     did = H5D.open(gid, key);
-                    info = H5.dsetInfo(did);
+                    try
+                        info = H5.dsetInfo(did);
+                    catch
+                        H5D.close(did);
+                        problems{end + 1} = sprintf( ...
+                            '%s: a dataset that would not be described', ...
+                            key); %#ok<AGROW>
+                        continue
+                    end
                     if isempty(info.dims)
                         problems{end + 1} = sprintf( ...
                             '%s: a zero-dimensional dataset', key); %#ok<AGROW>
@@ -106,7 +153,15 @@ classdef Codec
                             '%s: a top-level key the container owns', ...
                             key); %#ok<AGROW>
                     end
-                    data = H5.readData(did, info);
+                    try
+                        data = H5.readData(did, info);
+                    catch err
+                        H5D.close(did);
+                        problems{end + 1} = sprintf('U03 %s: %s', key, ...
+                            regexprep(strtrim(err.message), ...
+                                      '\s+', ' ')); %#ok<AGROW>
+                        continue
+                    end
                     if strcmp(info.type, 'string')
                         for i = 1:numel(data)
                             if any(uint8(data{i}) == 0)

@@ -91,6 +91,12 @@ classdef Dataset < handle
         % empty is written back.  The writer creates the union of this
         % and the groups that have content.
         groupsPresent = {}
+
+        % What the reader would not follow in this file, one line
+        % each: a soft or external link, an object of the wrong kind,
+        % an attribute that is not a scalar, a walk that hit a limit.
+        % Empty for every conforming file.
+        skipped = {}
     end
 
     methods
@@ -103,6 +109,7 @@ classdef Dataset < handle
             obj.supports = mestra.Dataset.emptySupport();
             obj.callables = mestra.Dataset.emptyCallable();
             obj.unknownGroups = {};
+            obj.skipped = {};
             obj.unknownAttrs = containers.Map('KeyType', 'char', ...
                                               'ValueType', 'any');
             obj.created = mestra.Dataset.nowUtc();
@@ -250,9 +257,10 @@ classdef Dataset < handle
                 out = obj.sliceInMemory(slotPath, first, count);
                 return
             end
-            fid = H5F.open(obj.path, 'H5F_ACC_RDONLY', 'H5P_DEFAULT');
+            fid = mestra.internal.Reader.openFile(obj.path);
             cleanup = onCleanup(@() H5F.close(fid));
-            did = H5D.open(fid, slotPath);
+            did = mestra.Dataset.openSlot(fid, slotPath);
+            closeSlot = onCleanup(@() H5D.close(did)); %#ok<NASGU>
             info = mestra.internal.H5.dsetInfo(did);
             names = cell(1, numel(info.dims));
             for axis = 1:numel(info.dims)
@@ -273,7 +281,6 @@ classdef Dataset < handle
                       first, first + count - 1, info.dims(1));
             end
             values = mestra.internal.H5.readRows(did, info, first - 1, count);
-            H5D.close(did);
             out.values = values;
             out.dims = fliplr(names);
         end
@@ -826,6 +833,40 @@ classdef Dataset < handle
                           'the coordinates Dims must name "node"');
                 end
                 n = size(coordinates, i);
+            end
+        end
+
+        function did = openSlot(fid, slotPath)
+        %openSlot  Walk to a slot one hard link at a time.
+        %   H5D.open on a whole path would follow a soft or an
+        %   external link on the way, so each component is checked
+        %   first and nothing but a hard link is entered.
+            parts = strsplit(slotPath, '/');
+            parts = parts(~cellfun(@isempty, parts));
+            if isempty(parts)
+                error('mestra:reader', 'no slot path was given');
+            end
+            open = H5G.open(fid, '/');
+            try
+                for i = 1:numel(parts) - 1
+                    next = mestra.internal.H5.openGroup(open(end), parts{i});
+                    open(end + 1) = next; %#ok<AGROW>
+                end
+                did = mestra.internal.H5.openDataset(open(end), parts{end});
+            catch err
+                mestra.Dataset.closeAll(open);
+                rethrow(err);
+            end
+            mestra.Dataset.closeAll(open);
+        end
+
+        function closeAll(ids)
+        %closeAll  Close every group opened on the way to a slot.
+            for i = numel(ids):-1:1
+                try
+                    H5G.close(ids(i));
+                catch
+                end
             end
         end
 

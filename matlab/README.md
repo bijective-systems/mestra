@@ -214,6 +214,61 @@ reads nothing; the specification is explicit that such a file must not
 be read partially.
 
 
+A file is untrusted input
+-------------------------
+
+The reader assumes nothing about a file it did not write. Its shapes,
+its nesting, its links and its string sizes are numbers someone else
+chose, and a reader that follows them wherever they lead can be made
+to exhaust memory or run forever on a file of fifteen kilobytes.
+
+What the reader refuses:
+
+  * any link but a hard link. A soft link is not resolved, a dangling
+    one is not an error, a cycle of them cannot start, and an external
+    link never opens the file it names. Each one is reported;
+  * an attribute this format names whose dataspace is not scalar. An
+    array where a number belongs is E19, and its value is not used;
+  * nesting past `maxDepth` levels, and a group already visited in
+    this walk, which is how a cycle of hard links ends;
+  * a read of more than `maxElements`, whether that is a whole dataset
+    or one row range, and a fixed-length string wider than
+    `maxStringSize`. `mestra.limits` reads and changes all four, so a
+    genuinely large file is a decision you make and not a crash you
+    get;
+  * a member of the wrong kind: a key that is a group, a support that
+    is a dataset, a callable that is not a group.
+
+`mestra.read`, `mestra.open` and `readRows` raise `mestra:E01` or
+`mestra:reader`, and nothing else; a library message becomes the
+sentence of one of those. Every dataset carries `skipped`, one line
+for everything the reader passed over, empty for a conforming file.
+
+`mestra.validate` always returns. Each pass and each object runs
+inside its own guard, so an object that will not read stops that
+object and the rest of the file is still checked. Such a failure
+becomes an unclassified finding with that object's path, in its own
+list:
+
+    r = mestra.validate('from_somewhere_else.mes');
+    r.errors          % rules of section 14
+    r.warnings        % rules of section 14
+    r.unclassified    % U01 unreadable, U02 a link, U03 a limit
+
+The U identifiers are this reader's own and are never mixed with the
+specification's, so a caller cannot mistake one for the other.
+
+The suite under `tests/hostile/` is twenty files built to break all of
+this: array-valued attributes, filters no build can run, thirty
+thousand levels of nesting, links that dangle, loop and point
+elsewhere, members of the wrong kind, a declared shape of ten to the
+twelve elements, strings that are not valid UTF-8, a scale attached
+twice, and an object whose read fails in the middle of a group that
+must still be checked to the end. `tests/hostile/make_hostile.py`
+builds them with h5py, which can say things MATLAB's HDF5 interface
+cannot say at all.
+
+
 One limitation: strings are ASCII here
 --------------------------------------
 

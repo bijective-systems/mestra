@@ -36,8 +36,12 @@ classdef Units
             if isempty(strtrim(text))
                 tf = false; return
             end
+            if numel(text) > 4096
+                tf = false; return
+            end
             state.s = text;
             state.i = 1;
+            state.depth = 0;
             try
                 state = mestra.internal.Units.expression(state);
                 state = mestra.internal.Units.skip(state);
@@ -81,6 +85,14 @@ classdef Units
         end
 
         function state = factor(state)
+            % A unit string is the file's text, so the nesting of its
+            % parentheses is bounded here rather than left to the
+            % stack.  Past the bound the string simply does not parse,
+            % which is W10, and W10 is what an unparseable string is.
+            state.depth = state.depth + 1;
+            if state.depth > 32
+                error('mestra:units', 'parentheses nested too deeply');
+            end
             state = mestra.internal.Units.skip(state);
             if state.i > numel(state.s)
                 error('mestra:units', 'unit string ends early');
@@ -94,6 +106,8 @@ classdef Units
                     error('mestra:units', 'unbalanced parenthesis');
                 end
                 state.i = state.i + 1;
+                state.depth = state.depth - 1;
+                return
             elseif mestra.internal.Units.isSymbolStart(c)
                 while state.i <= numel(state.s) && ...
                       mestra.internal.Units.isSymbolChar(state.s(state.i))
@@ -107,6 +121,7 @@ classdef Units
             else
                 error('mestra:units', 'unexpected character "%s"', c);
             end
+            state.depth = state.depth - 1;
         end
 
         function state = integer(state)
