@@ -90,6 +90,15 @@ if(MESTRA_BUILD_TESTS)
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_corpus.py
       --cli $<TARGET_FILE:mestra-cli>
       --vectors ${CMAKE_CURRENT_SOURCE_DIR}/../vectors)
+    # Conventions section 7: the metadata open decides the nine
+    # structural rules from what it is allowed to read, and names the
+    # same ones the whole read names.  Checked on every file there is.
+    add_test(NAME metadata_open COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_metadata.py
+      --cli $<TARGET_FILE:mestra-cli>
+      --vectors ${CMAKE_CURRENT_SOURCE_DIR}/../vectors)
+    set_tests_properties(metadata_open PROPERTIES TIMEOUT 900)
+
     # Sections 12 and 29 forbid interpreting /private and not copying
     # it, and no corpus case carries one, so the round trip that keeps
     # it is checked here.

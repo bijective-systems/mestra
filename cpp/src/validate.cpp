@@ -145,7 +145,8 @@ struct Axes {
 
 class Validator {
  public:
-  Validator(File& f, Report* r) : f_(f), r_(r) {}
+  Validator(File& f, Report* r, bool metadata_only = false)
+      : f_(f), r_(r), metadata_only_(metadata_only) {}
 
   void run();
 
@@ -200,6 +201,9 @@ class Validator {
 
   File& f_;
   Report* r_;
+  // True for the pass a metadata open makes, which reads no slot and
+  // no dataset inside a callable's dictionary (conventions section 7).
+  bool metadata_only_ = false;
   std::int64_t n_rows_ = 0;
   bool aligned_ = true;
   std::vector<std::string> support_names_;
@@ -228,9 +232,32 @@ class Validator {
   // reader never saw: a category table above the maximum read as an
   // empty table puts every category id outside it, which is E10 said
   // of a file whose fault is E41.
+  // What a metadata open reads, beside attributes, dataspaces, link
+  // types and dimension-scale structure: a category table in full and
+  // /row_support.  Those two are the datasets that are not slots --
+  // E16 names "a slot ... , a key column, or /row_support" as three
+  // different things -- and a rule is decided from each of them: E26
+  // and the entry count from the table, and the per-support row count
+  // of section 22 from /row_support, which E16 is decided from on an
+  // unaligned file.  A slot and a dataset inside a callable's
+  // dictionary wait for the read (conventions section 7).
+  bool may_read(const std::string& path) const {
+    if (!metadata_only_) return true;
+    return path == "/row_support" ||
+           path.compare(0, 12, "/categories/") == 0;
+  }
+
   template <typename Read>
   auto refusable(const std::string& path, Read read) -> decltype(read()) {
     try {
+      if (!may_read(path)) {
+        // Whether an eager read of this object would be refused is a
+        // fact of its dataspace and not of its contents, so a
+        // metadata open decides it without reading anything, and the
+        // two passes name E41 on the same files (section 29).
+        f_.eager_element_count(path);
+        return {};
+      }
       return read();
     } catch (const Error& e) {
       // One finding per rule per object, however often the pass asks
@@ -254,6 +281,18 @@ class Validator {
   // decided from what it holds.
   bool unread(const std::string& path) const {
     return unread_.count(path) != 0;
+  }
+
+  // True when this pass has a dataset's contents in hand.  A rule
+  // decided from contents this pass does not have is not decided at
+  // all, rather than decided from an empty array: a metadata open
+  // has a category table and /row_support and nothing else, and
+  // either pass may have been refused an object above the stated
+  // maximum element count.  Without this the open would say E23 of a
+  // mesh whose cell offsets it never read and E08 of every support in
+  // a file that is not wrong about anything.
+  bool have_contents(const std::string& path) const {
+    return may_read(path) && !unread(path);
   }
 
   std::vector<double> reals(const std::string& path) {
@@ -849,7 +888,7 @@ void Validator::keys() {
           if (v < 0 || v >= n) outside = true;
         }
         if (outside) error("E10", p, "a value outside its category table");
-        if (k.role == "group") {
+        if (k.role == "group" && have_contents(p)) {
           const std::set<std::int64_t> used(k.i64.begin(), k.i64.end());
           for (std::int64_t i = 0; i < n; ++i) {
             if (used.count(i) == 0) {
@@ -1294,12 +1333,18 @@ void Validator::supports() {
       error("E21", sp + "/cell_types",
             "a cell type code that is not in the table of section 20");
     }
-    if (has_offsets) {
+    const bool have_types =
+        has_types && have_contents(sp + "/cell_types");
+    const bool have_offsets =
+        has_offsets && have_contents(sp + "/cell_offsets");
+    const bool have_conn =
+        has_conn && have_contents(sp + "/cell_connectivity");
+    if (have_offsets) {
       bool bad = offsets.empty() || offsets.front() != 0;
       for (std::size_t i = 1; i < offsets.size(); ++i) {
         if (offsets[i] < offsets[i - 1]) bad = true;
       }
-      if (!offsets.empty() && has_conn &&
+      if (!offsets.empty() && have_conn &&
           offsets.back() != static_cast<std::int64_t>(conn.size())) {
         bad = true;
       }
@@ -1307,7 +1352,7 @@ void Validator::supports() {
         error("E23", sp + "/cell_offsets",
               "cell_offsets does not start at 0, is not non-decreasing, or "
               "does not end at the length of cell_connectivity");
-      } else if (has_types && offsets.size() == types.size() + 1) {
+      } else if (have_types && offsets.size() == types.size() + 1) {
         bool bad_count = false;
         for (std::size_t j = 0; j < types.size(); ++j) {
           const int want = cell_type_nodes(types[j]);
@@ -1352,7 +1397,14 @@ void Validator::supports() {
       }
     }
 
-    if (has_sid) {
+    // The digest of section 24 is the stored arrays, so a pass that
+    // does not have them does not compute one.
+    const bool digest_decided =
+        (!has_types || have_types) && (!has_offsets || have_offsets) &&
+        (!has_conn || have_conn) &&
+        (!f_.is_dataset(sp + "/coordinates") ||
+         have_contents(sp + "/coordinates"));
+    if (has_sid && digest_decided) {
       // Section 24: the kind decides which arrays are hashed, so a
       // file that wrongly puts cell arrays on an axis support breaks
       // E38 and not E08 as well.
@@ -1778,7 +1830,9 @@ void Validator::check_dict(const std::string& path, bool top_level,
 
 }  // namespace
 
-Report validate(const std::string& path) {
+namespace {
+
+Report validate_pass(const std::string& path, bool metadata_only) {
   Report r;
   try {
     File f;
@@ -1790,7 +1844,7 @@ Report validate(const std::string& path) {
       r.errors.push_back({"E41", path, e.what()});
       return r;
     }
-    Validator v(f, &r);
+    Validator v(f, &r, metadata_only);
     v.run();
   } catch (const Error& e) {
     r.errors.push_back({e.rule(), path, e.what()});
@@ -1798,6 +1852,16 @@ Report validate(const std::string& path) {
     r.errors.push_back({std::string(), path, e.what()});
   }
   return r;
+}
+
+}  // namespace
+
+Report validate(const std::string& path) {
+  return validate_pass(path, false);
+}
+
+Report validate_metadata(const std::string& path) {
+  return validate_pass(path, true);
 }
 
 std::vector<std::string> Report::error_ids() const {

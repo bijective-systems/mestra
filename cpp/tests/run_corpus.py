@@ -373,6 +373,16 @@ def run_case(tool, directory, name, totals, problems):
                                       for n in names) + "\n")
             out = os.path.join(temporary, "evaluated.mes")
             tool.run("evaluate", mes, csv, out)
+            # Conventions section 7: evaluating turns every callable
+            # slot into a stored slot, so the result has no callable
+            # to keep and the /callables group is absent, not present
+            # and empty.  The four writers agree on that.
+            if h5py is not None:
+                with h5py.File(out, "r") as handle:
+                    if "callables" in handle:
+                        ok = False
+                        fail("the evaluated file's /callables group",
+                             "present", "absent")
             for probe in evaluation["probes"]:
                 got = probe_value(tool, out, probe)
                 if not matches(got, probe["value"]):

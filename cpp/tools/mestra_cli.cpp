@@ -19,10 +19,13 @@ int usage() {
       "\n"
       "  read FILE                        check, then read the whole file and say what\n"
       "                                   came back\n"
-      "  validate [--ids] FILE            one finding per line, as\n"
+      "  validate [--ids] [--metadata] FILE\n"
+      "                                   one finding per line, as\n"
       "                                   \"<id> <path>: <message>\", then\n"
       "                                   \"<n> error(s), <m> warning(s)\";\n"
-      "                                   --ids prints the identifiers alone\n"
+      "                                   --ids prints the identifiers alone,\n"
+      "                                   --metadata decides from what a\n"
+      "                                   metadata open reads and no slot\n"
       "  info FILE                        what the file holds\n"
       "  integrate FILE SLOT [WEIGHT]     one slot integrated over its support\n"
       "  stats FILE SLOT [BY]             one slot summarised, grouped by a label\n"
@@ -111,8 +114,16 @@ void print_ids(const mestra::Report& r) {
   }
 }
 
-int cmd_validate(const std::string& path, bool ids_only) {
-  const mestra::Report r = mestra::validate(path);
+// `metadata_only` is the pass a metadata open makes (conventions
+// section 7): it reads attributes, dataspaces, link types and
+// dimension-scale structure, and of datasets only a category table
+// and /row_support.  It answers the question "would `info` and
+// `read_header` refuse this file, and with which identifiers", which
+// a caller cannot otherwise ask without reading the whole file.
+int cmd_validate(const std::string& path, bool ids_only,
+                 bool metadata_only) {
+  const mestra::Report r = metadata_only ? mestra::validate_metadata(path)
+                                         : mestra::validate(path);
   if (ids_only) {
     print_ids(r);
   } else {
@@ -465,12 +476,24 @@ int main(int argc, char** argv) {
   if (argc < 2) return usage();
   const std::string command = argv[1];
   try {
-    if (command == "validate" && argc == 3) {
-      return cmd_validate(argv[2], false);
-    }
-    if (command == "validate" && argc == 4 &&
-        std::string(argv[2]) == "--ids") {
-      return cmd_validate(argv[3], true);
+    if (command == "validate" && argc >= 3) {
+      bool ids_only = false;
+      bool metadata_only = false;
+      int at = 2;
+      for (; at < argc; ++at) {
+        const std::string option = argv[at];
+        if (option == "--ids") {
+          ids_only = true;
+        } else if (option == "--metadata") {
+          metadata_only = true;
+        } else {
+          break;
+        }
+      }
+      if (at + 1 == argc) {
+        return cmd_validate(argv[at], ids_only, metadata_only);
+      }
+      return usage();
     }
     if (command == "info" && argc == 3) return cmd_info(argv[2]);
     if (command == "integrate" && (argc == 4 || argc == 5)) {

@@ -163,6 +163,12 @@ class File {
   std::vector<RawAttr> attributes(const std::string& path) const;
   DsetInfo dataset_info(const std::string& path) const;
 
+  // The element count the file declares for a dataset, refused with
+  // E41 when it is past the maximum an eager read of this reader
+  // takes.  It reads the dataspace and no element, so a metadata open
+  // decides that refusal the same way a read does (section 29).
+  std::size_t eager_element_count(const std::string& path) const;
+
   // Whole-dataset reads, converted to the vector the caller asks for.
   std::vector<double> read_f64(const std::string& path) const;
   std::vector<std::int64_t> read_i64(const std::string& path) const;

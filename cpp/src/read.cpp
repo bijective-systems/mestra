@@ -476,21 +476,36 @@ bool structural(const std::string& id) {
 
 }  // namespace
 
-Dataset read(const std::string& path, const ReadOptions& options) {
-  std::vector<Finding> refused;
-  for (const Finding& f : validate(path).errors) {
-    if (structural(f.id)) refused.push_back(f);
+namespace {
+
+// The structural findings of a pass, and the refusal they make.
+std::vector<Finding> structural_findings(const Report& r) {
+  std::vector<Finding> out;
+  for (const Finding& f : r.errors) {
+    if (structural(f.id)) out.push_back(f);
   }
+  return out;
+}
+
+void refuse(const std::string& who, const std::string& path,
+            const std::vector<Finding>& refused) {
+  std::string message = who + " refused \"" + path + "\": " +
+                        internal::format_i64(static_cast<std::int64_t>(
+                            refused.size())) +
+                        " structural error(s)";
+  for (const Finding& f : refused) {
+    message += "\n  " + (f.id.empty() ? std::string("!") : f.id) + " " +
+               f.where + ": " + f.message;
+  }
+  throw Error(refused.front().id, message);
+}
+
+}  // namespace
+
+Dataset read(const std::string& path, const ReadOptions& options) {
+  std::vector<Finding> refused = structural_findings(validate(path));
   if (options.strict && !refused.empty()) {
-    std::string message = "mestra::read refused \"" + path + "\": " +
-                          internal::format_i64(static_cast<std::int64_t>(
-                              refused.size())) +
-                          " structural error(s)";
-    for (const Finding& f : refused) {
-      message += "\n  " + (f.id.empty() ? std::string("!") : f.id) + " " +
-                 f.where + ": " + f.message;
-    }
-    throw Error(refused.front().id, message);
+    refuse("mestra::read", path, refused);
   }
   Dataset d = read_impl(path, true);
   d.not_read = std::move(refused);
@@ -498,6 +513,14 @@ Dataset read(const std::string& path, const ReadOptions& options) {
 }
 
 Dataset read_header(const std::string& path) {
+  // Section 30's hostile contract: opening a file for its metadata
+  // alone must refuse what a read refuses, with the same identifiers,
+  // rather than return something.  Conventions section 7 says what an
+  // open may read to decide that, and `validate_metadata` is that
+  // much and no more, so this costs no slot and no dictionary.
+  const std::vector<Finding> refused =
+      structural_findings(validate_metadata(path));
+  if (!refused.empty()) refuse("mestra::read_header", path, refused);
   return read_impl(path, false);
 }
 

@@ -496,6 +496,11 @@ std::size_t checked_product(const std::string& path,
 
 }  // namespace
 
+std::size_t File::eager_element_count(const std::string& path) const {
+  const DsetInfo info = dataset_info(path);
+  return checked_product(path, info.shape, kMaxDatasetElements);
+}
+
 std::vector<double> File::read_f64(const std::string& path) const {
   const DsetInfo info = dataset_info(path);
   std::vector<double> out(

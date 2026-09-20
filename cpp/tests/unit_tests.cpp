@@ -620,12 +620,25 @@ void conventions_write() {
   check::equal("a non-strict read lists what it refused",
                mestra::read(third, lenient).not_read.size(),
                std::size_t(1));
+  // Conventions section 7: the metadata open decides the structural
+  // rules from attributes, dataspaces, link types, dimension-scale
+  // structure and the two datasets that are not slots, so it refuses
+  // the same file with the same identifier rather than returning
+  // something (section 30's hostile contract).
+  check::equal("the metadata open refuses what the read refuses",
+               rule_of([&third] { mestra::read_header(third); }),
+               std::string("E16"));
   std::remove(third.c_str());
 
   std::remove(other.c_str());
   mestra::write(unitless, other, unchecked);
   check::is_true("check = false writes the file anyway",
                  std::ifstream(other.c_str()).good());
+  // And a semantic fault never stops either one, so `info` still
+  // works on the file a user most needs to look at.
+  check::equal("the metadata open reads past a missing unit",
+               rule_of([&other] { mestra::read_header(other); }),
+               std::string());
   check::is_true("and the file it wrote is the one the validator rejects",
                  !mestra::validate(other).ok());
   std::remove(other.c_str());
@@ -876,6 +889,22 @@ void conventions_callables() {
   const mestra::Scalar* got = out.scalar("cl");
   check::is_true("and the scalar holds data",
                  got != nullptr && got->source == "data");
+
+  // Conventions section 7: every callable slot now holds data, so the
+  // result has no callable to keep and /callables is absent from the
+  // file it writes -- absent, and not present and empty.
+  check::is_true("an evaluated dataset keeps no callable",
+                 out.callables.empty());
+  check::is_true("and no /callables container group either",
+                 out.container_groups.count("/callables") == 0);
+  const std::string evaluated = "mestra_unit_evaluated.mes";
+  std::remove(evaluated.c_str());
+  mestra::write(out, evaluated);
+  const mestra::Dataset again = mestra::read(evaluated);
+  check::is_true("so the file it writes has none",
+                 again.container_groups.count("/callables") == 0 &&
+                     again.callables.empty());
+  std::remove(evaluated.c_str());
   std::remove(path.c_str());
 }
 

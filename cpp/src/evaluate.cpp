@@ -70,6 +70,11 @@ Dataset evaluate(const Dataset& d, const KeysTable& keys) {
   out.n_rows = static_cast<std::int64_t>(rows);
   out.categories = d.categories;
   out.container_groups = d.container_groups;
+  // Conventions section 7: evaluating turns every callable slot into
+  // a stored slot, so the result has no callable to keep and the
+  // /callables group is absent from it, not present and empty.  It is
+  // the same rule as section 13's container groups, and it is what
+  // makes the four writers' evaluated files identical.
   out.container_groups.erase("/callables");
   out.root_extra = d.root_extra;
   out.notes = d.notes;
