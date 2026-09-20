@@ -595,7 +595,15 @@ class _Arrays(dict):
 
 
 class Support:
-    """The structure a field lives on: a mesh, an axis, or none."""
+    """The structure a field lives on: a mesh, an axis, or none.
+
+    It carries `kind`, `n_nodes`, `n_cells`, the three cell arrays,
+    `support_id`, and the arrays on it: `coordinates`, which a
+    support has exactly one of and is part of what the support is,
+    and `node_arrays` and `cell_arrays`, which hold every other one.
+    Its builders are `add_node_array`, `add_cell_array` and
+    `add_callable_slot`.
+    """
 
     def __init__(self, name: str, kind: str = "mesh", *,
                  n_nodes: int = 0, n_cells: int = 0,
@@ -741,6 +749,17 @@ class Support:
         own axis order: "row" or "group:<k>", "draw", "node" and
         "component". The builder reads `varies` and `components` off
         it and stores the array in the order section 19 requires.
+        Name every axis your array has and no more: the component
+        axis is the one you may leave out, and it is added for you
+        with length one.
+
+        `role` is one of section 3: field, label, weight, normal or
+        derived (`coordinates` is the support's own array and is not
+        added this way). A `varies` that disagrees with `dims` is
+        refused at build time with E04. Without `dims`, `varies` is
+        worked out from the shape by finding the axis whose length
+        is the support's, and a shape that fits two readings is
+        refused rather than guessed.
         """
         return self._add(
             self.node_arrays, "node", name, values, units=units,
@@ -1018,7 +1037,37 @@ class Callables(dict):
 # -------------------------------------------------------------- dataset
 
 class Dataset:
-    """One mestra file: its rows, its supports, and its metadata."""
+    """One mestra file: its rows, its supports, and its metadata.
+
+    It carries `keys`, `scalars`, `categories`, `supports`,
+    `callables`, `row_support`, `notes`, `n_rows` and `aligned`, and
+    it is also the builder. Eleven calls reach a complete file, in
+    the order section 1 of `docs/api-conventions.md` fixes:
+
+        add_key(name, values, role, units)
+        add_scalar(name, values, units)
+        add_category_table(name, entries)
+        set_generalisation_group(name)
+        add_support(name, kind, coordinates, cells, units)
+        support.add_node_array(name, values, units, dims)
+        support.add_cell_array(name, values, units, dims)
+        add_callable(id, callable)
+        support.add_callable_slot(name, units, callable, output)
+        add_callable_slot(name, units, callable, output)
+        set_row_support(values)
+
+    Everything after `values` is a keyword argument, which is
+    Python's spelling of the name-value pairs the other three
+    languages take, and the support is the receiver of the two array
+    builders, which is Python's spelling of their support-first
+    argument order. The dimensions, the bounds, the component axis,
+    the support id and the alignment flag are filled in.
+
+    Every builder refuses at build time, naming the rule of section
+    14 and the argument to change, anything the validator would
+    refuse in the file; `mestra.write` validates again before it
+    writes. `to_xarray()` is an optional adapter.
+    """
 
     def __init__(self, *, writer: str = "mestra python 0",
                  created: str | None = None,
@@ -1140,10 +1189,18 @@ class Dataset:
                 dtype: Any = None) -> Key:
         """Add a key column: `add_key(name, values, role, units)`.
 
-        `role` is one of section 3. A design, condition or time key
-        carries `units`; a categorical, group, split, id or status
-        key carries `category`, naming a table
-        `add_category_table` has already written, instead.
+        `role` is one of section 3: design, condition, time,
+        categorical, group, split, id or status. A design, condition
+        or time key carries `units`; a categorical, group, split, id
+        or status key carries `category`, naming a table
+        `add_category_table` has already written, instead, and its
+        values are the positions of that table's entries, counting
+        from 0.
+
+        `trajectory_group=` on a time key names the group key whose
+        categories are the trajectories (section 7); without it a
+        transient file is a pile of rows. `parent=` on a group key
+        names the group it nests inside.
 
         Bounds: when you give neither, the builder records the
         observed finite minimum and maximum, so that the same arrays

@@ -166,6 +166,14 @@ def validate(target: Any) -> Report:
     A file this reader cannot open at all comes back as a report
     saying so (E01) rather than as an exception, so that a caller
     can validate a directory of strangers in one pass.
+
+    A dataset in memory is checked for everything except the
+    byte-level rules, which are about a file and not about a
+    dataset. Its key and scalar columns are read, so that W01, W02,
+    W03 and W04 say the same thing about a dataset as they do about
+    the file; the arrays on a support are not, because a dataset
+    opened lazily should not have every field pulled into memory by
+    a check.
     """
     if isinstance(target, Dataset):
         return _validate_dataset(target)

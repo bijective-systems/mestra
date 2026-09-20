@@ -10,6 +10,18 @@ What a file said about its own layout survives a rewrite: a
 non-default chunk, a compression filter, a string size larger than
 its longest element, an attribute this version does not know, and a
 group it must not interpret all come back out as they went in.
+
+Every dimension scale is created with attribute creation order
+tracked and indexed, which is the one place in this format where a
+property list rather than a byte position decides something
+(section 21, and E42). Without it a scale takes at most 4085
+attachments and the 4086th destroys the REFERENCE_LIST it was
+extending on its way to failing, leaving a file every reader and
+every validator still accepts; `cases/wide_keys`, 4200
+row-dimensioned datasets on one `row` scale, is the corpus case
+that could not be written at all before the rule. Nothing else
+about the file changes: the library version bounds stay at the
+default for every object.
 """
 
 from __future__ import annotations

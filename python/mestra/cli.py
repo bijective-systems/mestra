@@ -32,20 +32,56 @@ from .validator import validate
 
 __all__ = ["main"]
 
+#: What the command line does not do, and where it is done instead.
+#: A user who has met `mestra validate` should not have to find the
+#: library by guessing at import names.
+LIBRARY = """the library, for everything this command does not do:
+
+  import mestra; help(mestra)
+    mestra.Dataset()      add_key, add_scalar, add_category_table,
+                          set_generalisation_group, add_support,
+                          add_callable, add_callable_slot; then
+                          support.add_node_array, add_cell_array
+    mestra.write/read     a file, validated first; opened lazily
+    mestra.validate       the findings above, as a Report by rule id
+    mestra.evaluate       a callable file on a keys table, giving a
+                          file of data
+    mestra.compute_weights, mestra.support_ids
+    mestra.post           field_statistics, integrate, time_series,
+                          grouped_split, split_leaks
+    mestra.limits         what this reader refuses to go past, and why
+"""
+
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the command line. Returns the exit status."""
     parser = argparse.ArgumentParser(
-        prog="mestra", description="Read and check mestra files.")
+        prog="mestra", description="Read and check mestra files.",
+        epilog=LIBRARY,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command")
     check = commands.add_parser(
         "validate", help="report every rule of section 14 a file "
-                         "breaks")
+                         "breaks",
+        description="Print every finding as `<id> <path>: <message>`, "
+                    "then `<n> error(s), <m> warning(s)`. Exits "
+                    "non-zero when a file has an error, so it fits in "
+                    "a build; a warning does not. With several files "
+                    "each one's findings are introduced by its name, "
+                    "because a finding's own path is a path inside a "
+                    "file, and the summary counts the run.")
     check.add_argument("file", nargs="+")
     check.add_argument("--quiet", action="store_true",
                        help="print the summary line only")
     show = commands.add_parser(
-        "info", help="one screen about a file")
+        "info", help="one screen about a file",
+        description="Print, for every key: name, role, units, bounds, "
+                    "category, trajectory group and parent; for every "
+                    "support: kind, counts and id; for every slot: its "
+                    "shape under the name of each axis, its units, its "
+                    "source, and for a callable slot the callable's id "
+                    "and output. Reading it costs an open and not a "
+                    "read.")
     show.add_argument("file", nargs="+")
     args = parser.parse_args(list(argv) if argv is not None
                              else sys.argv[1:])
