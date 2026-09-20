@@ -580,8 +580,49 @@ void conventions_write() {
                  findings.find("error(s)") != std::string::npos);
   check::is_true("nothing was left behind",
                  std::ifstream(other.c_str()).good() == false);
+  // A read is strict about the structural rules and silent about the
+  // semantic ones, so a file with a missing unit still opens.
+  const mestra::Dataset clean = mestra::read(path);
+  check::is_true("a strict read of a clean file refuses nothing",
+                 clean.not_read.empty());
+
   mestra::WriteOptions unchecked;
   unchecked.check = false;
+  mestra::write(unitless, other, unchecked);
+  check::is_true("a semantic fault does not stop a read",
+                 mestra::read(other).supports.size() == 1);
+
+  // A structural fault does stop it, and a non-strict read lists what
+  // it refused rather than pretending the file was whole.
+  mestra::Dataset miscounted;
+  miscounted.writer = "mestra unit tests";
+  miscounted.created = "2026-09-20T00:00:00Z";
+  miscounted.add_mesh_support("s0", 4, {5, 5}, {0, 3, 6},
+                              {0, 1, 2, 0, 2, 3});
+  mestra::Support* m = miscounted.support("s0");
+  mestra::set_coordinates(*m, {0, 0, 1, 0, 1, 1, 0, 1}, "m",
+                          {"node", {"component", 2}});
+  mestra::add_node_array(*m, "pressure", {1, 1, 1, 1, 2, 2, 2, 2}, "Pa",
+                         {"row", "node"});
+  miscounted.n_rows = 3;              // the array still holds two rows
+  const std::string third = "mestra_unit_structural.mes";
+  std::remove(third.c_str());
+  mestra::write(miscounted, third, unchecked);
+  std::string refusal;
+  check::equal("a strict read refuses a structural fault",
+               rule_of([&third] { mestra::read(third); }, &refusal),
+               std::string("E16"));
+  check::is_true("and says every finding",
+                 refusal.find("/supports/s0/node_arrays/pressure") !=
+                     std::string::npos);
+  mestra::ReadOptions lenient;
+  lenient.strict = false;
+  check::equal("a non-strict read lists what it refused",
+               mestra::read(third, lenient).not_read.size(),
+               std::size_t(1));
+  std::remove(third.c_str());
+
+  std::remove(other.c_str());
   mestra::write(unitless, other, unchecked);
   check::is_true("check = false writes the file anyway",
                  std::ifstream(other.c_str()).good());

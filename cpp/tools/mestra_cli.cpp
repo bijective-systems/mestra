@@ -492,6 +492,9 @@ int main(int argc, char** argv) {
       return 0;
     }
   } catch (const mestra::Error& e) {
+    // Section 6: the rule identifier first, then the object path, then
+    // what to do.  Error puts the identifier in front of its own
+    // message already, so it is not repeated here.
     std::cerr << "mestra-cli: " << e.what() << "\n";
     return 1;
   } catch (const std::exception& e) {
