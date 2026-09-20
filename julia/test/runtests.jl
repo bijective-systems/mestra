@@ -665,6 +665,83 @@ end
     @test_throws Mestra.MestraError Mestra.grouped_split(none)
 end
 
+"""Run run_hostile.jl over a list of files in a process of its own,
+killed if it overruns, and parse what it printed."""
+function drive_hostile(files; limit = 300.0, tag = "hostile")
+    logfile = joinpath(SCRATCH, tag * ".log")
+    runner = joinpath(HERE, "hostile", "run_hostile.jl")
+    warm = case_file("mesh_two_rows")
+    cmd = `$(Base.julia_cmd()) --startup-file=no
+           --project=$(Base.active_project()) $runner --warmup $warm $files`
+    proc = run(pipeline(cmd; stdout = logfile, stderr = devnull);
+               wait = false)
+    finished = timedwait(() -> !process_running(proc), limit; pollint = 0.25)
+    if finished !== :ok
+        kill(proc, Base.SIGKILL)
+        wait(proc)
+    end
+    text = isfile(logfile) ? read(logfile, String) : ""
+    got = Dict{String,NamedTuple}()
+    for l in split(text, '\n')
+        parts = split(l, '|')
+        length(parts) == 7 || continue
+        got[String(parts[1])] = (status = String(parts[2]),
+                                 seconds = parse(Float64, parts[3]),
+                                 errors = split(parts[4], ',';
+                                                keepempty = false),
+                                 warnings = split(parts[5], ',';
+                                                  keepempty = false),
+                                 readrules = split(parts[6], ',';
+                                                   keepempty = false),
+                                 note = String(parts[7]))
+    end
+    return (finished === :ok, got)
+end
+
+@testset "the shared hostile subset (vectors/hostile)" begin
+    dir = joinpath(REPO, "vectors", "hostile")
+    cases = sort([c for c in readdir(dir) if isdir(joinpath(dir, c))])
+    @test length(cases) == 15
+    present = [c for c in cases if isfile(joinpath(dir, c, "case.mes"))]
+    absent = setdiff(cases, present)
+    isempty(absent) || @info(
+        "the deep files of the shared subset are generated on demand, " *
+        "not committed; run `python vectors/generate.py --hostile-deep` " *
+        "to include them", absent)
+    files = [joinpath(dir, c, "case.mes") for c in present]
+    okrun, got = drive_hostile(files; tag = "shared")
+    @test okrun
+
+    for c in present
+        want = JSON3.read(read(joinpath(dir, c, "expected.json"), String))
+        required = sort(String.(want.required_errors))
+        @test haskey(got, c)
+        haskey(got, c) || continue
+        g = got[c]
+        # a clean exit: no crash, no hang, nothing left unread
+        @test g.status == "ok"
+        g.status == "ok" || @info "shared hostile" c g.note
+        # inside the timeout the subset states
+        @test g.seconds < Float64(want.timeout_seconds)
+        # at least the required ids, and more are allowed
+        for id in required
+            @test id in g.errors
+        end
+        # every id a reader can see for itself, a read must refuse
+        # with too, rather than return something
+        for id in required
+            id in ("E01", "E40", "E41") || continue
+            @test id in g.readrules
+        end
+    end
+    # the two deep files are the ones that catch a reader resolving a
+    # scale's link name by asking the library for its path, which
+    # walks the group hierarchy off the stack (section 21)
+    if "deep_groups_keys" in present
+        @test "E41" in got["deep_groups_keys"].errors
+    end
+end
+
 @testset "hostile files: a reader is handed untrusted input" begin
     hostile = joinpath(HERE, "hostile")
     deepdir = joinpath(SCRATCH, "deep")
@@ -676,33 +753,8 @@ end
 
     # A child process, because a test meant to catch a hang cannot
     # catch it from inside the process that is hanging.
-    logfile = joinpath(SCRATCH, "hostile.log")
-    cmd = `$(Base.julia_cmd()) --startup-file=no
-           --project=$(Base.active_project())
-           $(joinpath(hostile, "run_hostile.jl")) $files`
-    proc = run(pipeline(cmd; stdout = logfile, stderr = devnull);
-               wait = false)
-    finished = timedwait(() -> !process_running(proc), 300.0;
-                         pollint = 0.25)
-    if finished !== :ok
-        kill(proc, Base.SIGKILL)
-        wait(proc)
-    end
-    text = isfile(logfile) ? read(logfile, String) : ""
-    lines = [l for l in split(text, '\n') if !isempty(l)]
-    got = Dict{String,NamedTuple}()
-    for l in lines
-        parts = split(l, '|')
-        length(parts) == 6 || continue
-        got[String(parts[1])] = (status = String(parts[2]),
-                                 seconds = parse(Float64, parts[3]),
-                                 errors = split(parts[4], ',';
-                                                keepempty = false),
-                                 warnings = split(parts[5], ',';
-                                                  keepempty = false),
-                                 note = String(parts[6]))
-    end
-    @test finished === :ok
+    okrun, got = drive_hostile(files; tag = "own")
+    @test okrun
 
     # Every file answered, none of them slowly, none of them any way
     # but a report or a MestraError with a rule a file may be refused
