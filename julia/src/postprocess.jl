@@ -319,6 +319,14 @@ generalisation test.  The file's unit of generalisation is the group
 key named by `generalisation_group` (section 7); a file that declares
 none is refused, because there is then nothing to honour.
 
+SPEC.md section 31 is the algorithm, to the letter, so that one seed
+names one split in every language: the units are ordered by their
+category names as UTF-8 bytes and never by their ids, one splitmix64
+draw is taken per unit in that order, the units are sorted by their
+draw, the parts are filled in the order of their names, and their
+sizes are the largest remainders of `fraction * units` with every part
+left holding at least one.
+
 Every named part gets at least one unit, whatever the fractions say,
 as long as there are at least as many units as parts; fewer units than
 parts is refused rather than answered with an empty part.  `seed`
@@ -329,6 +337,9 @@ The result maps each part's name to the one-based row indices in it.
 `fractions` is any ordered collection of name-to-weight pairs, or a
 `Dict`, whose parts are then taken in name order so that the answer
 does not depend on how the dictionary happened to be built.
+
+    grouped_split(ds)                                  # 80/20, seed 0
+    grouped_split(ds, Dict("train" => 8, "test" => 2); seed = 7)
 """
 function grouped_split(ds::Dataset,
                        fractions = ["train" => 0.8, "test" => 0.2];
@@ -344,26 +355,77 @@ function grouped_split(ds::Dataset,
     isempty(parts) && throw(MestraError(nothing, "/",
         "`fractions` names no parts"))
     weights = Float64[last(p) for p in parts]
-    all(w -> w > 0, weights) || throw(MestraError(nothing, "/",
-        "every fraction is greater than zero, and these are " *
-        join(weights, ", ")))
+    all(w -> w >= 0, weights) && sum(weights) > 0 ||
+        throw(MestraError(nothing, "/",
+            "a fraction is a share of the units, so none is negative and " *
+            "they do not add up to nothing; these are " *
+            join(weights, ", ")))
     gv = values(ds, ds.keys[g])
-    units = sort(unique(gv))
-    n, k = length(units), length(parts)
+    units = split_units(ds, ds.keys[g], seed)
+    n, k = length(units.ids), length(parts)
     n >= k || throw(MestraError(nothing, "/keys/" * g,
         "$(n) unit(s) of generalisation cannot fill $(k) parts without " *
         "leaving one empty; ask for fewer parts, or group the rows " *
         "differently"))
-    units = units[shuffled(n, seed)]
     counts = share_out(n, weights)
     out = Dict{String,Vector{Int}}()
     at = 1
     for (i, p) in pairs(parts)
-        mine = Set(units[at:(at + counts[i] - 1)])
+        mine = Set(units.dealt[at:(at + counts[i] - 1)])
         at += counts[i]
         out[first(p)] = findall(u -> u in mine, gv)
     end
     return out
+end
+
+"""
+    split_units(ds, key, seed)
+        -> (ids, names, draws, dealt)
+
+The units of generalisation of a group key, in the order section 31
+puts them -- by the category name of each id as UTF-8 bytes, so that
+two files holding the same units in tables written in two orders split
+the same way -- with the splitmix64 draw taken for each, and `dealt`,
+the ids sorted by that draw.  `ids`, `names` and `draws` are the
+worked example's table of section 31, and the four together are the
+whole of what the algorithm knows about a file.
+"""
+function split_units(ds::Dataset, k::KeyColumn, seed::Integer)
+    ids = sort(unique(values(ds, k)))
+    names = String[unit_name(ds, k, i) for i in ids]
+    order = sortperm(names, by = codeunits)
+    ids, names = ids[order], names[order]
+    state = seed % UInt64
+    draws = UInt64[]
+    for _ in ids
+        state, draw = splitmix64(state)
+        push!(draws, draw)
+    end
+    by_draw = sortperm(eachindex(ids),
+                       by = i -> (draws[i], codeunits(names[i])))
+    return (ids = ids, names = names, draws = draws, dealt = ids[by_draw])
+end
+
+"""A unit as the file names it: the entry of the key's category table,
+and the id itself where the key has no table."""
+function unit_name(ds::Dataset, k::KeyColumn, id)
+    table = k.category
+    entries = table !== nothing && haskey(ds.categories, table) ?
+              ds.categories[table].entries : String[]
+    return (id isa Integer && 0 <= id < length(entries)) ?
+           entries[Int(id) + 1] : string(id)
+end
+
+"""One step of splitmix64, which is the generator section 31 names:
+sixty-four bits of state, no more, and the same stream in every
+language with wrapping unsigned arithmetic.  Gives the new state and
+the draw."""
+function splitmix64(state::UInt64)
+    state += 0x9e3779b97f4a7c15
+    z = state
+    z = (z ⊻ (z >> 30)) * 0xbf58476d1ce4e5b9
+    z = (z ⊻ (z >> 27)) * 0x94d049bb133111eb
+    return (state, z ⊻ (z >> 31))
 end
 
 """The parts of a split, in the order they are filled, which is name
@@ -380,42 +442,29 @@ normalise_fractions(f) =
 pairs_of(f::NamedTuple) = pairs(f)
 pairs_of(f) = f
 
-"""How many units each part gets: the largest remainder, and then at
-least one for every part, taken from the parts that have most to
-spare.  With at least as many units as parts no part is left empty,
-which is what `docs/api-conventions.md` section 4 requires."""
+"""How many units each part gets, for parts already in name order:
+the floor of `fraction * units` each, the units left over one each to
+the largest remainders, and then, while a part holds none, one unit
+from the part holding most.  Ties are broken by part name throughout,
+which is the index order here.  That is section 31's paragraph on the
+sizes, and it is what leaves no part empty."""
 function share_out(n::Int, weights::Vector{Float64})
     total = sum(weights)
-    exact = [n * w / total for w in weights]
-    counts = [floor(Int, e) for e in exact]
-    order = sortperm(1:length(weights),
-                     by = i -> (-(exact[i] - counts[i]), -weights[i], i))
-    at = 1
-    while sum(counts) < n
-        counts[order[(at - 1) % length(order) + 1]] += 1
-        at += 1
+    exact = Float64[n * w / total for w in weights]
+    counts = Int[floor(Int, e) for e in exact]
+    over = sortperm(eachindex(counts),
+                    by = i -> (-(exact[i] - counts[i]), i))
+    for i in 1:(n - sum(counts))
+        counts[over[i]] += 1
     end
     while any(==(0), counts)
-        empty = findfirst(==(0), counts)
-        from = argmax(counts)
+        empty = findfirst(==(minimum(counts)), counts)
+        from = findfirst(==(maximum(counts)), counts)
         counts[from] > 1 || break
         counts[from] -= 1
         counts[empty] += 1
     end
     return counts
-end
-
-"""A deterministic shuffle, so that a split is reproducible without
-pulling in a random number generator."""
-function shuffled(n::Int, seed::Integer)
-    idx = collect(1:n)
-    state = UInt64(seed) * 0x9e3779b97f4a7c15 + 0x1234567
-    for i in n:-1:2
-        state = state * 6364136223846793005 + 1442695040888963407
-        j = Int(state >> 33) % i + 1
-        idx[i], idx[j] = idx[j], idx[i]
-    end
-    return idx
 end
 
 """

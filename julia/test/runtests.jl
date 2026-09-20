@@ -1424,6 +1424,10 @@ end
                                                 "c" => 1, "d" => 1]))
     @test e !== nothing && occursin("empty", e.msg)
 
+    # the parts are filled in name order, whatever the fractions' order
+    @test Mestra.grouped_split(sc, ["test" => 1, "train" => 2]) ==
+          Mestra.grouped_split(sc, ["train" => 2, "test" => 1])
+
     @test isempty(Mestra.split_leaks(sc))
     leaky = Mestra.read(case_file("warn_w01"); lazy = false)
     @test !isempty(Mestra.split_leaks(leaky))
@@ -1432,6 +1436,47 @@ end
     @test e !== nothing
     # a file with no unit of generalisation is refused, not guessed at
     @test_throws Mestra.MestraError Mestra.grouped_split(lt)
+end
+
+@testset "the worked example of the grouped split (section 31)" begin
+    # The table of section 31, reproduced: five rotors whose category
+    # table is in one order and whose unit order is another, seed 0.
+    ds = Mestra.Dataset(writer = "mestra.jl test 0")
+    Mestra.add_category_table!(ds, "rotor", ["rotor_b", "rotor_a", "rotor_d",
+                                             "rotor_c", "rotor_e"])
+    Mestra.add_key!(ds, "rotor", [0, 0, 1, 1, 2, 2, 3, 3, 4, 4];
+                    role = :group, category = "rotor")
+    u = Mestra.split_units(ds, ds.keys["rotor"], 0)
+    # the units are in name order and not in table order, and one
+    # splitmix64 draw is taken for each, in that order
+    @test u.names == ["rotor_a", "rotor_b", "rotor_c", "rotor_d", "rotor_e"]
+    @test u.ids == Int32[1, 0, 3, 2, 4]
+    @test u.draws == [0xe220a8397b1dcdaf, 0x6e789e6aa1b965f4,
+                      0x06c45d188009454f, 0xf88bb8a8724c81ec,
+                      0x1b39896a51a8749b]
+    # sorted by the draw: rotor_c, rotor_e, rotor_b, rotor_a, rotor_d
+    @test u.dealt == Int32[3, 4, 0, 1, 2]
+    parts = Mestra.grouped_split(ds, ["train" => 0.8, "test" => 0.2];
+                                 seed = 0)
+    @test parts["test"] == [7, 8]                       # rotor_c
+    @test parts["train"] == [1, 2, 3, 4, 5, 6, 9, 10]   # the other four
+    # the seed is the whole of it, and the state starts at the seed
+    @test Mestra.splitmix64(UInt64(0))[2] == 0xe220a8397b1dcdaf
+    # a table written in another order splits the same way
+    other = Mestra.Dataset(writer = "mestra.jl test 0")
+    Mestra.add_category_table!(other, "rotor",
+                               ["rotor_a", "rotor_b", "rotor_c",
+                                "rotor_d", "rotor_e"])
+    Mestra.add_key!(other, "rotor", [1, 1, 0, 0, 3, 3, 2, 2, 4, 4];
+                    role = :group, category = "rotor")
+    @test Mestra.grouped_split(other, ["train" => 0.8, "test" => 0.2]) ==
+          parts
+    # a fraction of nothing still leaves its part one unit, which is
+    # two rows here, and a negative fraction is refused
+    @test length(Mestra.grouped_split(ds, ["train" => 1.0,
+                                           "test" => 0.0])["test"]) == 2
+    @test refusal(() -> Mestra.grouped_split(ds, ["a" => -1, "b" => 2])) !==
+          nothing
 end
 
 """Run run_hostile.jl over a list of files in a process of its own,

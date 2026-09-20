@@ -25,7 +25,9 @@ naive way, by row.
 
 The first three rows are wing_a twice and wing_b once, so that split
 cuts wing_b in half. `grouped_split` is asked for 0.67 train and 0.33
-test with seed 0, and returns whole members.
+test with seed 0, and returns whole members. Which member lands where
+is SPEC section 31's algorithm and not the language's own generator,
+so all four languages print these rows.
 
 Run it
 ------
@@ -39,8 +41,8 @@ Expected output
 
     unit of generalisation: member
     the split in the file leaks: ['wing_b']
-    train rows [0, 1, 4, 5] members ['wing_a', 'wing_c']
-    test rows [2, 3] members ['wing_b']
+    train rows [0, 1, 2, 3] members ['wing_a', 'wing_b']
+    test rows [4, 5] members ['wing_c']
 
 The split stored in the file is left alone: reporting it is the
 format's job, and fixing it is the producer's. `../validating` shows
