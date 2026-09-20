@@ -143,7 +143,22 @@ bad split, a support id that does not match its cells are all things a
 user opens a file to find out, and `Mestra.validate` and `Mestra.info`
 are how they find out.  `strict = false` returns the dataset for a
 structurally broken file too, with what the reader would not follow or
-could not read listed in `ds.findings`.
+could not read listed in `ds.findings`, each a `Finding` with its
+rule, its path and a sentence.
+
+A `.mes` file is somebody else's, and every number in it about itself
+is that somebody's claim, so this reader checks each one before it
+acts on it.  It follows a hard link and nothing else, reporting a soft
+or external link as E40 and never opening it; it reports an object
+that is not the kind the format requires, or that it could not read at
+all, as E41, and carries on past it, so that one bad object never
+hides what comes after it; it refuses a read above `max_elements`
+(`Mestra.DEFAULT_MAX_ELEMENTS`) or `Mestra.MAX_READ_BYTES[]`, chunk
+included, so a file may declare a trillion elements and cost what one
+row costs; and it walks nothing deeper than `Mestra.MAX_DEPTH`.  A
+lazy read and a row range are not subject to the element cap, because
+they never materialise the whole dataset, so a file may be readable
+one way and E41 the other, which is what section 29 says.
 """
 function read(path::AbstractString; lazy::Bool = true, strict::Bool = true,
               max_elements::Integer = DEFAULT_MAX_ELEMENTS)

@@ -846,7 +846,7 @@ end
                    if !(p in scales) && !startswith(p, "/private")])
     end
     # and two writes a second apart are the same bytes, which is what
-    # `julia/README.md` claims and what section 30 asks of a generator
+    # `?Mestra.write` claims and what section 30 asks of a generator
     ds = Mestra.read(case_file("mesh_two_rows"); lazy = false)
     a = joinpath(SCRATCH, "twice_a.mes")
     b = joinpath(SCRATCH, "twice_b.mes")
