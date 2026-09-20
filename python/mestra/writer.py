@@ -56,7 +56,7 @@ def write(dataset: Dataset, path: str) -> None:
     """
     if dataset.lossy:
         raise MestraError(
-            "reader", "this dataset was read from a file with parts "
+            "E41", "this dataset was read from a file with parts "
             "that could not be copied (%s), so writing it would lose "
             "them" % ", ".join(sorted(dataset.lossy)[:4]), str(path))
     with h5py.File(path, "w") as f:

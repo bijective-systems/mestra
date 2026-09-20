@@ -51,7 +51,8 @@ def capture(group: h5py.Group, path: str = "", depth: int = 0,
         where = "%s/%s" % (path.rstrip("/"), member.name)
         if not member.usable:
             _lost(problems, lossy, where,
-                  member.problem or "this member cannot be read")
+                  member.problem or "this member cannot be read",
+                  member.rule)
             continue
         if isinstance(member.obj, h5py.Group):
             out["members"][member.name] = (
@@ -64,9 +65,9 @@ def capture(group: h5py.Group, path: str = "", depth: int = 0,
 
 
 def _lost(problems: list[Finding] | None, lossy: list[str] | None,
-          where: str, message: str) -> None:
+          where: str, message: str, rule: str = "E41") -> None:
     if problems is not None:
-        problems.append(Finding("reader", where, message))
+        problems.append(Finding(rule, where, message))
     if lossy is not None:
         lossy.append(where)
 
@@ -130,7 +131,7 @@ def _put_dataset(group: h5py.Group, name: str,
                  body: dict[str, Any]) -> None:
     if isinstance(body["data"], str) and body["data"] == LOST:
         raise MestraError(
-            "reader", "this dataset could not be copied when the file "
+            "E41", "this dataset could not be copied when the file "
             "was read, so it cannot be written back", name)
     kw: dict[str, Any] = {}
     if body["chunks"] is not None:

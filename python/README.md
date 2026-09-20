@@ -275,7 +275,9 @@ file and not about a dataset.
 The public API
 --------------
 
-    read(path, lazy=True)           a Dataset, reading nothing yet
+    read(path, lazy=True,           a Dataset, reading nothing yet;
+         strict=True)               strict refuses a file whose
+                                    storage it cannot vouch for
     write(dataset, path)            a file laid out as the spec says
     validate(path_or_dataset)       a Report of findings by rule id
     evaluate(dataset, keys_table)   the same slots, holding data
@@ -298,7 +300,8 @@ The public API
     NamedArray   values, dims, at(**names), transpose(*names)
     Callable     the protocol; Affine, register_callable,
                  callable_types, keys_table
-    Report       errors, warnings, error_ids, warning_ids, ok
+    Report       errors, warnings, findings, error_ids,
+                 warning_ids, unclassified (E40 and E41), ok
     MestraError  raised with the rule id it breaks
 
     mestra.post  field_statistics, integrate, time_series,
@@ -320,16 +323,21 @@ with it.
 What it refuses, and what it says:
 
   - it follows no link. A soft link, a cyclic one, and an external
-    link that would open another file are each reported and stepped
-    over. Listing a group by name is the one traversal a cycle
-    cannot break, so that is how members are found;
+    link that would open another file are each E40 and stepped over.
+    Listing a group by name is the one traversal a cycle cannot
+    break, so that is how members are found;
   - it walks no deeper than `mestra.limits.MAX_DEPTH` into groups, a
     callable's dictionary, or a group it must copy without
-    interpreting;
-  - it materialises no more than `mestra.limits.MAX_READ_ELEMENTS`
-    in one call. A dataset that declares a thousand billion elements
-    is opened, described and refused; a row range of it is an
-    ordinary read;
+    interpreting, and anything deeper is E41;
+  - an eager read materialises no more than
+    `mestra.limits.MAX_READ_ELEMENTS`, which is 2**31 as section 29
+    says to state. A dataset that declares a thousand billion
+    elements is opened, described and refused with E41; a lazy read
+    and a row range of it are not subject to that limit, so the same
+    file can be readable one way and E41 the other. The validator
+    uses a far smaller budget of its own and leaves a dataset above
+    it unchecked rather than reading it, because section 14 reserves
+    the size case for an eager read;
   - it reads filters from the file's own creation property list, so
     a filter with more client-data values than a library expects, or
     an identifier no library has, is E29 and not silence;
@@ -337,24 +345,47 @@ What it refuses, and what it says:
     or a string that is not UTF-8, is a rule (E19, E26) and the file
     still reads;
   - the validator catches per object: something the library will not
-    convert costs one finding with its path, and every rule after it
-    is still reported;
+    convert is E41 with its path, and every rule after it is still
+    reported;
   - a file that will not open at all is E01, from `validate` as a
     report and from `read` as a `MestraError`.
 
-Findings the specification has no identifier for carry the rule
-`reader` and appear in `report.unclassified`; `report.ok` is false
-while any remain, because something in the file could not be
-checked. The same findings from opening a file are on
-`dataset.problems`, and what could not be copied is named in
-`dataset.lossy`, which `write` refuses rather than writing the file
-short.
+Two rules of section 14 are about the reader rather than the format.
+**E40** is a link that is not a hard link - a soft link, whether it
+resolves, dangles or loops, and an external link - which this reader
+never follows. **E41** is an object it could not read: a malformed
+header or attribute, a group or a dictionary nested past the depth
+cap, or, on an eager read only, a dataset above the stated maximum
+element count. Both are ordinary errors; `report.unclassified` is
+the two of them together, for a caller that wants to tell what the
+file says from what the reader could not do with it. The same
+findings from opening a file are on `dataset.problems`, and what
+could not be copied is named in `dataset.lossy`, which `write`
+refuses rather than writing the file short.
+
+`read` refuses a file that breaks one of the rules it cannot vouch
+for what it would return under - E01, E16, E19, E25, E26, E29, E30,
+E40, E41, which are `mestra.reader.REFUSED` - and raises a
+`MestraError` naming the first of them. Everything else, a role it
+does not know or missing units, is the file describing itself badly
+while its values still mean what they say, so the file opens. Pass
+`strict=False` to take whatever could be read anyway; the findings
+are on `dataset.problems` either way. The check reads no more than
+`limits.MAX_OPEN_ELEMENTS` of any one dataset, so opening a file
+costs a check and not a read.
 
 The limits are module attributes with reasons beside them in
 `mestra/limits.py`, and a caller who knows what it is doing can
 raise them.
 
-`python/tests/hostile/` holds the files this is tested against, and
+`vectors/hostile` is the shared subset of section 30, fifteen files
+with a looser contract: at least the required ids, inside ten
+seconds, with every entry point refusing rather than returning.
+Generate its two deep files first, as vectors/README.md says:
+
+    python vectors/generate.py --hostile-deep
+
+`python/tests/hostile/` holds this package's own files as well, and
 the script that made them. Each is driven in a subprocess with a
 timeout, because the only defence against a hang inside a C library
 is a process that can be killed. One case is not committed: thirty

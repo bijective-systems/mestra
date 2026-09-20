@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-__all__ = ["MestraError", "Finding"]
+__all__ = ["MestraError", "TooLarge", "Finding"]
 
 
 class MestraError(Exception):
@@ -27,6 +27,20 @@ class MestraError(Exception):
         if where:
             text = "%s: %s: %s" % (rule, where, message)
         super().__init__(text)
+
+
+class TooLarge(MestraError):
+    """A read that would materialise more than the limit allows.
+
+    It is E41 when an eager read meets it (section 14). A validator
+    catches it and leaves the rule unchecked instead, because
+    section 14 reserves the size case for an eager read.
+    """
+
+    def __init__(self, message: str, where: str = "",
+                 count: int = 0) -> None:
+        super().__init__("E41", message, where)
+        self.count = count
 
 
 @dataclass(frozen=True)

@@ -33,7 +33,7 @@ import h5py
 from . import limits
 from .encoding import decode_string as decode_bytes
 from .encoding import normalise_attr as normalise
-from .errors import MestraError
+from .errors import MestraError, TooLarge
 from .names import MACHINERY
 
 __all__ = [
@@ -67,8 +67,11 @@ class Member:
     name: str
     kind: str
     #: The object, when it is a plain member that opened. None
-    #: otherwise, and then `problem` says why.
+    #: otherwise, and then `problem` says why and `rule` names it.
     obj: Any = None
+    #: E40 for a link that is not a hard link, E41 for a member that
+    #: could not be opened (section 14).
+    rule: str = "E41"
     #: What a link points at, for a report. Never followed.
     target: str | None = None
     filename: str | None = None
@@ -111,26 +114,27 @@ def _member(group: h5py.Group, name: str) -> Member:
                                            "%s" % _brief(exc))
     if isinstance(link, h5py.ExternalLink):
         # Never followed: opening it would read another file, which
-        # section 12's opaque parts and a hostile file both make a
-        # bad idea.
+        # section 29 forbids (E40).
         return Member(name, EXTERNAL, target=link.path,
-                      filename=link.filename,
+                      filename=link.filename, rule="E40",
                       problem="an external link to %r in %r, which "
                               "this reader does not follow"
                               % (link.path, link.filename))
     if isinstance(link, h5py.SoftLink):
-        return Member(name, SOFT, target=link.path,
+        return Member(name, SOFT, target=link.path, rule="E40",
                       problem="a soft link to %r, which this reader "
-                              "does not follow" % (link.path,))
+                              "does not follow, whether it resolves, "
+                              "dangles or loops" % (link.path,))
     if not isinstance(link, h5py.HardLink):
-        return Member(name, OTHER,
+        return Member(name, OTHER, rule="E40",
                       problem="a link of a kind this reader does not "
                               "know (%s)" % type(link).__name__)
     try:
         obj = group[name]
     except Exception as exc:
-        return Member(name, HARD, problem="this member cannot be "
-                                          "opened: %s" % _brief(exc))
+        return Member(name, HARD, rule="E41",
+                      problem="this member cannot be opened: %s"
+                              % _brief(exc))
     return Member(name, HARD, obj=obj)
 
 
@@ -189,7 +193,8 @@ def element_count(dset: h5py.Dataset) -> int:
         return 0
 
 
-def too_large(dset: h5py.Dataset, rows: Any = None) -> int | None:
+def too_large(dset: h5py.Dataset, rows: Any = None,
+              limit: int | None = None) -> int | None:
     """The element count when one read would go past the limit.
 
     `rows` is a slice on the leading axis, as a lazy read gives it;
@@ -206,38 +211,42 @@ def too_large(dset: h5py.Dataset, rows: Any = None) -> int | None:
     count = 1
     for extent in shape:
         count *= extent
-    if count > limits.MAX_READ_ELEMENTS:
+    ceiling = limits.MAX_READ_ELEMENTS if limit is None else limit
+    if count > ceiling:
         return count
     return None
 
 
-def check_size(dset: h5py.Dataset, where: str, rows: Any = None) -> None:
+def check_size(dset: h5py.Dataset, where: str, rows: Any = None,
+               limit: int | None = None) -> None:
     """Refuse a read that would allocate more than the limit."""
-    count = too_large(dset, rows)
+    ceiling = limits.MAX_READ_ELEMENTS if limit is None else limit
+    count = too_large(dset, rows, ceiling)
     if count is not None:
-        raise MestraError(
-            "reader", "this read would materialise %d elements and "
-            "the limit is %d (mestra.limits.MAX_READ_ELEMENTS); read "
-            "a row range instead" % (count, limits.MAX_READ_ELEMENTS),
-            where)
+        raise TooLarge(
+            "this read would materialise %d elements and the limit is "
+            "%d; read a row range instead" % (count, ceiling),
+            where, count)
 
 
-def read_values(dset: h5py.Dataset, where: str = "",
-                rows: Any = None) -> Any:
+def read_values(dset: h5py.Dataset, where: str = "", rows: Any = None,
+                limit: int | None = None) -> Any:
     """Read a dataset, refusing a read that is too large.
 
     Anything the library itself refuses - a type with no conversion
-    path, a filter it does not have - comes back as a MestraError
-    naming the path, never as a failure from inside h5py.
+    path, a filter it does not have - comes back as E41 naming the
+    path, never as a failure from inside h5py. A read past the size
+    limit is TooLarge, which is E41 for an eager read and something
+    the validator leaves unchecked instead.
     """
-    check_size(dset, where or dset.name, rows)
+    check_size(dset, where or dset.name, rows, limit)
     try:
         return dset[()] if rows is None else dset[rows]
     except MestraError:                                 # pragma: no cover
         raise
     except Exception as exc:
         raise MestraError(
-            "reader", "this dataset cannot be read: %s" % _brief(exc),
+            "E41", "this dataset cannot be read: %s" % _brief(exc),
             where or dset.name) from None
 
 

@@ -19,7 +19,7 @@ VALID = corpus.valid_case_names()
 
 
 def test_the_corpus_is_where_it_should_be():
-    assert len(CASES) == 69
+    assert len(CASES) == 70
     assert len(VALID) == 30
     assert len(WITH_CODEC) == 5
 

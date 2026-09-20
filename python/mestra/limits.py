@@ -14,14 +14,16 @@ them:
     mestra.limits.MAX_READ_ELEMENTS = 1 << 32
 
 A limit that is reached is a refusal, never a silent truncation: the
-reader raises `MestraError` with the rule `reader` and the validator
-records a finding that names the path and the limit.
+reader raises `MestraError` with the rule E41 and names the path and
+the limit (sections 14 and 29).
 """
 
 from __future__ import annotations
 
 __all__ = [
     "MAX_READ_ELEMENTS",
+    "MAX_CHECK_ELEMENTS",
+    "MAX_OPEN_ELEMENTS",
     "MAX_DEPTH",
     "MAX_OBJECTS",
     "MAX_UNITS_DEPTH",
@@ -29,12 +31,26 @@ __all__ = [
     "MAX_STRING_BYTES",
 ]
 
-#: The most elements one read may materialise. 2**26 float64 is half
-#: a gibibyte, which is more than any corpus file and less than a
-#: hostile declaration of 10**12 elements. Lazy access is not
-#: limited, because a row range of a huge dataset is only as large as
-#: the range; the limit is on what one call would allocate.
-MAX_READ_ELEMENTS = 1 << 26
+#: The most elements one eager read may materialise. Section 29 says
+#: a reader states a maximum and gives 2**31 as the default to
+#: state. Lazy access is not limited, because a row range of a huge
+#: dataset is only as large as the range; the limit is on what one
+#: call would allocate, and going past it is E41.
+MAX_READ_ELEMENTS = 1 << 31
+
+#: The most elements `read` will materialise while checking a file it
+#: is about to open. Small on purpose: opening a file must not cost
+#: what validating it costs, so a rule that needs more than this is
+#: left to `validate`.
+MAX_OPEN_ELEMENTS = 1 << 20
+
+#: The most elements the validator will materialise to check a rule.
+#: It is far below the read limit on purpose: validating a file must
+#: not cost what reading it costs, and a dataset above this is left
+#: unchecked rather than read. That is not E41, which section 14
+#: reserves for an eager read, and rules that do not need the values
+#: still report on such a dataset.
+MAX_CHECK_ELEMENTS = 1 << 26
 
 #: How deep a walk goes into groups, into a callable's dictionary,
 #: and into a group this reader must copy without interpreting. A
