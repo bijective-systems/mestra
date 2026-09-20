@@ -163,14 +163,38 @@ end
 cap so that a group cannot hold a reader forever."""
 function child_links(g)
     out = Tuple{String,Symbol}[]
-    names = try
-        collect(keys(g))
+    # Ask how many links there are before asking for their names: a
+    # group may declare a billion, and listing them all to throw most
+    # of the list away is the allocation this is here to avoid.
+    n = try
+        Int(HDF5.API.h5g_get_num_objs(g))
     catch
-        return out
+        -1
     end
-    length(names) > MAX_OBJECTS && (names = names[1:MAX_OBJECTS])
-    for n in names
-        push!(out, (String(n), link_type(g, n)))
+    names = if 0 <= n <= MAX_OBJECTS
+        try
+            collect(keys(g))
+        catch
+            String[]
+        end
+    elseif n > MAX_OBJECTS
+        [try
+             HDF5.API.h5l_get_name_by_idx(g, ".", HDF5.API.H5_INDEX_NAME,
+                                          HDF5.API.H5_ITER_INC, i - 1,
+                                          HDF5.API.H5P_DEFAULT)
+         catch
+             ""
+         end for i in 1:MAX_OBJECTS]
+    else
+        try
+            collect(keys(g))
+        catch
+            String[]
+        end
+    end
+    for nm in names
+        isempty(nm) && continue
+        push!(out, (String(nm), link_type(g, nm)))
     end
     return out
 end
