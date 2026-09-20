@@ -430,6 +430,13 @@ dimension scale, named as section 21 requires.
     /notes                     optional free-form attributes
     /private                   opaque
 
+A container group, that is `/keys`, `/scalars`, `/categories`,
+`/supports`, `/callables` and a support's `node_arrays` and
+`cell_arrays`, may be absent when it would be empty, or present and
+empty. A reader accepts both and must not require either. A writer
+reproducing a file it read keeps whichever of the two it found, so
+that a round trip does not silently add or drop a group.
+
 
 14. Validator
 -------------
@@ -447,7 +454,8 @@ Errors (the file is rejected):
   E03  a role's cardinality violated (two time keys; no coordinates
        on a mesh or axis support; two coordinates arrays on one
        support; two units of generalisation)
-  E04  an array whose leading dimension disagrees with `varies`
+  E04  an array whose leading dimension disagrees with `varies`, or
+       a `varies` naming a group key the file does not declare
   E05  an array whose node or cell count disagrees with its support
   E06  a row referencing a support that does not exist
   E07  retired. A file with rows on more than one support and
@@ -457,7 +465,9 @@ Errors (the file is rejected):
   E09  time not strictly increasing within a trajectory
   E10  a categorical, group, label, or status value outside its
        category table
-  E11  a field or scalar without units
+  E11  units absent from a field or a scalar. Units on a key, on
+       coordinates and on a derived array are E39; `weight` and
+       `normal` do not require units at all
   E12  a quantile statistic without a quantile, or a statistic
        other than `value` or `draw` without `of`. A slot whose
        statistic is `draw` holds the base quantity itself and does
@@ -465,18 +475,32 @@ Errors (the file is rejected):
   E13  a derived array without `derived_from` and `recipe`
   E14  a slot whose `source` names a callable id that does not exist
   E15  a callable group without `type`
-  E16  a stored slot whose leading dimension disagrees with the row
-       count it must have: the file's row count for any slot in an
-       aligned file, and the number of rows referencing the slot's
-       support for a row-varying array in an unaligned file
-       (section 22)
+  E16  a length disagreeing with the row count it must have, in a
+       slot whose leading dimension is `row`, a key column, or
+       `/row_support`. The count is the file's row count, except for
+       a row-varying array on a support in an unaligned file, where
+       it is the number of rows referencing that support (section
+       22). A slot whose `varies` is `none` or `group:<k>` has no row
+       dimension and is not subject to this rule; its leading
+       dimension is E04 or E34. Also a dataset under `/keys` or
+       `/scalars` that does not have exactly one dimension
   E17  `format`, `writer`, or `created` missing
-  E18  public information present only under `/private`. This is a
-       rule for a writer. A validator reports it only from the public
-       objects it can see are missing, and never by interpreting
-       `/private`, which section 29 forbids it to interpret
+  E18  a required public attribute or object absent, by any of E02,
+       E11, E13, E15, E17, E31 or E39, in a file that also carries a
+       `/private` group. It is reported beside that rule and never by
+       interpreting `/private`, which section 29 forbids a reader to
+       interpret. A writer that moved the public thing into the
+       private part is what the rule is about; a reader can only see
+       the two facts that make it likely, and says so
 
 The rules below come from the byte-level layout of sections 18 to 25.
+They are checked on the public objects only. `/private` is not
+checked, and neither is any group this version of the format does not
+know, which is reported as W11 and otherwise left alone. A producer
+that wants its file to open in a generic netCDF-4 tool keeps its
+private part within the same constraints anyway, because the tool
+will walk it; that is the producer's choice and not this format's
+rule.
 
   E19  an attribute whose HDF5 type is not the one section 18
        requires for it: a variable-length string, a string that is
@@ -491,8 +515,14 @@ The rules below come from the byte-level layout of sections 18 to 25.
        `cell_connectivity`
   E24  a connectivity value outside [0, n_nodes)
   E25  an axis of a dataset with no dimension scale attached, more
-       than one scale attached, or a scale whose name is not the one
-       section 21 requires
+       than one scale attached, or a scale whose name is not one
+       section 21 allows at that axis position. Where the required
+       name follows from an attribute another rule already checks,
+       that rule reports it and E25 does not: the leading axis
+       against `varies` is E04, the node or cell count is E05, and
+       the component count is E31. A dimension scale dataset is not
+       itself subject to this rule and carries no scale on its own
+       axis
   E26  a fixed-length string that is not valid UTF-8, or that holds a
        NUL byte anywhere but in its trailing padding
   E27  `row` not an unlimited dimension, or a row-dimensioned dataset
@@ -519,20 +549,34 @@ The rules below come from the byte-level layout of sections 18 to 25.
        true with more than one, or false with at most one
   E38  a mesh support missing `cell_types`, `cell_offsets` or
        `cell_connectivity`, or an `axis` or `none` support carrying
-       any of them
+       any cell dataset or a `cell` dimension. The digest of such a
+       support is unaffected (section 24)
   E39  a required attribute of section 19 absent from an object that
        requires it, where no other rule covers it. E02 covers a
        missing role, E11 units on a field or a scalar, E13
        `derived_from` and `recipe`, E15 a callable's `type`, E17
        `format`, `writer` and `created`, E31 `components`, and W06
-       `recomputed`
+       `recomputed`. This rule is what covers units on a key of role
+       `design`, `condition` or `time`, units on coordinates and
+       units on a derived array
+  E40  a link in the public tree that is not a hard link: a soft
+       link, whether it resolves, dangles or loops, or an external
+       link. A reader never follows one (section 29)
+  E41  an object the reader cannot read, reported with its path while
+       the pass continues: a malformed header or attribute, a group
+       or dictionary nesting deeper than the reader's cap, or, on an
+       eager read only, a dataset above the stated maximum element
+       count (section 29). A lazy read and a row-range read are not
+       subject to the last of these, so a file can be valid for one
+       reader and E41 for another; the corpus states which
 
 Warnings (the file is accepted; the reader must report):
 
   W01  a split that places rows of one generalisation unit on both
        sides
   W02  rows with status other than converged
-  W03  non-finite values in a field or scalar, with the row and name
+  W03  non-finite values in a field, a derived array or a scalar,
+       with the row and name
   W04  a key value outside its declared bounds
   W05  more than one support (index-aligned operations unavailable)
   W06  weights or normals present but not marked as recomputed
@@ -540,17 +584,25 @@ Warnings (the file is accepted; the reader must report):
        A group value with no entry in the table is E10
   W08  declared bounds wider than the observed range of a key by
        more than a factor of four in width (possibly stale bounds).
-       A key value outside its bounds is W04 and not W08
+       A key value outside its bounds is W04 and not W08. The rule
+       does not apply when the observed width is zero, which covers a
+       file with no rows, a key with one distinct value, and a key
+       with no finite value at all
   W09  retired. A categorical key stored as floating point is an
        error by the dtype table of section 19 (E20)
   W10  a units string the validator cannot parse
   W11  an attribute or a group this reader does not know, ignored
        under section 28
-  W12  a chunk shape that is not the default of section 23
+  W12  a chunk shape that is not the default of section 23, on a
+       chunked dataset that carries a row dimension. A contiguous
+       dataset, a dimension scale and a dataset inside a callable's
+       dictionary never draw it
   W13  a fixed-length string dataset whose size is larger than its
        longest element needs
   W14  `created` that is not an ISO 8601 UTC timestamp
-  W15  a support that no row references
+  W15  a support that no row references. It is decidable only in a
+       file that carries `/row_support`; in an aligned file every row
+       is on the one support and the rule does not apply
 
 
 15. Conformance
@@ -659,6 +711,79 @@ something no file could do:
      entry per row referencing that support, in the file's row order,
      over a support-local `row` dimension. Nothing said what such an
      array held for a row on another support. Sections 14, 21 and 22.
+
+Taken on 2026-09-20, second batch, from four independent
+implementations built against the corpus. Every one of these was a
+place where two of the four read the same sentence differently, or
+where all four had to invent the same missing rule:
+
+ 31. A dimension scale that is not unlimited is chunked with a chunk
+     equal to its length, which is what H5DSset_scale leaves behind.
+     The text said contiguous and every file in the corpus said
+     otherwise. Sections 21 and 23.
+ 32. E18 is reported beside the rule that found the missing public
+     thing, in a file that also carries `/private`. It was not
+     decidable before. Section 14.
+ 33. E25 does not fire where the required dimension name follows from
+     an attribute another rule already checks, and a dimension scale
+     is not subject to it. Section 14.
+ 34. W12 applies only to a chunked dataset carrying a row dimension.
+     A contiguous dataset is E27 or nothing, and scales and
+     dictionary datasets are outside it. A zero-length axis is
+     chunked with 1. Sections 14 and 23.
+ 35. The row count in the chunk default is the length of the row
+     dimension the leading axis is attached to, not the dataset's own
+     extent. Section 23.
+ 36. W08 does not apply when the observed width is zero. Section 14.
+ 37. E11 covers units on a field and a scalar; E39 covers units on a
+     key, on coordinates and on a derived array; `weight` and
+     `normal` need none. Section 14.
+ 38. E16 is restated: it is about a row length, on a row-dimensioned
+     slot, a key column or `/row_support`, and it also catches a key
+     or scalar dataset that is not one-dimensional. Section 14.
+ 39. W03 covers a derived array as well as a field and a scalar.
+     Section 14.
+ 40. E38 covers any cell dataset or a `cell` dimension on an `axis`
+     or `none` support, and the declared kind decides which steps of
+     section 24 contribute bytes, so the digest still matches.
+     Sections 14 and 24.
+ 41. A probe on a dataset inside a callable's dictionary has no
+     logical dimension names; its index fields are applied in a fixed
+     order to the axes in file order. `cell` and `cell_plus_one` join
+     the probe field list. Section 30.
+ 42. W15 is decidable only in a file that carries `/row_support`.
+     Section 14.
+ 43. The byte-level rules of sections 18 to 25 are checked on the
+     public objects only. Section 14.
+ 44. A container group may be absent when empty or present and empty;
+     a reader accepts both and a writer keeps what it found.
+     Section 13.
+ 45. The keys table in C++ holds the names beside the columns and is
+     looked up by name, because C++ has no run-time member names, and
+     Julia is added with a Dict from name to column. Section 26.
+ 46. A producer that wants every language to read its file keeps
+     names, category entries and string ids to ASCII, because one
+     binding in common use cannot carry a fixed-length string that is
+     not. Section 25.
+ 47. E04 also covers a `varies` naming a group key the file does not
+     declare. Section 14.
+ 48. A reader treats a file as untrusted input: no crash, no hang, no
+     unbounded allocation; it never follows a link that is not a hard
+     link (E40); an object it cannot read is E41 and the pass
+     continues; recursion is capped and an eager read has a stated
+     maximum element count, 2^31 by default. Sections 14 and 29.
+ 49. The corpus gains a hostile subset under vectors/hostile, with a
+     looser contract: the required ids must appear, more are allowed,
+     and the run must finish cleanly inside ten seconds. Section 30.
+ 50. Implementations link different libhdf5 versions and do not agree
+     byte for byte; structural equality is the comparison and byte
+     identity is not tested. Section 30.
+
+ 51. A reader resolves the link name of an attached dimension scale
+     from a map built during its own bounded walk, keyed by object
+     address or token, and never by asking the library for the scale
+     object's path: that search walks the group hierarchy and
+     overflows the stack on a deep file. Section 21.
 
 Still open: nothing.
 
@@ -961,9 +1086,23 @@ NAME would find every dimension in the file called the same thing.
 H5DS API calls and library wrappers that report a "dimension label"
 return NAME, so this is worth checking early in each language.
 
+There is a second trap in the same place, and it is worse, because it
+does not return a wrong answer. Asking the library for the path of
+the scale object attached to an axis, which is the obvious way to
+recover the link name, makes HDF5 search the group hierarchy for a
+name that leads to it. On a file with a deep chain of groups that
+search runs off the stack and takes the process with it, and a reader
+that does this passes every well-formed file and dies on a malformed
+one. A reader must build a map from each scale's object address or
+token to its link name during its own bounded walk of the file
+(section 29), and resolve attached scales through that map.
+Dereferencing the scale and reading its address is safe; asking for
+its path is not.
+
 A dimension scale that is unlimited is chunked with chunk length 1,
 which is what netCDF-C writes; a scale that is not unlimited is
-contiguous. No value is ever stored in either, so the choice is
+chunked with a chunk equal to its length, which is what H5DSset_scale
+leaves behind. No value is ever stored in either, so the choice is
 visible only in the file's bytes.
 
 Where the scales live and what they are called. All file-level scales
@@ -1119,16 +1258,31 @@ hundred thousand rows a megabyte would hold, because nothing is going
 to be written into it in this file and a chunk that large costs a
 reader a megabyte of cache for an empty dataset.
 
-This is a default, not a requirement: a writer may
-choose another c and a reader must accept it. A dataset whose chunk
-shape is not the default draws a warning (W12), because a corpus file
-is expected to use it.
+The row count in that rule is the length of the row dimension the
+dataset's leading axis is attached to, and not the dataset's own
+leading extent. In an unaligned file a row-varying array on a support
+is attached to that support's own `row` (section 21), so its default
+follows the number of rows on that support. A dataset whose leading
+extent disagrees with the dimension it is attached to is E16, and its
+chunk is still judged against the dimension.
+
+This is a default, not a requirement: a writer may choose another c
+and a reader must accept it. A dataset whose chunk shape is not the
+default draws a warning (W12), because a corpus file is expected to
+use it. W12 applies only to a chunked dataset that carries a row
+dimension: a key column, a scalar, an array slot, or /row_support. A
+contiguous dataset is E27 or nothing at all, never W12; a dimension
+scale and a dataset inside a callable's dictionary never draw it.
+
+A dataset with a zero-length axis is chunked with 1 on every axis,
+which is the only chunk HDF5 allows for it.
 
 A dataset with no `row` dimension may be contiguous. When it is
 chunked or compressed, the default chunk is the whole dataset if that
 is 1 MiB or less, and otherwise the same rule applied to its leading
 dimension. A dimension scale dataset is never compressed and is
-contiguous unless it is unlimited.
+chunked as section 21 says: chunk length 1 when it is unlimited and a
+chunk equal to its length when it is not.
 
 Compression. The only filters allowed are gzip at levels 1 to 9 and
 shuffle; shuffle may be used with or without gzip. A writer must use
@@ -1165,6 +1319,13 @@ When the coordinates of an `axis` support do not have `varies = none`
 the file is already invalid (E35); the digest is then computed over
 the stored bytes as they are, so that E35 is the only rule such a
 file breaks.
+
+The declared kind decides which steps contribute bytes, and not what
+the support happens to carry. An `axis` or `none` support that
+wrongly carries cell datasets still contributes nothing from steps 2
+to 4, so it breaks E38 and its digest still matches. This is the same
+choice as the paragraph above, for the same reason: one broken rule
+should not make a second rule fire as well.
 
 The attribute is the digest in lower-case hexadecimal, 64 characters.
 A digest that does not match the stored arrays is an error (E08).
@@ -1250,6 +1411,17 @@ a character across the boundary. A string that contains a NUL byte is
 not representable (E32); the null sentinel of section 18 is not a
 string value.
 
+Portability of non-ASCII strings. One language's binding in common
+use, MATLAB's, cannot carry a fixed-length string that is not ASCII:
+it refuses a byte above 127 on write and decodes to text on read, so
+the bytes do not survive. The format keeps UTF-8 because the format
+outlives any one binding, but a producer that wants every language to
+read its file keeps the names this format defines, every category
+table entry and every string id to ASCII, and puts anything else in a
+callable's dictionary or in `/notes`, where a reader that cannot
+carry it can copy it unchanged. A reader that cannot recover the
+bytes of a string must say so rather than return something else.
+
 Arrays. A numeric array is a dataset in C order, little-endian, with a
 dimension scale on each axis named `mestra_<dataset>_d<i>` as section
 21 requires.
@@ -1296,8 +1468,15 @@ it: output row i is the result for table row i.
            with a list of key names in the file's key order; an
            implementation must accept both.
   MATLAB   a table whose variable names are the key names.
-  C++      a struct of vectors, one vector per key, with the key names
-           as the member names, and every vector the same length.
+  C++      a struct holding the key names beside one vector per key,
+           looked up by name, because C++ has no run-time member
+           names: for example a vector of names and a vector of
+           columns of the same length, or a map from name to column.
+           Every column has the same length.
+  Julia    a Dict{String,Vector{Float64}} from key name to column. An
+           implementation must also accept a NamedTuple of columns
+           and a (matrix, names) pair whose names are in the file's
+           key order, as Python accepts its second form.
 
 In every language a column of a key with role id may be strings, and
 every other column is numeric. A callable reads the columns it
@@ -1425,6 +1604,22 @@ the layout of sections 19 to 23 is what makes them possible.
     ignore, must report it, and must not fail on it.
   - A reader must not require /notes or /private, and must not
     interpret /private.
+  - Untrusted input. A reader treats a file as untrusted input. It
+    must not crash, hang, or allocate without bound on a malformed
+    one, whatever the file does. Four rules make that reachable.
+    It never follows a link that is not a hard link: a soft link,
+    resolving or not, and an external link are E40 and are not
+    opened. An object it cannot read is reported as E41 with its
+    path, and the pass continues rather than stopping at the first
+    one, so that one broken object does not hide the rest of the
+    file. Recursion over groups and over a callable's dictionary is
+    capped at a depth the reader states, and a file deeper than the
+    cap is E41 rather than a crash. An eager read refuses a dataset
+    whose declared element count is above a maximum the reader
+    states, with E41; 2^31 elements is the default to state. A lazy
+    read and a row-range read are not subject to that last limit,
+    because they never materialise the whole dataset, so the same
+    file may be readable one way and E41 the other.
 
 
 30. Conformance corpus conventions
@@ -1469,6 +1664,9 @@ expected.json is canonical JSON (below) with exactly these fields:
                              slot has no component dimension
                   draw       the draw index; present only when the
                              slot has a draw dimension
+                  cell       the cell index, where a probe names a
+                             support's own `cell` axis
+                  cell_plus_one  the index along the cell offsets
                   index      the index along the flat connectivity
                              axis
                   value      the value as a decimal string: the
@@ -1480,6 +1678,14 @@ expected.json is canonical JSON (below) with exactly these fields:
                 A probe on one of a support's own cell datasets names
                 its axis `cell` for `cell_types`, `cell_plus_one` for
                 `cell_offsets` and `index` for `cell_connectivity`.
+                A dataset inside a callable's dictionary has no
+                logical dimension names at all, because the codec's
+                scales are the container's and not the dictionary's.
+                A probe on one applies whichever index fields it
+                carries, in the order row, instance, draw, node,
+                component, index, to the dataset's axes in file
+                order; with two axes and the fields node and
+                component, node is axis 0 and component is axis 1.
   codec         an object from callable id to the round trip of that
                 callable's dictionary, in the tagged form below
   evaluation    a list of objects, each a worked evaluation of one
@@ -1521,6 +1727,42 @@ elements flattened in C order; float64 elements are the decimal
 strings above, int32 and int64 elements are JSON numbers, bool
 elements are true and false.
 
+The hostile subset
+------------------
+
+The corpus above is a set of well-formed files, each breaking at most
+the rules it means to break. It says nothing about what a reader does
+with a file that is not well formed at all, and section 29 requires an
+answer: a reader treats a file as untrusted input. The hostile subset
+is that answer, written down.
+
+    vectors/hostile/<case>/case.mes        the file
+    vectors/hostile/<case>/expected.json   what must happen
+
+with vectors/manifest.json listing them under `hostile` beside
+`cases`, sorted by name. expected.json is canonical JSON with exactly
+these fields:
+
+  description       a string, one or two sentences
+  required_errors   the rule ids of section 14 that must appear,
+                    sorted and without duplicates
+  allow_extra       true throughout this subset
+  timeout_seconds   10
+
+The contract is deliberately looser than the corpus's. A validator
+must report at least the required ids; it may report more, because two
+readers will reasonably disagree about how much of a broken file is
+worth describing. It must exit cleanly within the timeout: not crash,
+not hang, not exhaust memory, and not stop at the first bad object.
+Opening the file for its metadata alone, and any operation that reads
+a slot, must refuse with the same ids rather than return something. A
+reader that cannot open the file at all reports the ids and says so;
+that is a clean exit.
+
+A file in this subset is not a specimen of the format, and nothing may
+be inferred from one about what a valid file looks like.
+
+
 Golden files must be byte reproducible: two runs of the generator on
 one machine must produce identical bytes. Three things are needed.
 HDF5 object time tracking must be off, which is `track_times=False` on
@@ -1534,8 +1776,10 @@ the corpus's order and no one has to reconstruct it.
 
 Byte identity across HDF5 versions is not required and must not be
 tested, because the HDF5 library decides the superblock and the object
-header layout. The normative comparison between two files that should
-be the same is structural equality:
+header layout. Implementations link whatever libhdf5 their language
+binding brings: 1.12, 1.14 and 2.2 have all been used against this
+corpus, and they do not agree byte for byte. The normative comparison
+between two files that should be the same is structural equality:
 
   - the same set of object paths;
   - at each path, the same kind (group or dataset);

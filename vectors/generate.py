@@ -1992,6 +1992,11 @@ CASES = {
         "A node array whose varies says none while its stored shape "
         "still carries the leading row dimension.",
         errors=["E04"], support_ids={"s0": MESH_SID}),
+    "err_e04_unknown_group": mk(
+        mesh_base, {"coords_varies": "group:nosuch"},
+        "An array whose varies names a group key the file does not "
+        "declare.",
+        errors=["E04"], support_ids={"s0": MESH_SID}),
     "err_e05": mk(
         mesh_base, {"pressure": PRESSURE_2[:, :5, :]},
         "A node array of five nodes on a support of six.",
@@ -2281,16 +2286,315 @@ CASES = {
 }
 
 
-def write_case(cases_dir, name):
-    d = os.path.join(cases_dir, name)
+
+
+# ------------------------------------------------- the hostile subset
+
+# Section 30. These files are not specimens of the format. Each one is
+# malformed in a way a reader has to survive rather than describe, so
+# the contract is only that the required ids appear, that more are
+# allowed, and that the run finishes cleanly.
+
+def hostile_expect(description, required_errors):
+    return {
+        "description": description,
+        "required_errors": sorted(required_errors),
+        "allow_extra": True,
+        "timeout_seconds": 10,
+    }
+
+
+def hmk(mutate, description, required_errors, options=None):
+    """A hostile case that is the ordinary mesh file with one thing
+    done to it that no writer would ever do."""
+    def build(f):
+        mesh_base(f, options or {})
+        mutate(f)
+        return hostile_expect(description, required_errors)
+    return build
+
+
+def raw_filter_dataset(group, name, data, scales, filt):
+    """A dataset created through the low-level API, so that a filter
+    pipeline h5py's own interface will not produce can be recorded on
+    it. `filt` is (filter id, flags, client data values)."""
+    fid, flags, cd = filt
+    dcpl = h5py.h5p.create(h5py.h5p.DATASET_CREATE)
+    dcpl.set_chunk(data.shape)
+    dcpl.set_obj_track_times(False)
+    dcpl.set_filter(fid, flags, tuple(cd))
+    maxshape = (h5py.h5s.UNLIMITED,) + data.shape[1:]
+    space = h5py.h5s.create_simple(data.shape, maxshape)
+    tid = h5py.h5t.py_create(np.dtype("<f8"), logical=True)
+    dsid = h5py.h5d.create(group.id, name.encode("utf-8"), tid, space,
+                           dcpl=dcpl)
+    d = h5py.Dataset(dsid)
+    d[...] = data
+    for axis, sc in enumerate(scales):
+        d.dims[axis].attach_scale(sc)
+    return d
+
+
+def replace_pressure_with_filter(f, filt):
+    sup = f["supports/s0"]
+    na = sup["node_arrays"]
+    del na["pressure"]
+    d = raw_filter_dataset(na, "pressure", PRESSURE_2,
+                           [f["row"], sup["node"], f["component_1"]],
+                           filt)
+    sattr(d, "role", "field")
+    sattr(d, "varies", "row")
+    sattr(d, "units", "Pa")
+    iattr(d, "components", 1)
+    sattr(d, "source", "data")
+
+
+def m_attr_array_root(f):
+    del f.attrs["aligned"]
+    f.attrs.create("aligned", np.array([1, 1, 1], dtype="<i8"))
+
+
+def m_attr_array_key(f):
+    k = f["keys/mach"]
+    del k.attrs["lower"]
+    k.attrs.create("lower", np.array([0.1, 0.2, 0.3], dtype="<f8"))
+
+
+def m_attr_vlen_array_slot(f):
+    p = f["supports/s0/node_arrays/pressure"]
+    del p.attrs["units"]
+    p.attrs.create("units", ["Pa", "kPa"],
+                   dtype=h5py.string_dtype(encoding="utf-8"))
+
+
+def m_filter_unknown_id(f):
+    replace_pressure_with_filter(f, (39999, h5py.h5z.FLAG_OPTIONAL,
+                                     (1,)))
+
+
+def m_filter_many_client_data(f):
+    replace_pressure_with_filter(
+        f, (39998, h5py.h5z.FLAG_OPTIONAL, tuple(range(12))))
+
+
+def deep_chain(group, depth):
+    """A chain of `depth` groups, each one inside the last. They are
+    created through the low-level API because h5py's create_group
+    cannot turn object time tracking off, and a group that records
+    the time it was made is not byte reproducible."""
+    gcpl = h5py.h5p.create(h5py.h5p.GROUP_CREATE)
+    gcpl.set_obj_track_times(False)
+    gid = group.id
+    for _ in range(depth):
+        gid = h5py.h5g.create(gid, b"g", gcpl=gcpl)
+
+
+def deep_base(f, home):
+    """A small, otherwise ordinary file of two rows with no support,
+    carrying one chain of thirty thousand groups.
+
+    The file keeps the default HDF5 group layout, which costs about a
+    kilobyte a group and makes the file 31 MB. That is deliberate.
+    The newer layout costs a seventh of that, but it writes four
+    timestamps into the root object header, and a file that records
+    when it was written is not byte reproducible. The 31 MB is almost
+    entirely repetition: git stores it in under 900 kB."""
+    sattr(f, "created", CREATED)
+    sattr(f, "format", "mestra/0")
+    sattr(f, "writer", WRITER)
+    battr(f, "aligned", True)
+    row = scale(f, "row", 2, unlimited=True)
+    keys = f.create_group("keys")
+    k = dataset(keys, "mach", [0.40, 0.80], "<f8", [row], n_rows=2)
+    sattr(k, "role", "condition")
+    sattr(k, "units", "1")
+    scalars = f.create_group("scalars")
+    sc = dataset(scalars, "cl", [0.25, 0.55], "<f8", [row], n_rows=2)
+    sattr(sc, "units", "1")
+    sattr(sc, "source", "data")
+    if home == "keys":
+        deep_chain(keys, 30000)
+    else:
+        c0 = f.create_group("callables").create_group("c0")
+        sattr(c0, "type", "example")
+        deep_chain(c0, 30000)
+
+
+def hdeep(home, description):
+    def build(f):
+        if f is not None:
+            deep_base(f, home)
+        return hostile_expect(description, ["E41"])
+    return build
+
+
+LINK_HOMES = ("keys", "scalars", "supports", "callables")
+
+
+def each_home(f, make):
+    for home in LINK_HOMES:
+        g = f[home] if home in f else f.create_group(home)
+        g["ghost"] = make(home)
+
+
+def m_link_soft_dangling(f):
+    each_home(f, lambda home: h5py.SoftLink("/%s/nothing" % home))
+
+
+def m_link_soft_cyclic(f):
+    each_home(f, lambda home: h5py.SoftLink("/%s/ghost" % home))
+
+
+def m_link_external(f):
+    each_home(f, lambda home: h5py.ExternalLink("elsewhere.mes",
+                                                "/%s/mach" % home))
+
+
+def m_wrong_object_kinds(f):
+    f["keys"].create_group("bogus")
+    f["supports"].create_dataset("bogus", data=np.zeros(2),
+                                 dtype="<f8", track_times=False)
+
+
+def m_huge_unwritten_dataset(f):
+    d = f["scalars"].create_dataset(
+        "huge", shape=(10 ** 12,), dtype="<f8", maxshape=(None,),
+        chunks=(1024,), track_times=False)
+    d.dims[0].attach_scale(f["row"])
+    sattr(d, "units", "1")
+    sattr(d, "source", "data")
+
+
+def m_string_invalid_utf8(f):
+    del f["categories"]["region"]
+    strings(f["categories"], "region", None, f["category_region"],
+            size=6, raw=[b"\xff\xfe", b""])
+
+
+def m_scale_attached_twice(f):
+    f["supports/s0/node_arrays/pressure"].dims[2].attach_scale(
+        f["component_2"])
+
+
+def m_scale_no_name_attr(f):
+    del f["component_1"].attrs["NAME"]
+
+
+HOSTILE = {
+    "attr_array_root": hmk(
+        m_attr_array_root,
+        "The root `aligned` attribute is an int64 array of three "
+        "rather than the int8 scalar section 18 requires.",
+        ["E19"]),
+    "attr_array_key": hmk(
+        m_attr_array_key,
+        "A key's `lower` bound is a float64 array of three rather "
+        "than the float64 scalar section 18 requires.",
+        ["E19"]),
+    "attr_vlen_array_slot": hmk(
+        m_attr_vlen_array_slot,
+        "A slot's `units` is an array of two variable-length "
+        "strings, which section 18 forbids twice over.",
+        ["E19"]),
+    "filter_unknown_id": hmk(
+        m_filter_unknown_id,
+        "A field carrying filter 39999, which no HDF5 build has. It "
+        "is marked optional, so the bytes are readable and only the "
+        "pipeline is wrong.",
+        ["E29"]),
+    "filter_many_client_data": hmk(
+        m_filter_many_client_data,
+        "A field carrying an unknown filter with twelve client data "
+        "values, more than the eight some filter interfaces have "
+        "room for.",
+        ["E29"]),
+    "deep_groups_callables": hdeep(
+        "callables",
+        "Thirty thousand groups nested under /callables/c0, which is "
+        "deeper than any reader should recurse. The rest of the file "
+        "is an ordinary two-row file with no support."),
+    "deep_groups_keys": hdeep(
+        "keys",
+        "Thirty thousand groups nested under /keys, where a reader "
+        "walks looking for key columns. The rest of the file is an "
+        "ordinary two-row file with no support."),
+    "link_soft_dangling": hmk(
+        m_link_soft_dangling,
+        "A soft link to a name that does not exist, under each of "
+        "/keys, /scalars, /supports and /callables.",
+        ["E40"]),
+    "link_soft_cyclic": hmk(
+        m_link_soft_cyclic,
+        "A soft link pointing at itself, under each of /keys, "
+        "/scalars, /supports and /callables.",
+        ["E40"]),
+    "link_external": hmk(
+        m_link_external,
+        "An external link into a file that is not there, under each "
+        "of /keys, /scalars, /supports and /callables. A reader that "
+        "followed it would read a file nobody named.",
+        ["E40"]),
+    "wrong_object_kinds": hmk(
+        m_wrong_object_kinds,
+        "A member of /keys that is a group and a member of /supports "
+        "that is a dataset, where the format requires the opposite "
+        "of each.",
+        ["E41"]),
+    "huge_unwritten_dataset": hmk(
+        m_huge_unwritten_dataset,
+        "A scalar slot declaring 10^12 rows in a file of two, "
+        "chunked and never written. Validating it must not allocate; "
+        "only an eager read is E41.",
+        ["E16"]),
+    "string_invalid_utf8": hmk(
+        m_string_invalid_utf8,
+        "A category table whose first entry is not valid UTF-8 and "
+        "whose second is empty.",
+        ["E26"]),
+    "scale_attached_twice": hmk(
+        m_scale_attached_twice,
+        "A second dimension scale attached to a component axis that "
+        "already has one.",
+        ["E25"]),
+    "scale_no_name_attr": hmk(
+        m_scale_no_name_attr,
+        "A dimension scale with CLASS but no NAME attribute, which "
+        "is half of what makes a scale.",
+        ["E25"]),
+}
+
+# No case needs a library version bound; see deep_base for why the
+# two deep files keep the default group layout.
+HOSTILE_LIBVER = {}
+
+# The two deep files are 31 MB each and are not committed. They are
+# generated on demand, with --hostile-deep, and their chain hangs
+# below the group named here. Their expected.json is committed like
+# every other one, so an implementation knows they exist and knows to
+# generate them before running the subset.
+DEEP = {
+    "deep_groups_callables": "callables/c0",
+    "deep_groups_keys": "keys",
+}
+
+
+# ------------------------------------------------------------- output
+
+def write_case(parent, name, builder, libver=None, data=True):
+    """Write one case. With data false only expected.json is written,
+    which is how the two deep hostile files stay out of the tree."""
+    d = os.path.join(parent, name)
     if not os.path.isdir(d):
         os.makedirs(d)
-    path = os.path.join(d, "case.mes")
-    f = h5py.File(path, "w")
-    try:
-        exp = CASES[name](f)
-    finally:
-        f.close()
+    if data:
+        kw = {} if libver is None else {"libver": libver}
+        f = h5py.File(os.path.join(d, "case.mes"), "w", **kw)
+        try:
+            exp = builder(f)
+        finally:
+            f.close()
+    else:
+        exp = builder(None)
     with open(os.path.join(d, "expected.json"), "w",
               encoding="utf-8", newline="\n") as fh:
         fh.write(canonical(exp))
@@ -2298,20 +2602,30 @@ def write_case(cases_dir, name):
 
 
 def main(argv):
-    out = (argv[1] if len(argv) > 1
+    deep = "--hostile-deep" in argv
+    rest = [a for a in argv[1:] if not a.startswith("--")]
+    out = (rest[0] if rest
            else os.path.dirname(os.path.abspath(__file__)))
-    cases_dir = os.path.join(out, "cases")
-    if not os.path.isdir(cases_dir):
-        os.makedirs(cases_dir)
     entries = []
     for name in sorted(CASES):
-        exp = write_case(cases_dir, name)
+        exp = write_case(os.path.join(out, "cases"), name, CASES[name])
         entries.append({"name": name,
+                        "description": exp["description"]})
+    hostile = []
+    for name in sorted(HOSTILE):
+        exp = write_case(os.path.join(out, "hostile"), name,
+                         HOSTILE[name], HOSTILE_LIBVER.get(name),
+                         data=(deep or name not in DEEP))
+        hostile.append({"name": name,
                         "description": exp["description"]})
     with open(os.path.join(out, "manifest.json"), "w",
               encoding="utf-8", newline="\n") as fh:
-        fh.write(canonical({"corpus": 0, "cases": entries}))
-    print("%d cases written under %s" % (len(entries), cases_dir))
+        fh.write(canonical({"corpus": 0, "cases": entries,
+                            "hostile": hostile}))
+    print("%d cases and %d hostile files written under %s%s"
+          % (len(entries), len(hostile), out,
+             "" if deep else
+             " (the %d deep files need --hostile-deep)" % len(DEEP)))
     return 0
 
 

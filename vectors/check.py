@@ -15,6 +15,14 @@ ones the file's own dimension scales give it, which is the check that
 catches a reader taking a dimension name from the NAME attribute
 instead of the link name.
 
+The hostile subset of section 30 is compared by bytes, except for
+the two deep files, which are not committed: they are generated into
+place if missing and compared structurally, because two people's
+copies come from two libhdf5 versions. Nothing here opens a hostile
+file with a netCDF reader, and every walk is depth capped and
+resolves dimension scales by address, which is what section 29 and
+section 21 require of a reader facing a file it did not write.
+
 One line per case; the exit status is non-zero if anything differs
 or fails to open.
 """
@@ -79,25 +87,77 @@ def filters(dset):
     return ",".join(out)
 
 
-def scale_names(dset):
-    """The link name of each dimension scale attached to each axis."""
+MAX_DEPTH = 64
+
+
+def is_scale(d):
+    return isinstance(d, h5py.Dataset) and \
+        d.attrs.get("CLASS", b"") in (b"DIMENSION_SCALE",
+                                      "DIMENSION_SCALE")
+
+
+def scale_names(dset, by_addr):
+    """The link name of each dimension scale attached to each axis,
+    found by object address.
+
+    Never `dim[i].name`. Resolving an attached scale's path makes
+    HDF5 search the group hierarchy, and on a file with thirty
+    thousand nested groups that search runs off the stack and takes
+    the process with it (section 21). Dereferencing the scale and
+    reading its address is safe; the name comes from the map the walk
+    builds."""
     names = []
     for dim in dset.dims:
         axis = []
         for i in range(len(dim)):
-            axis.append(dim[i].name.rsplit("/", 1)[-1])
+            try:
+                addr = h5py.h5o.get_info(dim[i].id).addr
+            except Exception:
+                axis.append(None)
+                continue
+            axis.append(by_addr.get(addr, "<outside the walk>"))
         names.append(tuple(axis))
     return names
 
 
 def walk(f):
-    paths = {}
+    """Iterative, depth capped and hard links only, as section 29
+    requires of any reader facing a file it did not write. Returns
+    the objects, a map from scale address to link name, and whether
+    the cap was reached."""
+    paths = {"/": f}
+    by_addr = {}
+    capped = False
+    stack = [("", f, 0)]
+    while stack:
+        prefix, g, depth = stack.pop()
+        if depth >= MAX_DEPTH:
+            capped = True
+            continue
+        for name in sorted(g):
+            path = prefix + "/" + name
+            if not isinstance(g.get(name, getlink=True), h5py.HardLink):
+                paths[path] = "a link that is not a hard link"
+                continue
+            obj = g[name]
+            paths[path] = obj
+            if is_scale(obj):
+                by_addr[h5py.h5o.get_info(obj.id).addr] = name
+            if isinstance(obj, h5py.Group):
+                stack.append((path, obj, depth + 1))
+    return paths, by_addr, capped
 
-    def visit(name, obj):
-        paths["/" + name] = obj
-    f.visititems(visit)
-    paths["/"] = f
-    return paths
+
+def chain_depth(f, root):
+    """How far the chain of groups named `g` runs below `root`. The
+    handles are released as it goes; holding thirty thousand open
+    groups is what makes a naive walk of these files crawl."""
+    cur = f[root]
+    depth = 0
+    while depth <= 40000 and isinstance(cur, h5py.Group) and "g" in cur:
+        cur = cur["g"]
+        depth += 1
+    return depth
 
 
 def bits_equal(a, b):
@@ -113,18 +173,32 @@ def bits_equal(a, b):
     return np.array_equal(a, b)
 
 
-def structural_diff(path_a, path_b):
+def structural_diff(path_a, path_b, chain=None):
     """The differences between two files under the rule of section
-    30, as a list of one-line strings."""
+    30, as a list of one-line strings. With `chain` the length of the
+    group chain below that path is compared too, which is the one
+    thing the depth cap would otherwise hide."""
     out = []
     with h5py.File(path_a, "r") as fa, h5py.File(path_b, "r") as fb:
-        a, b = walk(fa), walk(fb)
+        a, aa, acap = walk(fa)
+        b, ba, bcap = walk(fb)
+        if chain is not None:
+            da, db = chain_depth(fa, chain), chain_depth(fb, chain)
+            if da != db:
+                out.append("the chain below /%s is %d deep and %d deep"
+                           % (chain, da, db))
         for p in sorted(set(a) - set(b)):
             out.append("only in the committed file: %s" % p)
         for p in sorted(set(b) - set(a)):
             out.append("only in the fresh file: %s" % p)
         for p in sorted(set(a) & set(b)):
             oa, ob = a[p], b[p]
+            if not isinstance(oa, h5py.Dataset) and \
+                    not isinstance(ob, h5py.Dataset) and \
+                    (isinstance(oa, str) or isinstance(ob, str)):
+                if oa != ob:
+                    out.append("%s: %r and %r" % (p, oa, ob))
+                continue
             if isinstance(oa, h5py.Dataset) != isinstance(
                     ob, h5py.Dataset):
                 out.append("%s: group in one file, dataset in the "
@@ -149,7 +223,8 @@ def structural_diff(path_a, path_b):
                     ("maxshape", oa.maxshape, ob.maxshape),
                     ("chunks", oa.chunks, ob.chunks),
                     ("filters", filters(oa), filters(ob)),
-                    ("dimensions", scale_names(oa), scale_names(ob))):
+                    ("dimensions", scale_names(oa, aa),
+                     scale_names(ob, ba))):
                 if va != vb:
                     out.append("%s: %s is %r and %r"
                                % (p, what, va, vb))
@@ -168,13 +243,11 @@ def netcdf_checks(path):
     problems = []
     with h5py.File(path, "r") as f:
         wanted = {}
-
-        def visit(name, obj):
-            if isinstance(obj, h5py.Dataset) and not obj.attrs.get(
-                    "CLASS", b"") == b"DIMENSION_SCALE":
-                wanted["/" + name] = [n[0] if n else None
-                                      for n in scale_names(obj)]
-        f.visititems(visit)
+        objs, by_addr, _capped = walk(f)
+        for p, obj in objs.items():
+            if isinstance(obj, h5py.Dataset) and not is_scale(obj):
+                wanted[p] = [n[0] if n else None
+                             for n in scale_names(obj, by_addr)]
 
     try:
         import netCDF4
@@ -247,7 +320,7 @@ def main(argv):
         quiet = sys.stdout
         sys.stdout = open(os.devnull, "w")
         try:
-            generate.main(["generate.py", tmp])
+            generate.main(["generate.py", tmp, "--hostile-deep"])
         finally:
             sys.stdout.close()
             sys.stdout = quiet
@@ -302,6 +375,85 @@ def main(argv):
             else:
                 print("%-28s ok    %s" % (name, how))
 
+        hostile_dir = os.path.join(root, "hostile")
+        fresh_hostile = os.path.join(tmp, "hostile")
+        have = sorted(os.listdir(hostile_dir)) if os.path.isdir(
+            hostile_dir) else []
+        have = [c for c in have
+                if os.path.isdir(os.path.join(hostile_dir, c))]
+        for name in sorted(set(have) - set(generate.HOSTILE)):
+            print("%-28s FAIL  committed but not produced by the "
+                  "generator" % name)
+            failures += 1
+        for name in sorted(generate.DEEP):
+            a = os.path.join(hostile_dir, name, "case.mes")
+            if not os.path.exists(a):
+                quiet = sys.stdout
+                sys.stdout = open(os.devnull, "w")
+                try:
+                    generate.write_case(hostile_dir, name,
+                                        generate.HOSTILE[name])
+                finally:
+                    sys.stdout.close()
+                    sys.stdout = quiet
+                print("%-28s generated, it is not committed" % name)
+
+        for name in sorted(generate.HOSTILE):
+            notes = []
+            a = os.path.join(hostile_dir, name, "case.mes")
+            b = os.path.join(fresh_hostile, name, "case.mes")
+            aj = os.path.join(hostile_dir, name, "expected.json")
+            bj = os.path.join(fresh_hostile, name, "expected.json")
+            if not os.path.exists(a):
+                print("%-28s FAIL  missing from the corpus" % name)
+                failures += 1
+                continue
+            with open(aj, "rb") as fh:
+                ja = fh.read()
+            with open(bj, "rb") as fh:
+                jb = fh.read()
+            if ja != jb:
+                notes.append("expected.json differs")
+            with open(a, "rb") as fh:
+                ba = fh.read()
+            with open(b, "rb") as fh:
+                bb = fh.read()
+            if name in generate.DEEP:
+                # Generated on demand, so two people's copies come
+                # from two libhdf5 versions and byte identity is not
+                # the comparison (section 30). The walk below is
+                # depth capped and the chain is measured separately.
+                diffs = structural_diff(a, b, generate.DEEP[name])
+                if diffs:
+                    notes.extend(diffs[:5])
+                    how = "%d structural differences" % len(diffs)
+                else:
+                    how = "structurally equal (%d MB, generated)" % (
+                        len(ba) // 1048576)
+            elif ba == bb:
+                how = "bytes equal (%d kB)" % (len(ba) // 1024)
+            else:
+                how = "bytes differ"
+                notes.append(
+                    "%d of %d bytes differ"
+                    % (sum(1 for x, y in zip(ba, bb) if x != y),
+                       max(len(ba), len(bb))))
+            exp = json.loads(ja.decode("utf-8"))
+            for field, want in (("allow_extra", True),
+                                ("timeout_seconds", 10)):
+                if exp.get(field) != want:
+                    notes.append("%s is %r, section 30 says %r"
+                                 % (field, exp.get(field), want))
+            if not exp.get("required_errors"):
+                notes.append("required_errors is empty")
+            if notes:
+                failures += 1
+                print("%-28s FAIL  %s" % ("hostile/" + name, how))
+                for note in notes:
+                    print("%-28s       %s" % ("", note))
+            else:
+                print("%-28s ok    %s" % ("hostile/" + name, how))
+
         mf = os.path.join(root, "manifest.json")
         with open(mf, "rb") as fh:
             ma = fh.read()
@@ -316,7 +468,8 @@ def main(argv):
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-    print("%d case(s), %d failure(s)" % (len(generate.CASES), failures))
+    print("%d case(s), %d hostile file(s), %d failure(s)"
+          % (len(generate.CASES), len(generate.HOSTILE), failures))
     return 1 if failures else 0
 
 
