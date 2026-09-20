@@ -49,6 +49,18 @@ function write(dataset, path, varargin)
 %
 %   The file is created fresh; an existing file at PATH is replaced.
 %
+%   STRINGS ARE ASCII HERE.  The format puts every string in a
+%   fixed-length UTF-8 field and counts the size in bytes, and
+%   MATLAB's HDF5 interface cannot carry that faithfully: H5D.write
+%   and H5A.write refuse a character above 127 outright, H5D.read and
+%   H5A.read decode before this package sees the bytes, and HDF5 will
+%   not convert between the ASCII and UTF-8 character sets.  So this
+%   package refuses rather than corrupting: a string with a byte
+%   above 127, written or read, raises mestra:matlabAscii and says
+%   what happened.  Keep key names, category entries, callable ids
+%   and string ids to ASCII and nothing here applies; the whole
+%   conformance corpus is ASCII and passes in full.
+%
 %   Example
 %
 %       d = mestra.read('in.mes');

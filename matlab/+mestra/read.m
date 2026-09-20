@@ -34,14 +34,53 @@ function d = read(path, varargin)
 %   object that cannot be read is never guessed at, nesting is
 %   bounded, and an eager read refuses a dataset above
 %   mestra.limits('maxElements').  By default such a file is REFUSED
-%   rather than half read: the identifier is mestra:E40 for a link,
-%   mestra:E41 for anything else, mestra:E01 for another major
-%   version, and mestra:reader for a file that will not open at all.
+%   rather than half read, and the identifier is mestra: followed by
+%   the rule, or mestra:reader for a file that will not open at all.
+%   These are the nine structural rules a strict read refuses on
+%   (section 2 of docs/api-conventions.md), and they are the only
+%   ones: a semantic fault never stops a read, so that info and
+%   validate work on the files a user most needs to inspect.
+%
+%       E01   a file whose format names another major version, which
+%             section 28 says must not be read even partially
+%       E16   a leading extent that disagrees with the row dimension
+%             it is attached to, so the dataset cannot be lined up
+%             against the keys
+%       E19   an attribute not encoded as section 18 requires: a
+%             variable-length string, an array where a scalar
+%             belongs, an integer that is not int64, a float that is
+%             not float64, a boolean holding anything but 0 or 1
+%       E25   an axis with no dimension scale, with more than one, or
+%             with one this reader cannot name
+%       E26   a string whose bytes are not valid UTF-8, or that holds
+%             a NUL anywhere but in its trailing padding
+%       E29   a filter that is not gzip or shuffle, which section 23
+%             tells a reader to refuse
+%       E30   a slot whose source says data and which is stored as a
+%             group, or which names a callable and is stored as a
+%             dataset; section 19 makes the two tell themselves apart
+%             without reading any data
+%       E40   a link in the public tree that is not a hard link: a
+%             soft link, whether it resolves, dangles or loops, or an
+%             external link, which names another file.  None is ever
+%             followed
+%       E41   an object the reader could not read, with its path: a
+%             malformed header or attribute, a member of the wrong
+%             kind, nesting past maxDepth, a group already visited in
+%             this walk, or, on an eager read only, a dataset above
+%             maxElements or a string wider than maxStringSize
 %
 %   D = MESTRA.READ(PATH, 'Strict', false) returns what could be read
 %   instead, with one line in D.skipped for everything passed over.
 %   An attribute or a group this version does not know is always
 %   ignored, kept, and reported by MESTRA.VALIDATE as W11.
+%
+%   STRINGS ARE ASCII HERE.  A string whose stored bytes go above
+%   127 raises mestra:matlabAscii rather than coming back corrupted;
+%   MATLAB's HDF5 interface decodes a fixed-length string before this
+%   package sees it and will not hand over the bytes.  `help
+%   mestra.write` says why, and why there is no way round it from
+%   inside MATLAB.
 %
 %   MESTRA.OPEN reads the same file without reading any array, which
 %   is what section 29 asks of a reader that is only being asked what
