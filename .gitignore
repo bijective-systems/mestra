@@ -6,6 +6,10 @@ __pycache__/
 *.h5
 !vectors/**/*.mst
 !vectors/**/*.h5
+
+# C++ build trees
+cpp/build/
+build/
 *.egg-info/
 .pytest_cache/
 .mypy_cache/
