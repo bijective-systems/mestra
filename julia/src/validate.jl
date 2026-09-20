@@ -78,10 +78,6 @@ a strict read can refuse a file without reading an array."""
 const STRUCTURAL_RULES = ("E01", "E16", "E19", "E25", "E26", "E29", "E30",
                           "E40", "E41")
 
-"""How many string records a structural pass will read to decide E26.
-It is a bounded look, not a pass over the file: a longer dataset is
-left to `validate`."""
-const STRUCTURAL_STRING_ELEMENTS = 4096
 
 mutable struct Validator
     f::HDF5.File
@@ -128,20 +124,17 @@ function rows_tail(rows::Vector{Int}, n::Int = length(rows))
     return "; $(n) rows, the first three: " * join(rows[1:3], ", ")
 end
 
-"""What a structural pass will read of a string dataset, which is its
-own bound and not the caller's: a strict read decides E26 on a look,
-not on a pass over the file."""
-look_limit(v::Validator) =
-    v.structural ? min(v.max_elements, STRUCTURAL_STRING_ELEMENTS) :
-    v.max_elements
+"""What a structural pass may read of a string dataset.
 
-"""Whether a structural pass should leave a string dataset alone: it
-decides E26 on a bounded number of records, never on a whole file."""
-function too_long_to_look(v::Validator, d)
-    v.structural || return false
-    cdims, _ = disk_shape(d)
-    return prod(vcat(cdims, 1)) > STRUCTURAL_STRING_ELEMENTS
-end
+`docs/api-conventions.md` section 7: an open reads attributes,
+dataspaces, link types and dimension-scale structure, and may read a
+category table in full, because tables are small by construction and
+the open needs them to name E10, E26 and E41 on the same files the
+read names them on.  It never reads a slot's data.  So a category
+table is read whole here and every other string dataset is left to the
+full pass, and the nine structural rules come out the same whether the
+caller asked for a lazy read or an eager one."""
+look_limit(v::Validator) = v.max_elements
 
 """Run one object's checks, and turn anything thrown into E41 against
 that object rather than into the end of the pass."""
@@ -550,7 +543,6 @@ function collect_categories!(v::Validator)
                 "a category table is a dataset")
             continue
         end
-        too_long_to_look(v, d) && continue
         guard!(v, "/categories/$(name)") do
         ti, recs = read_string_records(d; max_elements = look_limit(v))
         if ti.class !== :string || ti.vlen
@@ -1550,9 +1542,12 @@ function check_every_dataset!(v::Validator)
             end
         end
         ti = type_info(HDF5.datatype(obj))
-        if ti.class === :string && !ti.vlen &&
+        # A string dataset that is not a category table is a key
+        # column or a slot, and section 7 of the conventions says an
+        # open never reads one.  E26 and W13 on it are the full pass's.
+        if ti.class === :string && !ti.vlen && !v.structural &&
            !startswith(path, "/categories/") &&
-           !startswith(path, "/callables/") && !too_long_to_look(v, obj)
+           !startswith(path, "/callables/")
             _, recs = read_string_records(obj;
                                           max_elements = look_limit(v))
             for r in recs

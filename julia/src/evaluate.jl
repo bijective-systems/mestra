@@ -60,6 +60,14 @@ function evaluate(ds::Dataset, table)
             "callable `$(id)` produces no output called `$(name)`"))
         materialise_slot!(s, outputs[name], n)
     end
+    # `docs/api-conventions.md` section 7: evaluating a file turns
+    # every callable slot into a stored slot, so the result has no
+    # callable to keep and `/callables` is absent from an evaluated
+    # file rather than present and empty.  That is what the other
+    # three writers leave, and it is what section 13 says a container
+    # group with nothing in it is.
+    empty!(out.callables)
+    delete!(out.container_groups, "callables")
     return out
 end
 

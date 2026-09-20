@@ -832,6 +832,59 @@ end
     @test read(a) == read(b)
 end
 
+@testset "an evaluated file carries no /callables (conventions 7)" begin
+    # Evaluating turns every callable slot into a stored slot, so the
+    # result has no callable to keep: the group is absent, not present
+    # and empty, which is what the other three writers leave.
+    for name in ("affine_zero_rows", "affine_with_rows")
+        ds = Mestra.read(case_file(name))
+        out = Mestra.evaluate(ds, Dict("mach" => [0.5, 0.6],
+                                       "alpha" => [4.0, 2.0]))
+        @test isempty(out.callables)
+        path = joinpath(SCRATCH, "nocallables_" * name * ".mes")
+        Mestra.write(out, path)
+        @test Mestra.validate(path).errors == String[]
+        HDF5.h5open(path, "r") do f
+            @test !haskey(f, "callables")
+        end
+        back = Mestra.read(path)
+        @test isempty(back.callables)
+        @test !("callables" in back.container_groups)
+    end
+end
+
+@testset "the open and the read name the same rule (conventions 7)" begin
+    # An open reads attributes, dataspaces, link types and
+    # dimension-scale structure, and may read a category table in
+    # full; it never reads a slot.  The nine structural rules are
+    # decided from exactly that, so whether the caller asked for a
+    # lazy read or an eager one cannot change which rule refuses the
+    # file, on the corpus or on the hostile subset.
+    hostile = joinpath(REPO, "vectors", "hostile")
+    files = vcat([case_file(n) for n in case_names()],
+                 [joinpath(hostile, d, "case.mes")
+                  for d in sort(readdir(hostile))
+                  if isfile(joinpath(hostile, d, "case.mes"))])
+    for p in files
+        lazy = refusal(() -> Mestra.read(p))
+        eager = refusal(() -> Mestra.read(p; lazy = false))
+        @test (lazy === nothing) == (eager === nothing)
+        lazy === nothing && continue
+        @test lazy.rule == eager.rule
+        @test lazy.path == eager.path
+    end
+    # a category table is read in full by the open, so an entry that
+    # is not valid UTF-8 is E26 from the open and not only from the
+    # read (section 25: a reader that cannot recover the bytes of a
+    # string must say so rather than return something else)
+    bad = joinpath(hostile, "string_invalid_utf8", "case.mes")
+    e = refusal(() -> Mestra.read(bad))
+    @test e !== nothing && e.rule == "E26"
+    ds = Mestra.read(bad; strict = false)
+    @test any(f -> f.rule == "E26", ds.findings)
+    @test !haskey(ds.categories, "region")
+end
+
 @testset "gzip and shuffle, the two portable filters (section 23)" begin
     ds = Mestra.Dataset(writer = "mestra.jl test 0",
                         created = "2026-09-19T00:00:00Z")
