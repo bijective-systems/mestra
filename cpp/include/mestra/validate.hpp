@@ -32,6 +32,18 @@ struct Report {
 // reader cannot open at all comes back as E01 or E17 with a message.
 Report validate(const std::string& path);
 
+// The same pass, restricted to what a metadata open sees
+// (docs/api-conventions.md section 7): attributes, dataspaces, link
+// types and dimension-scale structure, plus a category table in full
+// and `/row_support`, which are the two datasets that are not slots
+// and that a rule is decided from.  No slot and no dataset inside a
+// callable's dictionary is read.  This is what `read_header` refuses
+// on, so the metadata open, the whole read and `info` name the same
+// rule for the same file.  An object whose declared element count is
+// past the maximum an eager read takes is E41 here too, because that
+// is a fact of its dataspace (section 29).
+Report validate_metadata(const std::string& path);
+
 // The units parser W10 is driven by: true when the string is in the
 // UDUNITS grammar this version accepts.  It covers what the format
 // needs -- identifiers with exponents, products, quotients and

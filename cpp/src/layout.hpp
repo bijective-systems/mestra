@@ -49,6 +49,21 @@ bool known_support_group(const std::string& name);
 // section 21 puts there.
 bool root_scale_name(const std::string& name);
 
+// True when a support-local dataset name is one of the dimension
+// scales section 21 puts inside a support.
+bool support_scale_name(const std::string& name);
+
+// True when this version of the format puts a dataset at `path`.
+// Everything else in the public tree is a dataset this version does
+// not know, and section 28 provides for a new attribute and a new
+// group and not for a new dataset; section 14 exempts /private and a
+// group this version does not know and nothing else, so such a
+// dataset is a public object and the byte-level rules of sections 18
+// to 25 are checked on it.  `is_scale` is what the object says of
+// itself, because a support-local scale and a dataset that merely
+// took its name are not the same thing.
+bool known_dataset_path(const std::string& path, bool is_scale);
+
 }  // namespace internal
 }  // namespace mestra
 

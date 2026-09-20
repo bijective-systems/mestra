@@ -34,14 +34,21 @@ If the Python CMake picks up is not that one, name it:
     cmake --build cpp/build -j
     ctest --test-dir cpp/build --output-on-failure
 
-The suite has four tests. `unit` is pure C++ checks: the SHA-256
+The suite has six tests. `unit` is pure C++ checks: the SHA-256
 vectors and the three worked digests of section 24, the units parser,
 the dictionary codec's value types, the worked affine example of
 section 27, one dataset built from plain vectors and validated, and
 the conventions of `docs/api-conventions.md` one rule at a time.
 `corpus` runs every case of `vectors/cases` through `mestra-cli`.
-`shared_hostile` runs the corpus's own hostile subset and `hostile`
-this implementation's; both are described at the end of this file.
+`private_roundtrip` builds a file whose `/private` holds subgroups,
+datasets, filters, dimension scales and dtypes the public part
+forbids, and requires the round trip to be structurally equal, which
+no corpus case covers. `metadata_open` puts the metadata open of
+conventions section 7 against the whole read on every file there is,
+and requires them to name the same structural rules and the open to
+name nothing the read does not. `shared_hostile` runs the corpus's own hostile
+subset and `hostile` this implementation's; both are described at the
+end of this file.
 
 Two of the shared hostile files are generated rather than committed,
 so run
@@ -85,6 +92,14 @@ Five minutes with the tool
         the identifiers alone, "E <id>" and "W <id>" one per line,
         which is what a shell script wants.
 
+    mestra-cli validate --metadata FILE
+        the same pass restricted to what a metadata open reads
+        (conventions section 7): attributes, dataspaces, link types,
+        dimension-scale structure, and of datasets only a category
+        table and /row_support. It answers "would `info` and
+        `read_header` refuse this file, and with which identifiers"
+        without reading a slot to find out. `--ids` combines with it.
+
     mestra-cli read FILE
         check the file, refuse it with the findings if the validator
         rejects it, and otherwise read the whole of it and
@@ -108,7 +123,8 @@ Five minutes with the tool
 
         It checks the file first and refuses it the way `read` does;
         past that it reads attributes and dataspaces only, so it opens
-        a large file as fast as a small one.
+        a large file as fast as a small one. `validate --metadata`
+        says what that open alone decides.
 
     mestra-cli integrate FILE SLOT [WEIGHT]
         one slot integrated over its support, one value per row and
@@ -188,10 +204,22 @@ needs to look at. `mestra::read(path, {/*strict=*/false})` reads what
 it can and lists what it refused in `Dataset::not_read`.
 
 A strict read costs one validation pass over the file.
-`mestra::read_header` reads the metadata without reading any array or
-validating anything, and `mestra::read_slot_rows(path, slot, begin,
-end)` reads one slot for a row range without touching the rest; those
-are the cheap paths.
+`mestra::read_header` is the metadata open of section 29 and of
+section 7 of the conventions: it reads attributes, dataspaces, link
+types and dimension-scale structure, and of datasets only a category
+table and `/row_support`, which are the two that are not slots. It
+refuses the same nine structural rules with the same identifiers a
+read would give, so an open never hands back something a read would
+refuse; it reads no slot and no dataset inside a callable's
+dictionary, so it stays the cheap path. `mestra::validate_metadata`
+is that pass on its own, and `mestra-cli validate --metadata` prints
+it. `mestra::read_slot_rows(path, slot, begin, end)` reads one slot
+for a row range without touching the rest.
+
+The two passes are checked against each other on every file there is
+-- all 70 corpus cases, the 15 shared hostile files and the 12 here --
+and they name the same structural rules on every one of them, and the
+open names nothing the read does not.
 
 Writing. Build a dataset from plain vectors. The builders fill in the
 dimension names, the shapes, the bounds and the support id, so that
@@ -424,10 +452,27 @@ A reader that does not know a type may still copy its dictionary and
 must not interpret it, which is what `read_dict` and `write_dict` are
 for.
 
-One thing a round trip does not carry. Section 29 forbids a reader to
-interpret `/private`, so nothing of it is read and `write` does not
-reproduce it. `Dataset::has_private` says the file had one; a producer
-that needs to keep its private group copies that group itself.
+What a round trip does with `/private`. Sections 12 and 29 forbid a
+reader to interpret that group; they say nothing against copying it,
+and a producer that round-trips a file keeps its own records. A whole
+read therefore takes an opaque copy of it and `write` puts it back:
+the same objects, dtypes, shapes, chunks, filters, attributes,
+subgroups and dimension scales, including the encodings section 18
+forbids in the public part, because nothing here decides what any of
+it means. The copy is the HDF5 library's own object copy into an
+in-memory file, whose bytes `Dataset::private_group` carries;
+`Dataset::has_private` still says the file had one.
+
+    mestra::Dataset d = mestra::read("from_a_producer.mes");
+    mestra::write(d, "back_again.mes");   // /private and all
+
+Two things follow. `mestra::read_header` reads no array (section 29)
+and so takes no copy, and a dataset it returns writes no `/private`.
+And the group is copied whole, so it is held whole: a `/private`
+nested deeper than 64, holding more than 65,536 objects or more than
+one gibibyte is **E41**, the identifier for an object this reader
+cannot read, rather than a silent truncation or an allocation without
+bound.
 
 
 What this package does not do
@@ -533,8 +578,9 @@ is never reported clean because the thing wrong with it has no
 identifier. And `info` and `read` check the file before they read it
 and refuse with the same identifiers `validate` gives, which is what
 the hostile subset of section 30 asks of them; `mestra::read_header`
-itself still reads no dataset, so the library keeps the cheap open and
-the tool keeps the safe one.
+refuses the structural nine from what a metadata open may read, so the
+library's cheap open refuses what its read refuses without reading a
+slot to find out.
 
 There are two hostile suites. `vectors/hostile` is the corpus's own,
 shared by every language, and its contract is section 30's: the
@@ -553,7 +599,7 @@ sanitizers to the whole suite.
 What this build has been checked against
 ----------------------------------------
 
-179 unit checks, including the conventions of
+184 unit checks, including the conventions of
 `docs/api-conventions.md` one rule at a time: the argument order, the
 bounds default, `dims` deriving `varies` and `components`, the
 permutation into stored order, the refusals a builder makes and the
@@ -563,15 +609,19 @@ measure is known by hand, the lumped node weights adding up to the
 area, the default weight rule, and the statistics of a field with a
 missing value in it; and a zero-row callable file built with
 `add_callable(id, callable)` and a callable slot, written, validated
-and evaluated.
+and evaluated, whose evaluated form keeps no callable and no
+`/callables` group.
 
 All 70 corpus cases: the validator outcome and the shape of the
 validator's own output, every support id, every probe, every codec
 round trip, every worked evaluation, a lazy row read of every
 row-dimensioned probe, and, for the 30 cases that validate without an
 error, read-write-compare under the structural equality rule of
-section 30. Then the fifteen cases of `vectors/hostile` and the ten of
-this implementation's own, each through `validate`, `info` and `read`.
+section 30, and, for every worked evaluation, that the evaluated file
+carries no `/callables` group. Then the fifteen cases of
+`vectors/hostile` and the twelve of this implementation's own, each
+through `validate`, `info` and `read`, and all 97 files of the three
+sets through the metadata open beside the whole read.
 The whole of it also runs under the address and undefined-behaviour
 sanitizers.
 

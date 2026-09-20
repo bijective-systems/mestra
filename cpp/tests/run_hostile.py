@@ -28,6 +28,35 @@ import sys
 
 FINDING = re.compile(r"^([EW][0-9]{2}|!) (\S+): (.*)$")
 
+# Most of these files are here for the one thing above: an answer
+# rather than a signal.  Three of them are here for which answer,
+# because naming the wrong rule, or none, is its own fault -- the
+# Phase 3 report's SHOULD-FIX 12 and 14.  `must` is what `validate`
+# has to name and `must_not` what it may not, each an identifier of
+# section 14.
+EXPECTED = {
+    "category_above_cap.mes": {
+        # Section 29: the eager read of a table above the stated
+        # maximum element count is E41.  E10 is what a reader says
+        # when it read that table as empty and then found every
+        # category id outside it, which is the consequence of the
+        # fault and not the fault.
+        "must": ["E41"],
+        "must_not": ["E10"],
+    },
+    "shape_enormous.mes": {
+        "must": ["E16", "E41"],
+        "must_not": [],
+    },
+    "support_unknown_dataset.mes": {
+        # The report's SHOULD-FIX 12.  A dataset this version does not
+        # know, in a group it does, is a public object and section
+        # 23's chunking rule holds on it.
+        "must": ["E27"],
+        "must_not": [],
+    },
+}
+
 # Long enough that a slow machine under a sanitizer is not mistaken
 # for a hang, short enough that a hang is not mistaken for patience.
 TIMEOUT_SECONDS = 120
@@ -64,6 +93,20 @@ def check(cli, path, problems):
             if not findings:
                 problems.append("%s: validate found nothing to say"
                                 % (name,))
+            expected = EXPECTED.get(name)
+            if expected is not None:
+                named = set(FINDING.match(line).group(1)
+                            for line in findings)
+                for rule in expected["must"]:
+                    if rule not in named:
+                        problems.append(
+                            "%s: validate did not name %s; it named %s"
+                            % (name, rule, ", ".join(sorted(named))))
+                for rule in expected["must_not"]:
+                    if rule in named:
+                        problems.append(
+                            "%s: validate named %s, which is downstream of "
+                            "the fault and not the fault" % (name, rule))
         elif code == 1 and not (out.strip() or err.strip()):
             problems.append("%s: %s refused the file and said nothing"
                             % (name, command))

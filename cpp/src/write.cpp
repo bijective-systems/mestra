@@ -432,6 +432,15 @@ class Writer {
       f_.make_group("/notes");
       put_extra("/notes", d_.notes);
     }
+    // The private group goes back exactly as it came, object by
+    // object, without this writer having decided what any of it means
+    // (sections 12 and 29).  A dataset built from vectors carries none
+    // and nothing is written.
+    if (!d_.private_group.empty()) {
+      internal::restore_group(f_, "/private", d_.private_group);
+    } else if (d_.container_groups.count("/private") != 0) {
+      f_.make_group("/private");
+    }
     for (const std::string& name : d_.unknown_root_groups) {
       f_.make_group("/" + name);
     }
