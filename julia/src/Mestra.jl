@@ -39,6 +39,7 @@ include("write.jl")
 include("validate.jl")
 include("evaluate.jl")
 include("build.jl")
+include("weights.jl")
 include("postprocess.jl")
 include("compare.jl")
 
