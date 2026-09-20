@@ -529,22 +529,29 @@ Resolved resolve(const std::string& path, const Dims& dims, Location where,
     for (const std::size_t i : unknown) extent[i] = 1;
   } else if (unknown.size() > 1) {
     std::string listed;
-    for (const std::size_t i : unknown) {
-      if (!listed.empty()) listed += "\" and \"";
-      listed += names[i];
+    for (std::size_t at = 0; at < unknown.size(); ++at) {
+      if (at != 0) listed += at + 1 == unknown.size() ? "\" and \"" : "\", \"";
+      listed += names[unknown[at]];
     }
+    // The axis to suggest is the component one when it is among them,
+    // because a caller knows how many components they have and not
+    // always how many rows.
+    const std::string suggest =
+        component_unknown ? std::string("component")
+                          : names[unknown.front()];
     refuse(component_unknown ? "E31" : count_rule, path,
-           "the length of \"" + listed + "\" cannot both be worked out "
-           "from " + count_text(values) +
+           "the length of \"" + listed + "\" cannot " +
+               (unknown.size() == 2 ? "both" : "all") +
+               " be worked out from " + count_text(values) +
                " values; give one of them a length in `dims`, as "
-               "{\"component\", <n>}");
+               "{\"" + suggest + "\", <n>}");
   } else if (unknown.size() == 1) {
     const std::size_t i = unknown.front();
     if (known == 0 || values % known != 0) {
       refuse(count_rule, path,
-             count_text(values) + " values do not divide into " +
-                 count_text(known) + " per " + names[i] +
-                 "; change `values` or the lengths in `dims`");
+             count_text(values) + " values do not divide into blocks of " +
+                 count_text(known) + ", which is what one \"" + names[i] +
+                 "\" holds; change `values` or the lengths in `dims`");
     }
     extent[i] = static_cast<std::int64_t>(values / known);
   } else if (known != values) {
