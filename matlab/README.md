@@ -208,6 +208,34 @@ conformance corpus is full of, say so:
 
     mestra.write(d, 'err_e16.mes', 'Check', false);
 
+Everything a file said about its own layout survives being read and
+written again. A chunk shape that is not the default of section 23
+and a compression filter both come back on the record and go back
+into the file:
+
+    d = mestra.read('big.mes');
+    d.support('s0').nodeArrays(1).chunk       % [3 36000 1]
+    d.support('s0').nodeArrays(1).filters     % [2 0; 1 4]
+    mestra.write(d, 'again.mes');             % same chunk, same gzip
+
+`Filters` is an n-by-2 matrix of HDF5 filter id and parameter in
+pipeline order, beside `Chunk` on `addKey`, `addScalar` and the array
+builders: `[2 0]` is shuffle, `[1 4]` is gzip at level 4, and
+`[2 0; 1 4]` is shuffle then gzip, which is the order that makes
+shuffle worth anything. Section 23 allows those two and nothing else
+(E29). A slot with no `row` dimension that carries a filter is
+chunked, because HDF5 will not compress contiguous storage.
+
+Dimension scales are created as section 21 requires, with attribute
+creation order tracked and indexed and with object times off. That is
+the one place in this format where a property list rather than a byte
+position decides something, and it is what lets one scale carry more
+than 4085 attachments: without it the 4086th fails after it has
+already deleted the REFERENCE_LIST it was extending, and leaves a
+file every reader and every validator still accepts (E42). Nothing
+else's property list is touched, so two writes of one dataset are
+still identical byte for byte.
+
 
 Weights, integration and the four post-processing verbs
 -------------------------------------------------------
@@ -542,6 +570,16 @@ What the reader refuses, and under which rule:
   * a member of the wrong kind, E41: a key that is a group, a support
     that is a dataset, a callable that is not a group.
 
+Two rules are the validator's and not the reader's. E42, a dimension
+scale created without attribute creation order tracked and indexed,
+and E43, an unlimited dimension that is not `row`, are both true of
+files this reader reads correctly: the first is a ceiling on what the
+container can still be written into and the second is a dimension
+whose name has stopped being true. `mestra.validate` reports them,
+with the scale's path, and a read returns the file. Section 2 of
+`docs/api-conventions.md` lists the structural rules a strict read
+refuses, and neither is one of them.
+
 `mestra.limits` reads and changes the four numbers, so a genuinely
 large or deeply nested file is a decision you make and not a crash
 you get.
@@ -588,12 +626,17 @@ does it.
 Two hostile suites are run. `vectors/hostile` is the corpus's own,
 fifteen files shared by every language, whose contract is that the
 required rules must be reported within ten seconds and that reading
-must refuse rather than return. Two of its files are thirty-one
-megabytes of nested groups and are generated rather than committed:
+must refuse rather than return. Three golden files are too large to
+commit -- two hostile ones of thirty-one megabytes of nested groups,
+and `cases/wide_keys`, the sixteen-megabyte file of 4200
+row-dimensioned datasets that reaches the attachment ceiling E42 is
+about -- so they are generated rather than committed:
 
-    python vectors/generate.py --hostile-deep
+    python vectors/generate.py --hostile-deep --wide
 
-Without them those two cases are skipped and say so. `tests/hostile/`
+Without them those cases are skipped with the command that writes
+them in the message, and the run does not pass until they are there,
+because a corpus that is not whole has not been run. `tests/hostile/`
 is this package's own set of twenty, which goes further in places:
 array-valued attributes in three encodings, thirty thousand levels of
 nesting built at run time, a cycle of hard links, a declared shape of
