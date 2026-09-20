@@ -1,0 +1,287 @@
+// mestra-cli: the command line over the library, and what the
+// conformance driver of cpp/tests/run_corpus.py talks to.  It prints
+// plain text so that a test script needs no JSON code on this side.
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <iostream>
+#include <string>
+#include <vector>
+
+#include "mestra/mestra.hpp"
+
+namespace {
+
+int usage() {
+  std::cout <<
+      "mestra-cli COMMAND ARGUMENTS\n"
+      "\n"
+      "  validate FILE                    rule ids, one per line\n"
+      "  info FILE                        what the file holds\n"
+      "  probe FILE SLOT ROW NODE COMPONENT [DRAW]\n"
+      "                                   one stored value\n"
+      "  support-id FILE SUPPORT          the digest of section 24\n"
+      "  roundtrip IN OUT                 read IN and write OUT\n"
+      "  evaluate FILE KEYS.csv OUT       evaluate every callable\n"
+      "  dict-dump FILE CALLABLE          a callable's dictionary\n"
+      "  dict-roundtrip FILE CALLABLE OUT write the dictionary back\n"
+      "  rows FILE SLOT BEGIN END         a lazy read of a row range\n"
+      "  callable-types                   the types this build knows\n"
+      "\n"
+      "A probe index may be `-` when the slot has no such axis, and "
+      "any\n"
+      "index may also be given as NAME=VALUE, with NAME one of row,\n"
+      "instance, draw, node, cell, component or index.  A float64 slot\n"
+      "prints its value in the C format \"%.17e\" and an integer slot\n"
+      "in plain decimal, which is what section 30 asks a probe for.\n";
+  return 2;
+}
+
+// The axes a probe may name, in stored order.
+struct ProbeIndex {
+  bool has_row = false;
+  bool has_instance = false;
+  bool has_draw = false;
+  bool has_node = false;
+  bool has_component = false;
+  bool has_index = false;
+  std::size_t row = 0, instance = 0, draw = 0, node = 0, component = 0,
+              index = 0;
+};
+
+bool parse_index(const std::string& text, std::size_t* out) {
+  if (text == "-" || text.empty()) return false;
+  *out = static_cast<std::size_t>(std::strtoull(text.c_str(), nullptr, 10));
+  return true;
+}
+
+// Builds the subscript list in stored order, which is
+// (row | instance, [draw], node | cell, component) with `index` the
+// flat connectivity axis (section 30).
+std::vector<std::size_t> subscripts(const ProbeIndex& p) {
+  std::vector<std::size_t> out;
+  if (p.has_row) out.push_back(p.row);
+  if (p.has_instance) out.push_back(p.instance);
+  if (p.has_draw) out.push_back(p.draw);
+  if (p.has_node) out.push_back(p.node);
+  if (p.has_component) out.push_back(p.component);
+  if (p.has_index) out.push_back(p.index);
+  return out;
+}
+
+int cmd_validate(const std::string& path) {
+  const mestra::Report r = mestra::validate(path);
+  for (const std::string& id : r.error_ids()) std::cout << "E " << id << "\n";
+  for (const std::string& id : r.warning_ids()) {
+    std::cout << "W " << id << "\n";
+  }
+  return 0;
+}
+
+int cmd_info(const std::string& path) {
+  const mestra::Dataset d = mestra::read_header(path);
+  std::cout << "format " << d.format << "\n";
+  std::cout << "writer " << d.writer << "\n";
+  std::cout << "created " << d.created << "\n";
+  std::cout << "aligned " << (d.aligned ? "true" : "false") << "\n";
+  std::cout << "rows " << d.n_rows << "\n";
+  if (d.generalisation_group.has_value()) {
+    std::cout << "generalisation_group " << *d.generalisation_group << "\n";
+  }
+  for (const mestra::Key& k : d.keys) {
+    std::cout << "key " << k.name << " role=" << k.role;
+    if (k.units.has_value()) std::cout << " units=" << *k.units;
+    if (k.lower.has_value()) std::cout << " lower=" << *k.lower;
+    if (k.upper.has_value()) std::cout << " upper=" << *k.upper;
+    if (k.category.has_value()) std::cout << " category=" << *k.category;
+    std::cout << "\n";
+  }
+  for (const mestra::Scalar& s : d.scalars) {
+    std::cout << "scalar " << s.name << " units=" << s.units
+              << " source=" << s.source << "\n";
+  }
+  for (const mestra::CategoryTable& t : d.categories) {
+    std::cout << "categories " << t.name << " entries=" << t.entries.size()
+              << "\n";
+  }
+  for (const mestra::Support& s : d.supports) {
+    std::cout << "support " << s.name << " kind=" << s.kind
+              << " n_nodes=" << s.n_nodes << " n_cells=" << s.n_cells
+              << " support_id=" << s.support_id << "\n";
+    if (s.coordinates.has_value()) {
+      std::cout << "  coordinates varies=" << s.coordinates->varies
+                << " components=" << s.coordinates->components << "\n";
+    }
+    for (const mestra::ArraySlot& a : s.node_arrays) {
+      std::cout << "  node_array " << a.name << " role=" << a.role
+                << " varies=" << a.varies << " components=" << a.components
+                << " source=" << a.source << "\n";
+    }
+    for (const mestra::ArraySlot& a : s.cell_arrays) {
+      std::cout << "  cell_array " << a.name << " role=" << a.role
+                << " varies=" << a.varies << " components=" << a.components
+                << " source=" << a.source << "\n";
+    }
+  }
+  for (const mestra::StoredCallable& c : d.callables) {
+    std::cout << "callable " << c.id << " type=" << c.type;
+    if (c.repr.has_value()) std::cout << " repr=" << *c.repr;
+    std::cout << "\n";
+  }
+  return 0;
+}
+
+std::string value_text(const mestra::Array& a,
+                       const std::vector<std::size_t>& at) {
+  char buffer[64];
+  if (a.dtype == mestra::DType::Float64) {
+    const double v = a.at_f64(at);
+    // Section 30: the three non-finite values are spelled "nan",
+    // "inf" and "-inf".
+    if (std::isnan(v)) return "nan";
+    if (std::isinf(v)) return v > 0 ? "inf" : "-inf";
+    std::snprintf(buffer, sizeof(buffer), "%.17e", v);
+    return std::string(buffer);
+  }
+  std::snprintf(buffer, sizeof(buffer), "%lld",
+                static_cast<long long>(a.at_i64(at)));
+  return std::string(buffer);
+}
+
+int cmd_probe(int argc, char** argv) {
+  // probe FILE SLOT ROW NODE COMPONENT [DRAW], or any number of
+  // NAME=VALUE arguments after SLOT.
+  if (argc < 4) return usage();
+  const std::string path = argv[2];
+  const std::string slot = argv[3];
+  ProbeIndex p;
+  bool keyword = false;
+  for (int i = 4; i < argc; ++i) {
+    if (std::strchr(argv[i], '=') != nullptr) keyword = true;
+  }
+  if (keyword) {
+    for (int i = 4; i < argc; ++i) {
+      const std::string arg = argv[i];
+      const std::size_t at = arg.find('=');
+      const std::string name = arg.substr(0, at);
+      const std::string text = arg.substr(at + 1);
+      std::size_t value = 0;
+      if (!parse_index(text, &value)) continue;
+      if (name == "row") {
+        p.has_row = true;
+        p.row = value;
+      } else if (name == "instance") {
+        p.has_instance = true;
+        p.instance = value;
+      } else if (name == "draw") {
+        p.has_draw = true;
+        p.draw = value;
+      } else if (name == "node" || name == "cell") {
+        p.has_node = true;
+        p.node = value;
+      } else if (name == "component") {
+        p.has_component = true;
+        p.component = value;
+      } else if (name == "index") {
+        p.has_index = true;
+        p.index = value;
+      } else {
+        std::cerr << "mestra-cli: unknown probe axis \"" << name << "\"\n";
+        return 2;
+      }
+    }
+  } else {
+    if (argc < 7) return usage();
+    p.has_row = parse_index(argv[4], &p.row);
+    p.has_node = parse_index(argv[5], &p.node);
+    p.has_component = parse_index(argv[6], &p.component);
+    if (argc > 7) p.has_draw = parse_index(argv[7], &p.draw);
+  }
+  const mestra::Array a = mestra::read_slot(path, slot);
+  std::cout << value_text(a, subscripts(p)) << "\n";
+  return 0;
+}
+
+int cmd_rows(const std::string& path, const std::string& slot,
+             const std::string& begin, const std::string& end) {
+  const mestra::Array a = mestra::read_slot_rows(
+      path, slot, static_cast<std::size_t>(std::atoll(begin.c_str())),
+      static_cast<std::size_t>(std::atoll(end.c_str())));
+  for (std::size_t i = 0; i < a.dims.size(); ++i) {
+    std::cout << (i == 0 ? "dims " : " ") << a.dims[i];
+  }
+  std::cout << "\nshape";
+  for (const std::size_t e : a.shape) std::cout << " " << e;
+  std::cout << "\n";
+  char buffer[64];
+  if (a.dtype == mestra::DType::Float64) {
+    for (const double v : a.f64) {
+      std::snprintf(buffer, sizeof(buffer), "%.17e", v);
+      std::cout << buffer << "\n";
+    }
+  } else {
+    for (const std::int64_t v : a.i64) std::cout << v << "\n";
+  }
+  return 0;
+}
+
+int cmd_evaluate(const std::string& path, const std::string& csv,
+                 const std::string& out) {
+  const mestra::Dataset d = mestra::read(path);
+  const mestra::KeysTable keys = mestra::read_keys_csv(d, csv);
+  mestra::write(mestra::evaluate(d, keys), out);
+  return 0;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+  if (argc < 2) return usage();
+  const std::string command = argv[1];
+  try {
+    if (command == "validate" && argc == 3) return cmd_validate(argv[2]);
+    if (command == "info" && argc == 3) return cmd_info(argv[2]);
+    if (command == "probe") return cmd_probe(argc, argv);
+    if (command == "support-id" && argc == 4) {
+      std::cout << mestra::support_id_of(argv[2], argv[3]) << "\n";
+      return 0;
+    }
+    if (command == "roundtrip" && argc == 4) {
+      mestra::write(mestra::read(argv[2]), argv[3]);
+      return 0;
+    }
+    if (command == "evaluate" && argc == 5) {
+      return cmd_evaluate(argv[2], argv[3], argv[4]);
+    }
+    if (command == "dict-dump" && argc == 4) {
+      std::cout << mestra::dump_dict(mestra::read_dict(argv[2], argv[3]));
+      return 0;
+    }
+    if (command == "dict-roundtrip" && argc == 5) {
+      const mestra::Dict d = mestra::read_dict(argv[2], argv[3]);
+      const mestra::Dataset source = mestra::read_header(argv[2]);
+      const mestra::StoredCallable* stored = source.callable(argv[3]);
+      mestra::write_dict(d, stored != nullptr ? stored->type : std::string(),
+                         argv[3], argv[4]);
+      return 0;
+    }
+    if (command == "rows" && argc == 6) {
+      return cmd_rows(argv[2], argv[3], argv[4], argv[5]);
+    }
+    if (command == "callable-types") {
+      mestra::Affine::register_type();
+      for (const std::string& t : mestra::CallableRegistry::types()) {
+        std::cout << t << "\n";
+      }
+      return 0;
+    }
+  } catch (const mestra::Error& e) {
+    std::cerr << "mestra-cli: " << e.what() << "\n";
+    return 1;
+  } catch (const std::exception& e) {
+    std::cerr << "mestra-cli: " << e.what() << "\n";
+    return 1;
+  }
+  return usage();
+}
