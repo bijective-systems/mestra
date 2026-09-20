@@ -50,6 +50,7 @@ __all__ = [
     "check_size",
     "read_values",
     "filters_of",
+    "attr_creation_order",
     "scale_names",
     "scale_index",
     "address",
@@ -278,6 +279,21 @@ def filters_of(dset: h5py.Dataset) -> list[tuple[int, int, tuple, str]]:
         out.append((int(code), int(flags), tuple(int(v) for v in values),
                     label))
     return out
+
+
+def attr_creation_order(dset: h5py.Dataset) -> int | None:
+    """The attribute creation order flags a dataset was created with.
+
+    Read back from the file's own creation property list, which is
+    where section 21's rule lives: it is the one thing in this
+    format that a property list rather than a byte position decides,
+    and a file that forgets it is correct until the 4086th dataset
+    attaches to one scale (E42). None when the list cannot be read.
+    """
+    try:
+        return int(dset.id.get_create_plist().get_attr_creation_order())
+    except Exception:                                   # pragma: no cover
+        return None
 
 
 # ------------------------------------------------------------- the rest

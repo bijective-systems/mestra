@@ -22,6 +22,7 @@ import numpy as np
 from . import h5safe, limits
 from .encoding import (
     NULL_SENTINEL,
+    SCALE_ATTR_ORDER,
     default_chunk_rows,
     is_fixed_string,
     read_attr,
@@ -1354,6 +1355,8 @@ class _FileValidator:
                     and dset.maxshape and dset.maxshape[0] is not None):
                 self.error("E27", path, "row is an unlimited dimension "
                                         "in every file")
+            self._scale_properties(dset, path)
+            self._unlimited(dset, path, (path.rsplit("/", 1)[-1],))
             return
         # Once per dataset. Every axis name below comes from this
         # one call: reading them again for each check meant
@@ -1367,6 +1370,9 @@ class _FileValidator:
                                         "carries exactly one"
                            % (axis, len(names)))
         self._scale_names(dset, path, attached)
+        self._unlimited(dset, path,
+                        tuple(names[0] if len(names) == 1 else None
+                              for names in attached))
         self._filters(dset, path)
         dims = _logical_of(attached)
         if dims[:1] == ("row",):
@@ -1376,6 +1382,71 @@ class _FileValidator:
                                         "unlimited")
             else:
                 self._chunk(dset, path)
+
+    def _scale_properties(self, dset: h5py.Dataset, path: str) -> None:
+        """E42: the creation property list of section 21.
+
+        Read back from the file, because this is the one rule in the
+        format that a property list and not a byte position decides.
+        A scale created without attribute creation order tracked and
+        indexed keeps its REFERENCE_LIST in an object header message,
+        which may not exceed 64 KiB, so it takes at most 4085
+        attachments and the 4086th destroys the attribute it was
+        extending on its way to failing. Every reader and every
+        validator accepts what that leaves behind, which is why the
+        rule is about how the scale was made rather than about what
+        the file now says.
+
+        Section 21 asks for object time tracking off in the same
+        list. That one keeps the file byte reproducible and section
+        14 does not name it here: E42 is "attribute creation order
+        not tracked and indexed", and nothing else. The corpus's own
+        `check.py` is where the times are checked, on the golden
+        files, because byte reproducibility is the corpus's rule and
+        not a rule about a file somebody hands this reader.
+        """
+        order = h5safe.attr_creation_order(dset)
+        if order is None or order == SCALE_ATTR_ORDER:
+            return
+        self.error("E42", path, "this dimension scale was created "
+                                "with attribute creation order %d "
+                                "where section 21 requires %d "
+                                "(tracked and indexed), so it takes "
+                                "at most 4085 attachments"
+                   % (order, SCALE_ATTR_ORDER))
+
+    def _unlimited(self, dset: h5py.Dataset, path: str,
+                   dims: Sequence[str | None]) -> None:
+        """E43: an unlimited dimension other than `row`.
+
+        `dims` is the name on disk of the dimension on each axis: for
+        a scale its own link name, and for any other dataset the link
+        name of the scale attached to that axis. `row` is unlimited
+        in every file, file-level and support-local, and no other
+        dimension may be: every other name carries its own length,
+        directly in `draw_<n>` and `component_<n>` and through the
+        table it names in `group_<k>` and `category_<t>`, so a
+        dimension that grows makes its own name false.
+
+        The one exception is a zero-length axis of a dataset inside a
+        callable's dictionary, which section 25 requires to be
+        unlimited because HDF5 has no other legal way to write it.
+        """
+        maxshape = dset.maxshape or ()
+        for axis, limit in enumerate(maxshape):
+            if limit is not None:
+                continue
+            if axis < len(dims) and dims[axis] == "row":
+                continue
+            if (path.startswith("/callables/")
+                    and axis < len(dset.shape) and dset.shape[axis] == 0):
+                continue
+            self.error("E43", path, "axis %d is unlimited, and %s is "
+                                    "not `row`" % (
+                                        axis,
+                                        "the dimension %s" % dims[axis]
+                                        if axis < len(dims)
+                                        and dims[axis] else "it"))
 
     def _filters(self, dset: h5py.Dataset, path: str) -> None:
         """E29: only gzip at levels 1 to 9, and shuffle (23).

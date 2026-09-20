@@ -35,6 +35,7 @@ __all__ = [
     "write_float_attr",
     "read_attr",
     "attribute_names",
+    "SCALE_ATTR_ORDER",
     "make_scale",
     "attach",
     "default_chunk_rows",
@@ -228,13 +229,54 @@ def attribute_names(obj: Any) -> list[str]:
 
 # ------------------------------------------------------ dimension scales
 
+#: Section 21: the creation order a scale's property list must ask
+#: for, tracked and indexed. E42 is a scale created without it.
+SCALE_ATTR_ORDER = (h5py.h5p.CRT_ORDER_TRACKED
+                    | h5py.h5p.CRT_ORDER_INDEXED)
+
+
 def make_scale(group: h5py.Group, name: str, length: int,
                unlimited: bool = False) -> h5py.Dataset:
-    """A dimension scale, written as netCDF-C writes one (21)."""
-    scale = group.create_dataset(
-        name, shape=(length,), dtype=">f4",
-        maxshape=(None,) if unlimited else (length,),
-        chunks=(1,) if unlimited else None, track_times=False)
+    """A dimension scale, written as netCDF-C writes one (21).
+
+    The creation property list is what this function is for, and it
+    is the only place in the format where a property list other than
+    the defaults is required. A scale is created with attribute
+    creation order tracked and indexed, which gives it a version 2
+    object header, which is what lets its REFERENCE_LIST live in the
+    file's heap instead of as an object header message. Without it a
+    scale takes at most 4085 attachments: REFERENCE_LIST grows by
+    sixteen bytes each time and a header message may not exceed
+    64 KiB, so the 4086th attachment fails *after* deleting the
+    attribute it was extending and leaves a file every reader
+    accepts. `cases/wide_keys`, whose 4200 datasets share one `row`,
+    is the case that could not be written before this.
+
+    Object time tracking is turned off in the same list, because a
+    version 2 object header records four timestamps unless it is
+    told not to and a file that records when it was written is not
+    byte reproducible.
+
+    The high-level API can express neither, so the dataset is
+    created through the low-level dcpl. Nothing else in the file is
+    touched: the library version bounds stay at the default for
+    every object, so the superblock and every non-scale object are
+    as they were (decision 53).
+    """
+    dcpl = h5py.h5p.create(h5py.h5p.DATASET_CREATE)
+    dcpl.set_attr_creation_order(SCALE_ATTR_ORDER)
+    dcpl.set_obj_track_times(False)
+    # Section 21: chunk length 1 when unlimited, and a chunk equal to
+    # the length otherwise, which is what H5DSset_scale leaves
+    # behind. A chunk of zero is not a chunk, so a zero-length fixed
+    # scale takes 1; only the unlimited `row` is ever zero-length.
+    dcpl.set_chunk((1,) if unlimited else (max(1, length),))
+    space = h5py.h5s.create_simple(
+        (length,), (h5py.h5s.UNLIMITED,) if unlimited else (length,))
+    tid = h5py.h5t.py_create(np.dtype(">f4"), logical=True)
+    scale = h5py.Dataset(h5py.h5d.create(group.id,
+                                         name.encode("utf-8"),
+                                         tid, space, dcpl=dcpl))
     scale.make_scale("%s%10d" % (DIMENSION_SCALE_NAME, length))
     return scale
 

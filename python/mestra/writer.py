@@ -68,6 +68,15 @@ def write(dataset: Dataset, path: str, check: bool = True) -> None:
     read_all = getattr(dataset.callables, "read_all", None)
     if read_all is not None:
         read_all()
+    # The same for a group this reader does not interpret: a lazy
+    # open leaves its values in the file, and they are read here
+    # rather than half way through writing, so that a file that
+    # cannot be copied is refused before anything is created.
+    for captured in dataset.opaque.values():
+        opaque.read_all(captured)
+    for support in dataset.supports.values():
+        for captured in support.opaque.values():
+            opaque.read_all(captured)
     if dataset.lossy:
         raise MestraError(
             "E41", "this dataset was read from a file with parts "
