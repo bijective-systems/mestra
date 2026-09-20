@@ -52,12 +52,17 @@ function check(path::AbstractString)
     st === :refused && (bad = true;
                         push!(notes, "validate threw instead of reporting"))
 
-    st, lazy, note = attempt("read", () -> Mestra.read(path))
+    # A non-strict read is the one under test here: it is what must
+    # carry on and list what it refused, where a strict read would
+    # stop at the first structural rule.  runtests.jl covers that.
+    st, lazy, note = attempt("read",
+                             () -> Mestra.read(path; strict = false))
     isempty(note) || (push!(notes, note); keep!(note))
     st === :bad && (bad = true)
 
     st, eager, note = attempt("read eager",
-                              () -> Mestra.read(path; lazy = false))
+                              () -> Mestra.read(path; lazy = false,
+                                                strict = false))
     isempty(note) || (push!(notes, note); keep!(note))
     st === :bad && (bad = true)
     eager === nothing || append!(rules, [f.rule for f in eager.findings])

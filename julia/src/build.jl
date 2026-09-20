@@ -11,27 +11,54 @@ keeps, given the name of each of its axes.  The file's order is
 (row | group | nothing, [draw], node | cell, component); the stored
 orientation reverses it, so the array's linear memory is the file's
 byte order."""
-function to_stored(data::AbstractArray, dims, want::Vector{Symbol})
+function to_stored(data::AbstractArray, dims, want::Vector{Symbol}, path)
     dims = Symbol[Symbol(d) for d in dims]
-    length(dims) == ndims(data) || throw(MestraError(nothing,
-        "dims names $(length(dims)) axes for an array of $(ndims(data))"))
+    length(dims) == ndims(data) || throw(MestraError("E04", path,
+        "`dims` names $(length(dims)) axes for an array of " *
+        "$(ndims(data)); give one name per axis"))
     a = data
     if !(:component in dims) && :component in want
         a = reshape(a, size(a)..., 1)
         dims = vcat(dims, :component)
     end
-    Set(dims) == Set(want) || throw(MestraError(nothing,
-        "the array's axes are $(Tuple(dims)) where the slot needs " *
+    Set(dims) == Set(want) || throw(MestraError("E04", path,
+        "`dims` names the axes $(Tuple(dims)) where this slot needs " *
         "$(Tuple(want))"))
     perm = [findfirst(==(d), dims) for d in reverse(want)]
     return permutedims(collect(a), perm)
 end
 
-default_dims(data::AbstractArray) =
-    ndims(data) == 1 ? [:node] :
-    ndims(data) == 2 ? [:row, :node] :
-    ndims(data) == 3 ? [:row, :node, :component] :
-    throw(MestraError(nothing, "name the axes with `dims`"))
+"""The path an array slot will have, which a refusal names before the
+slot exists."""
+array_path(sup::Support, name::AbstractString, location::Symbol) =
+    "/supports/$(sup.name)/" *
+    (name == "coordinates" ? "coordinates" :
+     (location === :cell ? "cell_arrays/" : "node_arrays/") * String(name))
+
+"""Name the axes of an array whose axes the caller did not name.  A
+square array says nothing about which reading is meant, so it is
+refused here (E04) rather than written the wrong way round."""
+function default_dims(data::AbstractArray, nsite::Int, location::Symbol,
+                      path)
+    axis = location === :cell ? :cell : :node
+    nd = ndims(data)
+    nd == 1 && return Symbol[axis]
+    if nd == 2
+        r, c = size(data)
+        r == nsite && c == nsite && throw(MestraError("E04", path,
+            "an array of shape ($(r), $(c)) on a support of $(nsite) " *
+            "$(axis)s is either ($(axis), component) or (row, $(axis)); " *
+            "say which with `dims`"))
+        c == nsite && return Symbol[:row, axis]
+        r == nsite && return Symbol[axis, :component]
+        throw(MestraError("E05", path,
+            "an array of shape ($(r), $(c)) has no axis of $(nsite) " *
+            "$(axis)s; name the axes with `dims`"))
+    end
+    nd == 3 && return Symbol[:row, axis, :component]
+    throw(MestraError("E04", path,
+        "name the axes of a $(nd)-axis array with `dims`"))
+end
 
 """
     add_category_table!(ds, name, entries)
@@ -46,44 +73,57 @@ function add_category_table!(ds::Dataset, name::AbstractString, entries)
 end
 
 """
-    add_key!(ds, name, values; role, units, bounds = :auto, ...)
+    add_key!(ds, name, values; role, units, lower, upper, category, ...)
 
-A per-row key column.  `bounds = :auto` takes the declared bounds from
-the data, which is what a producer usually means; pass
-`bounds = nothing` for none and `bounds = (lo, hi)` to state them.
-The row count follows from the first key added.
+A per-row key column: the name and the values, then the role and the
+units, which is the order every language has (`docs/api-conventions.md`
+section 1).  A design, condition or time key takes `units`; a
+categorical, group, split or status key takes `category`, naming a
+table added with `add_category_table!`.
+
+Bounds are the domain of validity the file declares.  Left alone they
+are the observed finite range of the data, so that the same arrays
+produce the same file in every language and W04 and W08 are decidable
+on every file; pass `lower` and `upper` together for a wider domain,
+or both as `nothing` for a file that declares none.
+
+The row count follows from the first key or scalar added.
 """
 function add_key!(ds::Dataset, name::AbstractString, values;
-                  role::Symbol, units = nothing, bounds = :auto,
-                  category = nothing, trajectory_group = nothing,
-                  parent = nothing, eltype = nothing)
-    role in KEY_ROLES || throw(MestraError("E02",
-        "`$(role)` is not a key role of section 3"))
+                  role::Symbol, units = nothing, lower = :auto,
+                  upper = :auto, bounds = :unset, category = nothing,
+                  trajectory_group = nothing, parent = nothing,
+                  eltype = nothing)
+    path = "/keys/" * String(name)
+    role in KEY_ROLES || throw(MestraError("E02", path,
+        "`$(role)` is not a key role of section 3; pass `role` as one of " *
+        join(string.(KEY_ROLES), ", ")))
+    # `bounds = (lo, hi)`, `bounds = nothing` and `bounds = :auto` are
+    # the older spelling of the same three choices.
+    if bounds !== :unset
+        lower, upper = bounds === nothing ? (nothing, nothing) :
+                       bounds === :auto ? (:auto, :auto) :
+                       (bounds[1], bounds[2])
+    end
     vals = collect(values)
     T = eltype === nothing ? default_key_eltype(role, vals) : eltype
     vals = T === String ? String.(vals) : convert(Vector{T}, vals)
     if isempty(ds.keys) && isempty(ds.scalars)
         ds.nrows = length(vals)
     end
-    length(vals) == ds.nrows || throw(MestraError("E16",
-        "key `$(name)` has $(length(vals)) rows where the dataset has " *
-        "$(ds.nrows)"))
-    lo, hi = nothing, nothing
-    if bounds === :auto
-        if role in (:design, :condition, :time) && !isempty(vals)
-            finite = Float64[x for x in vals if isfinite(x)]
-            isempty(finite) ||
-                ((lo, hi) = (minimum(finite), maximum(finite)))
-        end
-    elseif bounds !== nothing
-        lo, hi = Float64(bounds[1]), Float64(bounds[2])
-    end
+    length(vals) == ds.nrows || throw(MestraError("E16", path,
+        "$(length(vals)) values in a dataset of $(ds.nrows) rows; pass " *
+        "one value per row, or build this key before the others"))
+    lo, hi = key_bounds(role, vals, lower, upper, path)
     if role in (:categorical, :group, :split, :status) && category === nothing
-        throw(MestraError("E39",
-            "a $(role) key requires a `category` table (section 19)"))
+        throw(MestraError("E39", path,
+            "a $(role) key requires `category` naming a table added with " *
+            "`add_category_table!(ds, name, entries)` (section 19)"))
     end
     if role in (:design, :condition, :time) && units === nothing
-        throw(MestraError("E39", "a $(role) key requires `units`"))
+        throw(MestraError("E39", path,
+            "a $(role) key requires `units`, a UDUNITS string such as " *
+            "\"m s-1\" or \"1\" for a dimensionless one"))
     end
     k = KeyColumn(name, role; units = units, lower = lo, upper = hi,
                   category = category, trajectory_group = trajectory_group,
@@ -93,9 +133,60 @@ function add_key!(ds::Dataset, name::AbstractString, values;
                   values = vals, path = "/keys/" * String(name))
     ds.keys[String(name)] = k
     push!(ds.container_groups, "keys")
+    # Sugar: the first group key added is the unit of generalisation
+    # until `set_generalisation_group!` says otherwise, because a file
+    # with a group key and no unit is E39.
     role === :group && ds.generalisation_group === nothing &&
         (ds.generalisation_group = String(name))
     return k
+end
+
+"""
+    set_generalisation_group!(ds, name)
+
+Name the key that is the unit of generalisation (section 7): the thing
+a split must keep whole and a model is asked to generalise over, such
+as the member of a family or the trajectory.  It is a key of role
+group, and a file that declares a group key declares one of these
+(E39).
+
+`grouped_split` and `split_leaks` both refuse without it, and the
+first group key added takes the job until this says otherwise, which
+is what to call when a file has more than one group key.
+"""
+function set_generalisation_group!(ds::Dataset, name::AbstractString)
+    k = get(ds.keys, String(name), nothing)
+    k === nothing && throw(MestraError(nothing, "/",
+        "`$(name)` is not a key of this dataset; add it with " *
+        "`add_key!(ds, \"$(name)\", values; role = :group, " *
+        "category = ...)` first"))
+    k.role === :group || throw(MestraError("E02", k.path,
+        "the unit of generalisation is a key of role group, and " *
+        "`$(name)` has role $(k.role); name a group key"))
+    ds.generalisation_group = String(name)
+    return ds
+end
+
+"""The declared bounds of a key: the observed finite range when the
+caller states none, which is what `docs/api-conventions.md` section 1
+asks of every language."""
+function key_bounds(role::Symbol, vals, lower, upper, path)
+    if lower === :auto && upper === :auto
+        role in (:design, :condition, :time) || return (nothing, nothing)
+        finite = Float64[x for x in vals if x isa Real && isfinite(x)]
+        isempty(finite) && return (nothing, nothing)
+        return (minimum(finite), maximum(finite))
+    end
+    lower === nothing && upper === nothing && return (nothing, nothing)
+    (lower === :auto || upper === :auto || lower === nothing ||
+     upper === nothing) && throw(MestraError("E19", path,
+        "pass `lower` and `upper` together, or neither"))
+    lo, hi = Float64(lower), Float64(upper)
+    (isfinite(lo) && isfinite(hi)) || throw(MestraError("E19", path,
+        "a bound must be finite, and these are [$(lo), $(hi)]"))
+    lo <= hi || throw(MestraError("E19", path,
+        "`lower` is $(lo) and `upper` is $(hi); the lower bound comes first"))
+    return (lo, hi)
 end
 
 default_key_eltype(role::Symbol, vals) =
@@ -117,8 +208,9 @@ function add_scalar!(ds::Dataset, name::AbstractString, values;
         ds.nrows = length(vals)
     end
     length(vals) == ds.nrows || throw(MestraError("E16",
-        "scalar `$(name)` has $(length(vals)) rows where the dataset has " *
-        "$(ds.nrows)"))
+        "/scalars/" * String(name),
+        "$(length(vals)) values in a dataset of $(ds.nrows) rows; pass " *
+        "one value per row"))
     s = Slot(name, :scalar; units = units, source = "data",
              statistic = statistic, of = of, quantile = quantile,
              ldims = [:row], dshape = [length(vals)], eltype = Float64,
@@ -198,6 +290,47 @@ function add_none_support!(ds::Dataset, name::AbstractString)
     return s
 end
 
+"""What the array varies along, which `dims` decides: a leading `row`
+axis is "row", a leading `group:<k>` axis is that group, and anything
+else is "none" (section 5).  `varies` need not be passed at all; when
+it is and it says something other than what `dims` names, that is E04
+and is refused here, because one of the two is wrong and a writer
+cannot tell which."""
+function agreed_varies(ds::Dataset, dims::Vector{Symbol}, varies, path)
+    lead = first(dims)
+    implied = lead === :row ? "row" :
+              lead === :instance ? nothing :
+              startswith(String(lead), "group:") ? String(lead) : "none"
+    if varies === nothing
+        implied === nothing && throw(MestraError("E04", path,
+            "`dims` names the leading axis :instance, which does not say " *
+            "which group it is; add `varies = \"group:<key>\"`, or name " *
+            "the axis `Symbol(\"group:<key>\")` in `dims`"))
+        varies = implied
+    else
+        varies = String(varies)
+        if implied === nothing
+            startswith(varies, "group:") || throw(MestraError("E04", path,
+                "`dims` names the leading axis :instance, so `varies` is " *
+                "\"group:<key>\" and not \"$(varies)\"; change one of them"))
+        elseif varies != implied
+            throw(MestraError("E04", path,
+                "`varies` says \"$(varies)\" and `dims` names the leading " *
+                "axis $(lead), which is \"$(implied)\"; change one of them"))
+        end
+    end
+    if startswith(varies, "group:")
+        g = varies[7:end]
+        k = get(ds.keys, g, nothing)
+        (k !== nothing && k.role === :group) || throw(MestraError("E04", path,
+            "`varies` names the group key `$(g)`, which this dataset does " *
+            "not declare; add it with `add_key!(ds, \"$(g)\", values; " *
+            "role = :group, category = ...)` before this array"))
+        dims[1] = Symbol(varies)
+    end
+    return varies
+end
+
 function make_array_slot(ds::Dataset, sup::Support, name::AbstractString,
                          data, location::Symbol; role::Symbol = :field,
                          units = nothing, dims = nothing, varies = nothing,
@@ -207,43 +340,35 @@ function make_array_slot(ds::Dataset, sup::Support, name::AbstractString,
                          recipe = nothing, reference = nothing,
                          eltype = nothing, deflate = nothing,
                          shuffle = false)
-    role in ARRAY_ROLES || throw(MestraError("E02",
-        "`$(role)` is not an array role of section 3"))
-    dims === nothing && (dims = default_dims(data))
+    path = array_path(sup, name, location)
+    role in ARRAY_ROLES || throw(MestraError("E02", path,
+        "`$(role)` is not an array role of section 3; pass `role` as one " *
+        "of " * join(string.(ARRAY_ROLES), ", ")))
+    nsite = location === :cell ? sup.n_cells : sup.n_nodes
+    dims === nothing && (dims = default_dims(data, nsite, location, path))
     dims = Symbol[Symbol(d) for d in dims]
+    varies = agreed_varies(ds, dims, varies, path)
     want = Symbol[]
-    lead = first(dims)
-    if lead === :row
-        push!(want, :row)
-        varies === nothing && (varies = "row")
-    elseif lead === :instance || startswith(String(lead), "group:")
-        push!(want, lead)
-        if varies === nothing
-            startswith(String(lead), "group:") || throw(MestraError(nothing,
-                "name the group key, as `varies = \"group:member\"` or " *
-                "`dims = (Symbol(\"group:member\"), :node, :component)`"))
-            varies = String(lead)
-        end
-        dims[1] = Symbol(varies)
-        want[1] = Symbol(varies)
-    else
-        varies === nothing && (varies = "none")
-    end
+    varies == "row" && push!(want, :row)
+    startswith(varies, "group:") && push!(want, Symbol(varies))
     statistic == "draw" && push!(want, :draw)
     push!(want, location === :cell ? :cell : :node)
     push!(want, :component)
-    stored = to_stored(data, dims, want)
+    stored = to_stored(data, dims, want, path)
     T = eltype === nothing ? Base.eltype(stored) : eltype
     T === Float64 || T === Int32 || T === Int64 ||
-        throw(MestraError("E20", "an array may not be stored as $(T)"))
+        throw(MestraError("E20", path,
+            "an array may not be stored as $(T); pass `eltype` as " *
+            "Float64, Int32 or Int64, or convert the array"))
     dshape = collect(reverse(size(stored)))
-    path = "/supports/$(sup.name)/" *
-           (name == "coordinates" ? "coordinates" :
-            (location === :cell ? "cell_arrays/" : "node_arrays/") *
-            String(name))
+    components === nothing || Int(components) == dshape[end] ||
+        throw(MestraError("E31", path,
+            "`components` says $(components) where the component axis of " *
+            "this array has $(dshape[end]); drop `components`, which " *
+            "follows from `dims`"))
     return Slot(name, location; support = sup.name, role = role,
                 varies = varies, units = units,
-                components = components === nothing ? dshape[end] : components,
+                components = dshape[end],
                 statistic = statistic, of = of, quantile = quantile,
                 category = category, recomputed = recomputed,
                 derived_from = derived_from, recipe = recipe,
@@ -256,13 +381,26 @@ function make_array_slot(ds::Dataset, sup::Support, name::AbstractString,
 end
 
 """
-    add_node_array!(ds, support, name, data; role = :field, units, dims)
+    add_node_array!(ds, support, name, values; units, dims, role = :field)
 
-A field-like quantity on the nodes of a support.  `dims` names the
-axes of `data`; it defaults to (:row, :node) for a matrix and
-(:row, :node, :component) for a three-axis array, and a missing
-component axis is added with length one, because the component
-dimension is always present (section 19).
+A field-like quantity on the nodes of a support: the support, the
+name and the values, then the units and the axes, which is the order
+every language has (`docs/api-conventions.md` section 1).
+
+`dims` names the axes of `values` in the order your array has them,
+and everything else follows from it: `varies` is "row" for a leading
+`:row` axis, the group for a leading `Symbol("group:<key>")` axis, and
+"none" otherwise, and `components` is the length of the component
+axis, which is added for you with length one when your array has none,
+because the component dimension is always present (section 19).
+Passing a `varies` that says something else is refused as E04.
+
+Left out, `dims` is read off the shape: (:node,) for a vector,
+(:row, :node) or (:node, :component) for a matrix, whichever agrees
+with the support, and (:row, :node, :component) for a three-axis
+array.  A square matrix on a support of as many nodes as it has
+columns says nothing about which of the two is meant, so it is
+refused rather than guessed at.
 """
 function add_node_array!(ds::Dataset, sup::Support, name::AbstractString,
                          data; kwargs...)
@@ -272,10 +410,9 @@ function add_node_array!(ds::Dataset, sup::Support, name::AbstractString,
 end
 
 """
-    add_cell_array!(ds, support, name, data; role = :field, units, dims)
+    add_cell_array!(ds, support, name, values; units, dims, role = :field)
 
-The same, on the cells.  `dims` names the cell axis `:cell`, or
-`:node`, which reads the same way for both.
+The same, on the cells.  `dims` names the cell axis `:cell`.
 """
 function add_cell_array!(ds::Dataset, sup::Support, name::AbstractString,
                          data; kwargs...)
@@ -294,8 +431,9 @@ function add_callable!(ds::Dataset, id::AbstractString, c::Callable;
                        type::Union{Nothing,AbstractString} = nothing,
                        repr::Union{Nothing,AbstractString} = nothing)
     ty = type === nothing ? registered_name(typeof(c)) : String(type)
-    ty === nothing && throw(MestraError("E15",
-        "no `type` string is registered for $(typeof(c))"))
+    ty === nothing && throw(MestraError("E15", "/callables/" * String(id),
+        "no `type` string is registered for $(typeof(c)); call " *
+        "`register_callable!(\"<type>\", $(typeof(c)))`, or pass `type`"))
     ref = CallableRef(id, ty;
                       repr = repr === nothing ? sprint(show, c) : repr,
                       dict = to_dict(c))
@@ -309,6 +447,20 @@ function registered_name(T::Type)
         registered === T && return name
     end
     return nothing
+end
+
+"""Which callable fills a slot, from `callable` or from the older
+spelling `id`, one of which a caller must give."""
+function callable_name(callable, id, path)
+    callable === nothing && id === nothing && throw(MestraError("E14", path,
+        "say which callable fills this slot with `callable`, naming one " *
+        "added with `add_callable!(ds, id, c)`"))
+    (callable === nothing || id === nothing ||
+     String(callable) == String(id)) ||
+        throw(MestraError("E14", path,
+            "`callable` says `$(callable)` and `id` says `$(id)`; they are " *
+            "two spellings of one argument, so pass `callable` alone"))
+    return String(callable === nothing ? id : callable)
 end
 
 """
@@ -325,17 +477,23 @@ function set_callable!(s::Slot, id::AbstractString, output::AbstractString)
 end
 
 """
-    add_callable_slot!(ds, support, name; location, role, units,
-                       components, id, output, varies = "row")
+    add_callable_slot!(ds, support, name; units, components, callable,
+                       output, location = :node, role = :field,
+                       varies = "row")
 
 A slot with no data at all, served by a callable.  This is how a model
-file declares what it produces before anything is evaluated.
+file declares what it produces before anything is evaluated.  The
+arguments are the array builders' own, plus `callable`, naming a
+callable added with `add_callable!`, and `output`, naming which of its
+outputs fills this slot.  `id` is accepted for `callable`.
 """
 function add_callable_slot!(ds::Dataset, sup::Support, name::AbstractString;
                             location::Symbol = :node, role::Symbol = :field,
                             units::AbstractString, components::Integer,
-                            id::AbstractString, output::AbstractString,
+                            callable = nothing, id = nothing,
+                            output::AbstractString,
                             varies::AbstractString = "row")
+    id = callable_name(callable, id, array_path(sup, name, location))
     s = Slot(name, location; support = sup.name, role = role, varies = varies,
              units = units, components = components,
              source = "callable:" * String(id), output = String(output),
@@ -347,13 +505,14 @@ function add_callable_slot!(ds::Dataset, sup::Support, name::AbstractString;
 end
 
 """
-    add_callable_scalar!(ds, name; units, id, output)
+    add_callable_scalar!(ds, name; units, callable, output)
 
-A scalar slot served by a callable.
+A scalar slot served by a callable.  `id` is accepted for `callable`.
 """
 function add_callable_scalar!(ds::Dataset, name::AbstractString;
-                              units::AbstractString, id::AbstractString,
-                              output::AbstractString)
+                              units::AbstractString, callable = nothing,
+                              id = nothing, output::AbstractString)
+    id = callable_name(callable, id, "/scalars/" * String(name))
     s = Slot(name, :scalar; units = units,
              source = "callable:" * String(id), output = String(output),
              path = "/scalars/" * String(name))

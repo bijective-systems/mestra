@@ -34,22 +34,61 @@ end
 
 Base.isvalid(r::ValidationReport) = isempty(r.errors)
 
+n_errors(r::ValidationReport) = count(f -> startswith(f.rule, "E"), r.findings)
+n_warnings(r::ValidationReport) = count(f -> startswith(f.rule, "W"),
+                                        r.findings)
+
+"""The line a run ends on, which is the same line in every language
+(`docs/api-conventions.md` section 5)."""
+summary_line(r::ValidationReport) =
+    "$(n_errors(r)) error(s), $(n_warnings(r)) warning(s)"
+
 function Base.show(io::IO, ::MIME"text/plain", r::ValidationReport)
-    if isempty(r.findings)
-        print(io, "mestra: valid, no warnings")
-        return
-    end
-    println(io, "mestra: ", length(r.errors), " error id(s), ",
-            length(r.warnings), " warning id(s)")
     for f in r.findings
-        println(io, "  ", f.rule, "  ", f.path, ": ", f.message)
+        println(io, f)
     end
+    print(io, summary_line(r))
 end
+
+"""
+    report(r::ValidationReport; io = stdout)
+    report(path; io = stdout)
+
+Print a report to read: one line per finding, `<id> <path>: <message>`,
+and then `<n> error(s), <m> warning(s)`.  That is the output every
+language's command line prints, so two languages' reports on one file
+can be compared line for line.  Gives back the report.
+"""
+function report(r::ValidationReport; io::IO = stdout)
+    for f in r.findings
+        println(io, f)
+    end
+    println(io, summary_line(r))
+    return r
+end
+
+report(path::AbstractString; io::IO = stdout, kwargs...) =
+    report(validate(path; kwargs...); io = io)
+
+"""The rules a strict read refuses a file with
+(`docs/api-conventions.md` section 2): what the file is made of,
+rather than what it means.  Every one of them is decidable from
+attributes, dataspaces, link types and dimension scales, which is why
+a strict read can refuse a file without reading an array."""
+const STRUCTURAL_RULES = ("E01", "E16", "E19", "E25", "E26", "E29", "E30",
+                          "E40", "E41")
+
+"""How many string records a structural pass will read to decide E26.
+It is a bounded look, not a pass over the file: a longer dataset is
+left to `validate`."""
+const STRUCTURAL_STRING_ELEMENTS = 4096
 
 mutable struct Validator
     f::HDF5.File
     idx::ScaleIndex
     findings::Vector{Finding}
+    seen::Set{Tuple{String,String}}
+    structural::Bool
     nrows::Int
     supports::Vector{String}
     row_support::Vector{Int}
@@ -63,8 +102,41 @@ mutable struct Validator
     max_elements::Int
 end
 
-report!(v::Validator, rule, path, msg) =
-    push!(v.findings, Finding(rule, String(path), String(msg)))
+"""One finding per rule per object (`docs/api-conventions.md` section
+5): the second time a rule has something to say about an object, the
+first finding already said it."""
+function report!(v::Validator, rule, path, msg)
+    key = (String(rule), String(path))
+    v.structural && !(key[1] in STRUCTURAL_RULES) && return v.findings
+    key in v.seen && return v.findings
+    push!(v.seen, key)
+    return push!(v.findings, Finding(key[1], key[2], String(msg)))
+end
+
+"""How a rule that could fire on every row says how many rows it is
+about: the count, and the first three of them.  Row indices count from
+zero, as the file's own do."""
+function rows_tail(rows::Vector{Int}, n::Int = length(rows))
+    n == 0 && return ""
+    n <= 3 && return "; $(n) row" * (n == 1 ? "" : "s") * ": " *
+                     join(rows[1:min(n, end)], ", ")
+    return "; $(n) rows, the first three: " * join(rows[1:3], ", ")
+end
+
+"""What a structural pass will read of a string dataset, which is its
+own bound and not the caller's: a strict read decides E26 on a look,
+not on a pass over the file."""
+look_limit(v::Validator) =
+    v.structural ? min(v.max_elements, STRUCTURAL_STRING_ELEMENTS) :
+    v.max_elements
+
+"""Whether a structural pass should leave a string dataset alone: it
+decides E26 on a bounded number of records, never on a whole file."""
+function too_long_to_look(v::Validator, d)
+    v.structural || return false
+    cdims, _ = disk_shape(d)
+    return prod(vcat(cdims, 1)) > STRUCTURAL_STRING_ELEMENTS
+end
 
 """Run one object's checks, and turn anything thrown into E41 against
 that object rather than into the end of the pass."""
@@ -136,13 +208,20 @@ const DTYPE_BY_ROLE = Dict{String,Vector{DataType}}(
     "label" => [Int32, Int64])
 
 """
-    validate(path) -> ValidationReport
+    validate(path; structural = false) -> ValidationReport
 
 Check a file against section 14.  The report names rules by identifier
 and nothing else, as the conformance corpus does.
+
+`structural = true` checks only what a file is made of -- the rules of
+`Mestra.STRUCTURAL_RULES` -- and reads no array to do it, which is the
+pass a strict `Mestra.read` refuses a file with.  Everything a value
+decides, from a support id to a non-finite number, is left to the full
+pass.
 """
 function validate(path::AbstractString;
-                  max_elements::Integer = DEFAULT_MAX_ELEMENTS)
+                  max_elements::Integer = DEFAULT_MAX_ELEMENTS,
+                  structural::Bool = false)
     if !isfile(String(path))
         return ValidationReport(["E01"], String[],
             [Finding("E01", String(path), "there is no file here")])
@@ -156,7 +235,8 @@ function validate(path::AbstractString;
                      first(sprint(showerror, e), 200))])
     end
     try
-        v = Validator(f, ScaleIndex(collect_scales(f)), Finding[], 0,
+        v = Validator(f, ScaleIndex(collect_scales(f)), Finding[],
+                      Set{Tuple{String,String}}(), structural, 0,
                       String[], Int[], true, Dict{String,Vector{String}}(),
                       Dict{String,String}(), Dict{String,Any}(),
                       Dict{String,String}(), nothing, false,
@@ -416,8 +496,9 @@ function collect_categories!(v::Validator)
                 "a category table is a dataset")
             continue
         end
+        too_long_to_look(v, d) && continue
         guard!(v, "/categories/$(name)") do
-        ti, recs = read_string_records(d; max_elements = v.max_elements)
+        ti, recs = read_string_records(d; max_elements = look_limit(v))
         if ti.class !== :string || ti.vlen
             report!(v, "E20", "/categories/$(name)",
                     "a category table must be a fixed-length UTF-8 string")
@@ -452,8 +533,11 @@ function collect_keys!(v::Validator)
                 (v.keyroles[name] = a["role"].value)
             haskey(a, "category") && a["category"].value isa AbstractString &&
                 (v.keycat[name] = a["category"].value)
-            v.keyvals[name] = vec(safe_read(d;
-                                            max_elements = v.max_elements))
+            # A structural pass decides nothing from a value, so it
+            # reads none (`docs/api-conventions.md` section 2).
+            v.structural ||
+                (v.keyvals[name] = vec(safe_read(d;
+                                       max_elements = v.max_elements)))
         end
     end
     return v
@@ -607,9 +691,19 @@ function check_key_bounds!(v::Validator, path, name, a)
     vals === nothing && return v
     nums = Float64[x for x in vals if x isa Real && isfinite(x)]
     isempty(nums) && return v
-    outside = any(x -> x < lo || x > hi, nums)
-    if outside
-        report!(v, "W04", path, "a value lies outside [$(lo), $(hi)]")
+    # W04 could fire on every row, so it fires once, with the count
+    # and the first three rows (`docs/api-conventions.md` section 5).
+    bad = Int[]
+    nbad = 0
+    for (i, x) in pairs(vals)
+        (x isa Real && isfinite(x) && (x < lo || x > hi)) || continue
+        nbad += 1
+        length(bad) < 3 && push!(bad, i - 1)
+    end
+    if nbad > 0
+        report!(v, "W04", path,
+                "a value outside the declared bounds [$(lo), $(hi)]" *
+                rows_tail(bad, nbad))
         return v
     end
     observed = maximum(nums) - minimum(nums)
@@ -669,12 +763,28 @@ function check_split!(v::Validator)
         i <= length(sv) || break
         push!(get!(bag, u, Set{Any}()), sv[i])
     end
-    for (u, s) in bag
-        length(s) > 1 && report!(v, "W01", "/keys/$(splits[1])",
-            "the split places rows of generalisation unit $(u) on both " *
-            "sides")
-    end
+    # One finding for the rule, naming the first unit it leaked and how
+    # many there are, and saying why that matters (section 5).
+    leaked = sort([u for (u, s) in bag if length(s) > 1], by = string)
+    isempty(leaked) && return v
+    report!(v, "W01", "/keys/$(splits[1])",
+            "the rows of $(v.gen_group) $(unit_name(v, leaked[1])) are on " *
+            "both sides of the split, so this is not a generalisation " *
+            "test" * (length(leaked) == 1 ? "" :
+                      "; $(length(leaked)) units leak"))
     return v
+end
+
+"""A generalisation unit as the file names it: the entry of its
+category table where it has one, and the value itself where it has
+none."""
+function unit_name(v::Validator, u)
+    v.gen_group === nothing && return string(u)
+    table = get(v.keycat, v.gen_group, nothing)
+    table === nothing && return string(u)
+    entries = get(v.categories, table, String[])
+    return (u isa Integer && 0 <= u < length(entries)) ?
+           "`" * entries[u + 1] * "`" : string(u)
 end
 
 function check_status!(v::Validator)
@@ -684,14 +794,23 @@ function check_status!(v::Validator)
     table = get(v.keycat, name, nothing)
     table === nothing && return v
     entries = get(v.categories, table, String[])
-    for x in get(v.keyvals, name, [])
+    bad = Int[]
+    nbad = 0
+    first_status = ""
+    for (i, x) in pairs(get(v.keyvals, name, []))
         x isa Integer || continue
         (0 <= x < length(entries)) || continue
         entries[x + 1] == "converged" && continue
-        report!(v, "W02", "/keys/$(name)",
-                "a row has status `$(entries[x + 1])`")
-        break
+        nbad += 1
+        if length(bad) < 3
+            push!(bad, i - 1)
+            isempty(first_status) && (first_status = entries[x + 1])
+        end
     end
+    nbad == 0 && return v
+    report!(v, "W02", "/keys/$(name)",
+            "a status other than converged, the first `$(first_status)`" *
+            rows_tail(bad, nbad))
     return v
 end
 
@@ -728,11 +847,10 @@ function check_scalars!(v::Validator)
             isempty(cdims) || cdims[1] == v.nrows ||
                 report!(v, "E16", path,
                     "$(cdims[1]) elements in a file of $(v.nrows) rows")
-            if ti.class === :float && ti.size == 8
+            if ti.class === :float && ti.size == 8 && !v.structural
                 guard!(v, path) do
                     x = vec(safe_read(obj; max_elements = v.max_elements))
-                    any(y -> !isfinite(y), x) && report!(v, "W03", path,
-                        "a non-finite value")
+                    report_nonfinite!(v, path, x, true)
                 end
             end
         end
@@ -804,8 +922,9 @@ function check_row_support!(v::Validator)
         ti = type_info(HDF5.datatype(d))
         (ti.class === :int && ti.signed && ti.size == 4) ||
             report!(v, "E20", "/row_support", "/row_support must be int32")
-        v.row_support = Int.(vec(safe_read(d;
-                                           max_elements = v.max_elements)))
+        v.structural ||
+            (v.row_support = Int.(vec(safe_read(d;
+                                      max_elements = v.max_elements))))
     end
     n = length(v.supports)
     for x in v.row_support
@@ -909,7 +1028,7 @@ function check_cells!(v::Validator, path, g, kind, n_nodes, n_cells)
         end
     end
     all(has) || return (UInt8[], Int64[], Int64[])
-    read3 = guard!(v, path) do
+    read3 = v.structural ? nothing : guard!(v, path) do
         (UInt8.(vec(safe_read(g["cell_types"];
                               max_elements = v.max_elements))),
          Int64.(vec(safe_read(g["cell_offsets"];
@@ -991,6 +1110,7 @@ function check_coordinates!(v::Validator, path, g, kind, n_nodes)
     d isa HDF5.Dataset || return nothing
     # Section 24 hashes the stored bytes as they are, so that a file
     # whose axis coordinates wrongly vary breaks E35 and nothing else.
+    v.structural && return nothing
     return guard!(v, "$(path)/coordinates") do
         vec(safe_read(d; max_elements = v.max_elements))
     end
@@ -1088,7 +1208,7 @@ function check_label_categories!(v::Validator, spath, obj, a, role)
     end
     obj isa HDF5.Dataset || return v
     n = length(v.categories[table])
-    vals = guard!(v, spath) do
+    vals = v.structural ? nothing : guard!(v, spath) do
         vec(safe_read(obj; max_elements = v.max_elements))
     end
     vals === nothing && return v
@@ -1153,7 +1273,12 @@ function check_array_shape!(v::Validator, spath, d, a, role, loc, sname,
         cdims[axis] == want || report!(v, "E05", spath,
             "$(cdims[axis]) $(loc)s where the support declares $(want)")
     end
-    if lead == "row"
+    # In an unaligned file the count is how many rows reference this
+    # support, which only the values of /row_support say (section 22).
+    # A structural pass does not read them, so it leaves that half of
+    # E16 to the full pass and decides the aligned half, which is the
+    # row count in an attribute.
+    if lead == "row" && (v.aligned || !v.structural)
         want = v.aligned ? v.nrows : rows_on_support(v, sindex)
         cdims[1] == want || report!(v, "E16", spath,
             "a leading dimension of $(cdims[1]) where $(want) rows " *
@@ -1168,13 +1293,37 @@ function check_array_shape!(v::Validator, spath, d, a, role, loc, sname,
         end
     end
     if (role == "field" || role == "derived") && ti.class === :float &&
-       ti.size == 8
+       ti.size == 8 && !v.structural
         guard!(v, spath) do
-            any(x -> !isfinite(x),
-                safe_read(d; max_elements = v.max_elements)) &&
-                report!(v, "W03", spath, "a non-finite value")
+            report_nonfinite!(v, spath,
+                              safe_read(d; max_elements = v.max_elements),
+                              lead == "row")
         end
     end
+    return v
+end
+
+"""W03 over a whole array, reported once.  The array arrives with its
+axes reversed from the file's, so the file's leading axis is Julia's
+last, and when that axis is `row` the message names the rows."""
+function report_nonfinite!(v::Validator, path, a::AbstractArray,
+                           leads_with_row::Bool)
+    isempty(a) && return v
+    axis = ndims(a)
+    rows = Int[]
+    nrow, nval = 0, 0
+    for r in axes(a, axis)
+        c = count(!isfinite, selectdim(a, axis, r))
+        c == 0 && continue
+        nval += c
+        nrow += 1
+        length(rows) < 3 && push!(rows, r - 1)
+    end
+    nval == 0 && return v
+    report!(v, "W03", path, "a non-finite value, which is how this " *
+            "format spells missing floating-point data" *
+            (leads_with_row ? rows_tail(rows, nrow) :
+             "; $(nval) value" * (nval == 1 ? "" : "s")))
     return v
 end
 
@@ -1258,6 +1407,7 @@ function check_dict!(v::Validator, path, g, toplevel::Bool, depth::Int)
         ti = type_info(HDF5.datatype(obj))
         if ti.class === :string
             ti.vlen && report!(v, "E32", p, "a variable-length string")
+            v.structural && return
             _, recs = read_string_records(obj;
                                           max_elements = v.max_elements)
             for r in recs
@@ -1341,9 +1491,10 @@ function check_every_dataset!(v::Validator)
         end
         ti = type_info(HDF5.datatype(obj))
         if ti.class === :string && !ti.vlen &&
-           !startswith(path, "/categories/") && !startswith(path, "/callables/")
+           !startswith(path, "/categories/") &&
+           !startswith(path, "/callables/") && !too_long_to_look(v, obj)
             _, recs = read_string_records(obj;
-                                          max_elements = v.max_elements)
+                                          max_elements = look_limit(v))
             for r in recs
                 check_string_bytes(r) || report!(v, "E26", path,
                     "a string that is not UTF-8 or holds a NUL byte " *

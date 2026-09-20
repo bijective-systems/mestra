@@ -53,7 +53,7 @@ battr(a::Dict{String,RawAttr}, name) =
     haskey(a, name) ? (a[name].value === true) : nothing
 
 """
-    Mestra.read(path; lazy = true) -> Dataset
+    Mestra.read(path; lazy = true, strict = true) -> Dataset
 
 Open a `.mes` file.  With `lazy = true`, which is the default, this
 reads attributes and dataspaces only, so it reports the row count, the
@@ -63,11 +63,32 @@ array with `Mestra.values(ds, slot)`, or for a range of rows with
 `Mestra.rows(ds, slot, 1:10)`.
 
 With `lazy = false` every stored array is read at once.
+
+A strict read, which is the default, refuses a file that breaks one of
+the structural rules of `docs/api-conventions.md` section 2 --
+`Mestra.STRUCTURAL_RULES`, which is E01, E16, E19, E25, E26, E29, E30,
+E40 and E41 -- with a `MestraError` naming the first it finds.  Those
+are what a file is made of rather than what it means, so deciding them
+costs attributes, dataspaces, link types and dimension scales and not
+one array element: a strict read still opens a file that declares a
+trillion numbers it does not hold.
+
+A semantic fault never stops a read, strict or not: a missing unit, a
+bad split, a support id that does not match its cells are all things a
+user opens a file to find out, and `Mestra.validate` and `Mestra.info`
+are how they find out.  `strict = false` returns the dataset for a
+structurally broken file too, with what the reader would not follow or
+could not read listed in `ds.findings`.
 """
-function read(path::AbstractString; lazy::Bool = true,
+function read(path::AbstractString; lazy::Bool = true, strict::Bool = true,
               max_elements::Integer = DEFAULT_MAX_ELEMENTS)
     isfile(String(path)) || throw(MestraError("E01",
         "no file at $(path)"))
+    if strict
+        r = validate(String(path); max_elements = max_elements,
+                     structural = true)
+        isempty(r.findings) || refuse(first(r.findings), path)
+    end
     f = try
         HDF5.h5open(String(path), "r")
     catch e
@@ -81,6 +102,14 @@ function read(path::AbstractString; lazy::Bool = true,
         close(f)
     end
 end
+
+"""How a strict read refuses: the first structural rule it found, the
+object it was about, and what it says."""
+refuse(f::Finding, path) = throw(MestraError(f.rule, f.path,
+    f.message * ". $(basename(String(path))) breaks a rule of section " *
+    "14 that says what a file is made of; `Mestra.report(\"$(path)\")` " *
+    "says what else it breaks, and `Mestra.read(path; strict = false)` " *
+    "opens it anyway"))
 
 note!(ds::Dataset, rule, path, msg) =
     push!(ds.findings, Finding(rule, String(path), String(msg)))
@@ -368,7 +397,7 @@ function read_support(ds::Dataset, g, name::String, idx::ScaleIndex,
                                       idx, lazy)
             # An axis support's identity includes its coordinates, so
             # they are read even when the rest is lazy (section 24).
-            if s.kind == "axis" && s.coordinates.data === nothing &&
+            if s.kind == "axis" && raw_data(s.coordinates) === nothing &&
                c isa HDF5.Dataset
                 try
                     s.coordinates.data =
@@ -448,7 +477,7 @@ comes back as (component, node, row).  Ask for the order you want with
 """
 function values(ds::Dataset, s::Slot;
                 max_elements::Integer = ds.max_elements)
-    s.data === nothing || return DimArray(s.data, julia_dims(s))
+    raw_data(s) === nothing || return DimArray(raw_data(s), julia_dims(s))
     is_callable_slot(s) && throw(MestraError(nothing,
         "slot $(s.name) is served by callable $(callable_id(s)) and " *
         "holds no data; evaluate the dataset first"))
@@ -493,7 +522,7 @@ One key column.
 """
 function values(ds::Dataset, k::KeyColumn;
                 max_elements::Integer = ds.max_elements)
-    k.values === nothing || return k.values
+    raw_values(k) === nothing || return raw_values(k)
     ds.path === nothing && throw(MestraError(nothing,
         "key $(k.name) holds no data and this dataset has no file"))
     return HDF5.h5open(ds.path, "r") do f
@@ -529,9 +558,9 @@ function rows(ds::Dataset, s::Slot, range::AbstractUnitRange;
     want > max_elements && throw(MestraError("E41",
         "that range is $(want) elements, more than the $(max_elements) " *
         "this reader will materialise"))
-    if s.data !== nothing
+    if raw_data(s) !== nothing
         sel = ntuple(i -> i == axis ? range : Colon(), length(jdims))
-        return DimArray(s.data[sel...], jdims)
+        return DimArray(raw_data(s)[sel...], jdims)
     end
     ds.path === nothing && throw(MestraError(nothing,
         "slot $(s.name) holds no data and this dataset has no file"))
@@ -571,7 +600,7 @@ function materialise!(ds::Dataset)
     ds.path === nothing && return ds
     HDF5.h5open(ds.path, "r") do f
         for (_, k) in ds.keys
-            k.values === nothing || continue
+            raw_values(k) === nothing || continue
             try
                 k.values = read_column(open_path(f, k.path);
                                        max_elements = ds.max_elements)
@@ -581,7 +610,7 @@ function materialise!(ds::Dataset)
         end
         for s in all_slots(ds)
             is_callable_slot(s) && continue
-            s.data === nothing || continue
+            raw_data(s) === nothing || continue
             try
                 d = open_path(f, s.path)
                 d isa HDF5.Dataset || continue

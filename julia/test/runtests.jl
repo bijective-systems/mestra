@@ -177,7 +177,9 @@ end
     for name in case_names()
         e = expected(name)
         isempty(e.support_ids) && continue
-        ds = Mestra.read(case_file(name))
+        # the corpus carries files that break a structural rule on
+        # purpose, and probing one is a non-strict read
+        ds = Mestra.read(case_file(name); strict = false)
         for (sname, want) in e.support_ids
             i = Mestra.support_by_name(ds, String(sname))
             @test i !== nothing
@@ -191,7 +193,9 @@ end
     for name in case_names()
         e = expected(name)
         isempty(e.probes) && continue
-        ds = Mestra.read(case_file(name))
+        # the corpus carries files that break a structural rule on
+        # purpose, and probing one is a non-strict read
+        ds = Mestra.read(case_file(name); strict = false)
         for p in e.probes
             @test check_probe(ds, p)
             n += 1
@@ -206,7 +210,9 @@ end
     for name in case_names()
         e = expected(name)
         isempty(e.codec) && continue
-        ds = Mestra.read(case_file(name))
+        # the corpus carries files that break a structural rule on
+        # purpose, and probing one is a non-strict read
+        ds = Mestra.read(case_file(name); strict = false)
         for (id, want) in e.codec
             @test tagged_ok(ds.callables[String(id)].dict, want)
             n += 1
@@ -221,7 +227,9 @@ end
     for name in case_names()
         e = expected(name)
         isempty(e.evaluation) && continue
-        ds = Mestra.read(case_file(name))
+        # the corpus carries files that break a structural rule on
+        # purpose, and probing one is a non-strict read
+        ds = Mestra.read(case_file(name); strict = false)
         for ev in e.evaluation
             table = Dict{String,Vector{Float64}}(
                 String(k) => [parse_expected(String(x)) for x in v]
@@ -262,13 +270,13 @@ end
 @testset "corpus: a lazy read touches no array" begin
     ds = Mestra.read(case_file("mesh_two_rows"))
     @test ds.nrows == 2
-    @test ds["pressure"].data === nothing
+    @test !Mestra.materialised(ds["pressure"])
     @test ds.supports[1].support_id[1:8] == "96df395d"
     # one slot, one row range, and nothing else
     v = Mestra.rows(ds, ds["pressure"], 2:2)
     @test size(v) == (1, 6, 1)
     @test Mestra.at(v; row = 1, node = 4, component = 1) == 204.0
-    @test ds["pressure"].data === nothing
+    @test !Mestra.materialised(ds["pressure"])
     big = Mestra.read(case_file("cascade_varying_geometry"))
     w = Mestra.rows(big, big["mach"], 2:3)
     @test size(w) == (1, 6, 2)
@@ -276,6 +284,26 @@ end
                           (:row, :node, :component))
     @test Mestra.permute(w, (:row, :node, :component))[1, :, 1] ==
           full[2, :, 1]
+    # and reaching for the empty field says what to call instead,
+    # rather than handing back `nothing` for the next line to trip on
+    e = try
+        ds.keys["mach"].values[2]
+    catch err
+        err
+    end
+    @test e isa Mestra.MestraError
+    @test occursin("Mestra.values", sprint(showerror, e))
+    @test occursin("/keys/mach", sprint(showerror, e))
+    e2 = try
+        ds["pressure"].data
+    catch err
+        err
+    end
+    @test e2 isa Mestra.MestraError
+    @test occursin("Mestra.values", sprint(showerror, e2))
+    eager = Mestra.read(case_file("mesh_two_rows"); lazy = false)
+    @test Mestra.materialised(eager.keys["mach"])
+    @test eager.keys["mach"].values[2] == 0.8
 end
 
 @testset "axis order and permuting by name" begin
@@ -460,6 +488,112 @@ end
                     instance = 2, node = 3, component = 1) == 3.0
 end
 
+"""A dataset with one support of six nodes and two quads, to build
+bad arrays on."""
+function six_node_dataset()
+    ds = Mestra.Dataset(writer = "mestra.jl test 0",
+                        created = "2026-09-19T00:00:00Z")
+    Mestra.add_category_table!(ds, "member", ["wing_a", "wing_b"])
+    Mestra.add_key!(ds, "mach", [0.4, 0.8]; role = :condition, units = "1")
+    Mestra.add_key!(ds, "member", [0, 1]; role = :group,
+                    category = "member")
+    s = Mestra.add_mesh_support!(ds, "s0";
+            coordinates = [0.0 0.0; 1.0 0.0; 2.0 0.0;
+                           0.0 1.0; 1.0 1.0; 2.0 1.0],
+            dims = (:node, :component),
+            cell_types = UInt8[9, 9], cell_offsets = Int64[0, 4, 8],
+            cell_connectivity = Int64[0, 1, 4, 3, 1, 2, 5, 4])
+    return (ds, s)
+end
+
+"""The MestraError a call raises, or nothing."""
+function refusal(f)
+    try
+        f()
+        return nothing
+    catch e
+        e isa Mestra.MestraError || rethrow()
+        return e
+    end
+end
+
+@testset "the builder follows dims, and refuses what disagrees" begin
+    ds, s = six_node_dataset()
+    # `dims` decides `varies`, and a `varies` that says otherwise is
+    # refused at build time rather than written as an invalid file
+    e = refusal(() -> Mestra.add_node_array!(ds, s, "p",
+            [101.0 102 103 104 105 106; 201.0 202 203 204 205 206];
+            units = "Pa", dims = (:row, :node), varies = "none"))
+    @test e !== nothing && e.rule == "E04"
+    @test occursin("varies", e.msg) && occursin("dims", e.msg)
+    @test occursin("/supports/s0/node_arrays/p", sprint(showerror, e))
+    # :instance does not say which group it is
+    e = refusal(() -> Mestra.add_node_array!(ds, s, "p", rand(2, 6, 1);
+            units = "Pa", dims = (:instance, :node, :component)))
+    @test e !== nothing && e.rule == "E04"
+    @test occursin("group:", e.msg)
+    # and a group key the dataset does not declare is refused
+    e = refusal(() -> Mestra.add_node_array!(ds, s, "p", rand(2, 6, 1);
+            units = "Pa", dims = (:instance, :node, :component),
+            varies = "group:nosuch"))
+    @test e !== nothing && e.rule == "E04"
+    @test occursin("nosuch", e.msg)
+    # a square array is two readings and the builder will not choose
+    e = refusal(() -> Mestra.add_node_array!(ds, s, "p", rand(6, 6);
+                                             units = "Pa"))
+    @test e !== nothing && e.rule == "E04"
+    @test occursin("(node, component)", e.msg) &&
+          occursin("(row, node)", e.msg) && occursin("dims", e.msg)
+    # `components` follows from the component axis
+    e = refusal(() -> Mestra.add_node_array!(ds, s, "p", rand(2, 6, 3);
+            units = "Pa", dims = (:row, :node, :component),
+            components = 2))
+    @test e !== nothing && e.rule == "E31"
+    # the ones that agree are built, and `varies` may be said again
+    a = Mestra.add_node_array!(ds, s, "p", rand(2, 6); units = "Pa",
+                               dims = (:row, :node), varies = "row")
+    @test a.varies == "row" && a.components == 1
+    b = Mestra.add_node_array!(ds, s, "q", rand(2, 6, 2); units = "Pa",
+                               dims = (:instance, :node, :component),
+                               varies = "group:member")
+    @test b.varies == "group:member" && b.components == 2
+    c = Mestra.add_node_array!(ds, s, "t", collect(range(0, 1, 6));
+                               units = "1")
+    @test c.varies == "none" && c.components == 1
+end
+
+@testset "bounds, and the unit of generalisation" begin
+    ds, _ = six_node_dataset()
+    # the observed finite range unless the caller says otherwise
+    @test ds.keys["mach"].lower == 0.4 && ds.keys["mach"].upper == 0.8
+    Mestra.add_key!(ds, "alpha", [1.0, 3.0]; role = :condition,
+                    units = "degree", lower = -2.0, upper = 10.0)
+    @test ds.keys["alpha"].lower == -2.0 && ds.keys["alpha"].upper == 10.0
+    Mestra.add_key!(ds, "beta", [1.0, 3.0]; role = :condition,
+                    units = "degree", lower = nothing, upper = nothing)
+    @test ds.keys["beta"].lower === nothing
+    e = refusal(() -> Mestra.add_key!(ds, "gamma", [1.0, 3.0];
+                                      role = :condition, units = "degree",
+                                      lower = 0.0))
+    @test e !== nothing && e.rule == "E19"
+    # a non-finite value is not a bound
+    Mestra.add_scalar!(ds, "cl", [0.25, NaN]; units = "1")
+    Mestra.add_key!(ds, "delta", [1.0, NaN]; role = :condition, units = "1")
+    @test ds.keys["delta"].lower == 1.0 && ds.keys["delta"].upper == 1.0
+
+    # the unit of generalisation is a dataset property
+    @test ds.generalisation_group == "member"       # the first group key
+    Mestra.add_category_table!(ds, "batch", ["b0", "b1"])
+    Mestra.add_key!(ds, "batch", [0, 1]; role = :group, category = "batch")
+    @test ds.generalisation_group == "member"
+    Mestra.set_generalisation_group!(ds, "batch")
+    @test ds.generalisation_group == "batch"
+    e = refusal(() -> Mestra.set_generalisation_group!(ds, "mach"))
+    @test e !== nothing && e.rule == "E02"
+    @test refusal(() -> Mestra.set_generalisation_group!(ds, "nope")) !==
+          nothing
+end
+
 @testset "building a model file with a callable slot" begin
     ds = Mestra.Dataset(writer = "mestra.jl test 0",
                         created = "2026-09-19T00:00:00Z")
@@ -480,11 +614,16 @@ end
                        b = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
                        shape = Int64[6, 1])))
     Mestra.add_callable!(ds, "m1", c)
-    Mestra.add_callable_scalar!(ds, "cl"; units = "1", id = "m1",
+    # `callable` names it, and `id` is the older spelling of the same
+    # argument; neither is refused with the rule it breaks
+    Mestra.add_callable_scalar!(ds, "cl"; units = "1", callable = "m1",
                                 output = "cl")
     Mestra.add_callable_slot!(ds, s, "pressure"; units = "Pa",
                               components = 1, id = "m1",
                               output = "pressure")
+    e = refusal(() -> Mestra.add_callable_scalar!(ds, "cd"; units = "1",
+                                                  output = "cd"))
+    @test e !== nothing && e.rule == "E14"
     path = joinpath(SCRATCH, "model.mes")
     Mestra.write(ds, path)
     @test Mestra.validate(path).errors == String[]
@@ -554,6 +693,143 @@ end
     @test isempty(Mestra.structural_diff(path, path))
 end
 
+@testset "a strict read refuses a broken file, and reads no array" begin
+    structural = Set(Mestra.STRUCTURAL_RULES)
+    refused = 0
+    for name in case_names()
+        want = intersect(Set(String.(expected(name).validator.errors)),
+                         structural)
+        e = refusal(() -> Mestra.read(case_file(name)))
+        if isempty(want)
+            # nothing structural to refuse it with, so it opens, whatever
+            # else it breaks: a missing unit or a leaking split is what a
+            # user opens a file to find out
+            @test e === nothing
+        else
+            @test e !== nothing && e.rule in want
+            refused += 1
+        end
+        # and a non-strict read opens every one of them
+        @test Mestra.read(case_file(name); strict = false) isa Mestra.Dataset
+    end
+    @test refused >= 6            # E01, E16, E19, E25, E26, E29, E30
+    # the refusal names the rule, the object and the way past it
+    e = refusal(() -> Mestra.read(case_file("err_e30")))
+    @test e.rule == "E30" && occursin("strict = false", e.msg)
+
+    # deciding those rules reads no array element: a strict read of a
+    # good file goes through with room for eight elements, which is
+    # fewer than any array in it
+    ds = Mestra.read(case_file("mesh_two_rows"); max_elements = 8)
+    @test ds.nrows == 2
+    @test !Mestra.materialised(ds["pressure"])
+    @test_throws Mestra.MestraError Mestra.values(ds, ds["pressure"])
+    # and the structural pass is the nine rules and no others
+    for name in case_names()
+        r = Mestra.validate(case_file(name); structural = true)
+        @test all(f -> f.rule in structural, r.findings)
+        @test issubset(Set(f.rule for f in r.findings),
+                       Set(vcat(String.(expected(name).validator.errors),
+                                String.(expected(name).validator.warnings))))
+    end
+end
+
+@testset "write validates before it writes (section 2)" begin
+    ds, s = six_node_dataset()
+    Mestra.add_node_array!(ds, s, "pressure", rand(2, 6); units = "Pa")
+    good = joinpath(SCRATCH, "checked.mes")
+    Mestra.write(ds, good)
+    @test Mestra.validate(good).errors == String[]
+    @test !isfile(good * ".mestra-check")
+    # a slot the builder never saw: setting `varies` on a built slot
+    # changes nothing about its shape, so the file this would write is
+    # one the validator rejects, and the refusal carries the findings
+    ds["pressure"].varies = "none"
+    bad = joinpath(SCRATCH, "refused.mes")
+    e = refusal(() -> Mestra.write(ds, bad))
+    @test e !== nothing
+    @test occursin("/supports/s0/node_arrays/pressure", e.msg)
+    @test occursin("check = false", e.msg)
+    @test !isfile(bad)                       # nothing was written
+    @test !isfile(bad * ".mestra-check")     # and nothing was left behind
+    # `check = false` writes it, which is how the corpus's own broken
+    # files get made, and the refusal named the first rule it breaks
+    @test Mestra.write(ds, bad; check = false) == bad
+    broken = Mestra.validate(bad)
+    @test !isempty(broken.errors) && e.rule in broken.errors
+    # a file that was already there is left alone by a refusal
+    @test Mestra.validate(good).errors == String[]
+end
+
+@testset "one finding per rule per object, and a report to read" begin
+    # W02, W03 and W04 could each fire on every row; each fires once,
+    # with the count and the first three rows (section 5)
+    r = Mestra.validate(case_file("warn_w02"))
+    w02 = [f for f in r.findings if f.rule == "W02"]
+    @test length(w02) == 1
+    @test occursin("converged", w02[1].message)
+    @test occursin(r"\d+ rows?", w02[1].message)
+    w03 = [f for f in Mestra.validate(case_file("warn_w03")).findings
+           if f.rule == "W03"]
+    @test !isempty(w03)
+    @test all(f -> occursin("missing floating-point data", f.message), w03)
+    @test length(unique((f.rule, f.path) for f in w03)) == length(w03)
+    bounds = Mestra.validate(case_file("warn_w04"))
+    w04 = [f for f in bounds.findings if f.rule == "W04"]
+    @test length(w04) == 1
+    @test occursin("outside the declared bounds", w04[1].message)
+    @test occursin(r"row", w04[1].message)
+    # no rule says the same thing twice about one object, anywhere
+    for name in case_names()
+        rep = Mestra.validate(case_file(name))
+        @test length(unique((f.rule, f.path) for f in rep.findings)) ==
+              length(rep.findings)
+    end
+    # W01 names the unit it leaked, and why that matters
+    leak = Mestra.validate(case_file("warn_w01"))
+    w01 = [f for f in leak.findings if f.rule == "W01"]
+    @test length(w01) == 1
+    @test occursin("generalisation test", w01[1].message)
+
+    # the printed report: `<id> <path>: <message>` and a summary line
+    io = IOBuffer()
+    Mestra.report(Mestra.validate(case_file("warn_w01")); io = io)
+    text = String(take!(io))
+    @test occursin("W01 /keys/split: ", text)
+    @test occursin("0 error(s), 1 warning(s)", split(text, '\n')[end - 1])
+    io = IOBuffer()
+    Mestra.report(case_file("mesh_two_rows"); io = io)
+    @test strip(String(take!(io))) == "0 error(s), 0 warning(s)"
+end
+
+@testset "info prints what the file declares (section 5)" begin
+    io = IOBuffer()
+    Mestra.info(case_file("mesh_two_rows"); io = io)
+    text = String(take!(io))
+    @test occursin("mestra/0, 2 row(s), aligned", text)
+    # every key with its role, units, bounds and category
+    @test occursin("mach", text) && occursin("condition", text)
+    @test occursin("units 1", text) && occursin("bounds [", text)
+    @test occursin("category member", text)
+    # the support with its kind, counts and id
+    @test occursin("mesh", text) && occursin("6 node(s), 2 cell(s)", text)
+    @test occursin("96df395d", text)
+    # every slot with named axes, shape, units and source
+    @test occursin("/supports/s0/node_arrays/pressure", text)
+    @test occursin("(row, node, component) 2x6x1", text)
+    @test occursin("units Pa", text)
+    @test occursin("data", text)
+    # a callable slot names its callable and its output
+    io = IOBuffer()
+    Mestra.info(case_file("affine_zero_rows"); io = io)
+    model = String(take!(io))
+    @test occursin("callable m1 -> ", model)
+    # a file with no support says so rather than claiming alignment
+    io = IOBuffer()
+    Mestra.info(case_file("scalars_only"); io = io)
+    @test occursin("no support", String(take!(io)))
+end
+
 @testset "mistakes name the rule they break" begin
     ds = Mestra.Dataset()
     @test_throws Mestra.MestraError Mestra.add_key!(ds, "x", [1.0];
@@ -599,16 +875,9 @@ end
     end
 end
 
-@testset "post-processing written against the format" begin
-    ds = Mestra.read(case_file("mesh_two_rows"); lazy = false)
-    st = Mestra.field_statistics(ds, ds["pressure"])
-    @test length(st) == 2
-    @test st[1].row == 1 && st[1].mean == 103.5
-    @test st[2].row == 2 && st[2].min == 201.0 && st[2].max == 206.0
-    byregion = Mestra.field_statistics(ds, ds["region"], by = "region")
-    @test Set(x.region for x in byregion) == Set(["inlet", "outlet"])
-
-    # integration over a region of a label, with a weight array
+"""Two rows of pressure on six nodes and two unit quads, with a region
+label: the dataset the weight and integration tests work on."""
+function weighted_dataset()
     w = Mestra.Dataset(writer = "mestra.jl test 0",
                        created = "2026-09-19T00:00:00Z")
     Mestra.add_category_table!(w, "region", ["inlet", "outlet"])
@@ -622,47 +891,157 @@ end
     Mestra.add_node_array!(w, ws, "pressure",
                            [1.0 2 3 4 5 6; 10.0 20 30 40 50 60];
                            units = "Pa")
-    Mestra.add_node_array!(w, ws, "measure", fill(0.5, 6);
-                           role = :weight, units = "m2", dims = (:node,),
-                           recomputed = true)
     Mestra.add_node_array!(w, ws, "region", Int32[0, 0, 0, 1, 1, 1];
                            role = :label, dims = (:node,),
                            category = "region")
-    total = Mestra.integrate(w, w["pressure"]; weight = "measure")
-    @test size(total) == (2, 1)
-    @test total[1, 1] == 0.5 * sum(1:6)
-    inlet = Mestra.integrate(w, w["pressure"]; weight = "measure",
-                             by = "region", region = "inlet")
-    @test inlet[1, 1] == 0.5 * (1 + 2 + 3)
-    @test inlet[2, 1] == 0.5 * (10 + 20 + 30)
+    return (w, ws)
+end
+
+@testset "weights computed from the connectivity (section 3)" begin
+    w, ws = weighted_dataset()
+    # two unit quads: each cell has area 1, and each node the share of
+    # the cells it belongs to
+    cells = Mestra.compute_weights!(w, ws, :cell)
+    @test cells.role === :weight && cells.recomputed === true
+    @test cells.units == "m2" && cells.name == "weight"
+    @test vec(Mestra.compute_weights(w, ws, :cell)) == [1.0, 1.0]
+    nodes = Mestra.compute_weights!(w, ws, :node; name = "node_weight")
+    @test vec(Mestra.compute_weights(w, ws, :node)) ==
+          [0.25, 0.5, 0.25, 0.25, 0.5, 0.25]
+    @test sum(Mestra.compute_weights(w, ws, :node)) == 2.0
+    # and what is computed can be written and read back
     wpath = joinpath(SCRATCH, "weighted.mes")
     Mestra.write(w, wpath)
-    @test Mestra.validate(wpath).errors == String[]
-    @test Mestra.validate(wpath).warnings == String[]
+    r = Mestra.validate(wpath)
+    @test r.errors == String[] && r.warnings == String[]
+
+    # the cell measures themselves, one cell at a time
+    unit = Mestra.Dataset(writer = "mestra.jl test 0",
+                          created = "2026-09-19T00:00:00Z")
+    Mestra.add_key!(unit, "x", [1.0]; role = :condition, units = "1")
+    # a line, a triangle, a tetrahedron, a hexahedron, a wedge, a
+    # pyramid, each on its own support of known measure
+    cases = [("line", UInt8[3], [0.0 0.0 0.0; 2.0 0.0 0.0], 2, 2.0, "m"),
+             ("tri", UInt8[5], [0.0 0.0 0.0; 3.0 0.0 0.0; 0.0 4.0 0.0],
+              3, 6.0, "m2"),
+             ("tet", UInt8[10], [0.0 0.0 0.0; 1.0 0.0 0.0; 0.0 1.0 0.0;
+                                 0.0 0.0 1.0], 4, 1 / 6, "m3"),
+             ("hex", UInt8[12], [0.0 0.0 0.0; 1.0 0.0 0.0; 1.0 1.0 0.0;
+                                 0.0 1.0 0.0; 0.0 0.0 2.0; 1.0 0.0 2.0;
+                                 1.0 1.0 2.0; 0.0 1.0 2.0], 8, 2.0, "m3"),
+             ("wedge", UInt8[13], [0.0 0.0 0.0; 1.0 0.0 0.0; 0.0 1.0 0.0;
+                                   0.0 0.0 1.0; 1.0 0.0 1.0;
+                                   0.0 1.0 1.0], 6, 0.5, "m3"),
+             ("pyr", UInt8[14], [0.0 0.0 0.0; 1.0 0.0 0.0; 1.0 1.0 0.0;
+                                 0.0 1.0 0.0; 0.5 0.5 3.0], 5, 1.0, "m3")]
+    for (name, types, coords, n, want, units) in cases
+        s = Mestra.add_mesh_support!(unit, name; coordinates = coords,
+                dims = (:node, :component), cell_types = types,
+                cell_offsets = Int64[0, n],
+                cell_connectivity = Int64.(collect(0:(n - 1))))
+        got = Mestra.compute_weights(unit, s, :cell)
+        @test isapprox(got[1, 1], want; rtol = 1e-12)
+        slot = Mestra.compute_weights!(unit, s, :cell)
+        @test slot.units == units
+    end
+    # a cell type with a curved geometry is refused, and says so
+    curved = Mestra.Dataset(writer = "t", created = "2026-09-19T00:00:00Z")
+    Mestra.add_key!(curved, "x", [1.0]; role = :condition, units = "1")
+    cs = Mestra.add_mesh_support!(curved, "s0";
+             coordinates = [0.0 0.0; 1.0 0.0; 0.5 0.1],
+             dims = (:node, :component), cell_types = UInt8[21],
+             cell_offsets = Int64[0, 3],
+             cell_connectivity = Int64[0, 1, 2])
+    e = refusal(() -> Mestra.compute_weights(curved, cs, :cell))
+    @test e !== nothing && e.rule == "E21" && occursin("21", e.msg)
+
+    # an axis support has no cells, and its nodes share the intervals
+    ax = Mestra.Dataset(writer = "t", created = "2026-09-19T00:00:00Z")
+    Mestra.add_key!(ax, "x", [1.0]; role = :condition, units = "1")
+    axs = Mestra.add_axis_support!(ax, "f"; coordinates = [0.0, 1.0, 3.0],
+                                   units = "Hz")
+    @test vec(Mestra.compute_weights(ax, axs, :node)) == [0.5, 1.5, 1.0]
+    @test refusal(() -> Mestra.compute_weights(ax, axs, :cell)) !== nothing
+end
+
+@testset "post-processing written against the format" begin
+    ds = Mestra.read(case_file("mesh_two_rows"); lazy = false)
+    st = Mestra.field_statistics(ds, "pressure")
+    @test length(st) == 2
+    @test st[1].row == 1 && st[1].mean == 103.5
+    @test st[2].row == 2 && st[2].min == 201.0 && st[2].max == 206.0
+    # with no label there is no grouping column at all
+    @test !haskey(st[1], :region) && !haskey(st[1], :by)
+    byregion = Mestra.field_statistics(ds, "region", by = "region")
+    @test Set(x.region for x in byregion) == Set(["inlet", "outlet"])
+    # and the column is named after the label, whatever it is called:
+    # J4, where every label's column was called `region`
+    lt = Mestra.read(case_file("labels_tables"); lazy = false)
+    face = Mestra.field_statistics(lt, "cad_face_id", by = "cad_face_id")
+    @test haskey(face[1], :cad_face_id) && !haskey(face[1], :region)
+    @test length(unique(x.cad_face_id for x in face)) > 1
+    @test all(x -> x.cad_face_id isa String, face)
+    # a scalar is not a field, and says so in this package's words
+    sc = Mestra.read(case_file("scalars_only"); lazy = false)
+    e = refusal(() -> Mestra.field_statistics(sc, "cl"))
+    @test e !== nothing && occursin("scalar", e.msg)
+    @test occursin("Mestra.values", e.msg)
+
+    # integration uses the file's own weight array by default
+    w, ws = weighted_dataset()
+    Mestra.compute_weights!(w, ws, :node)
+    total = Mestra.integrate(w, "pressure")
+    @test size(total) == (2, 1)
+    @test total[1, 1] ≈ 0.25 * 1 + 0.5 * 2 + 0.25 * 3 +
+                        0.25 * 4 + 0.5 * 5 + 0.25 * 6
+    inlet = Mestra.integrate(w, "pressure", by = "region", region = "inlet")
+    @test inlet[1, 1] ≈ 0.25 * 1 + 0.5 * 2 + 0.25 * 3
+    # naming one has the same answer
+    @test Mestra.integrate(w, "pressure", weight = "weight") == total
+    # and with no weight array in the file one is computed, with a word
+    # about it rather than an error from a missing keyword
+    bare, _ = weighted_dataset()
+    out = @test_logs (:info,) match_mode = :any Mestra.integrate(bare,
+                                                                 "pressure")
+    @test out == total
 
     # a time series at a node, along one trajectory
     t = Mestra.read(case_file("transient_fixed_mesh"); lazy = false)
-    times, xs = Mestra.time_series(t, t["u"]; node = 3,
-                                   trajectory = "r000")
+    times, xs = Mestra.time_series(t, "u"; node = 3, trajectory = "r000")
     @test times == [0.0, 0.1, 0.3]
     @test xs == [302.0, 312.0, 322.0]
-    times2, xs2 = Mestra.time_series(t, t["u"]; node = 1,
-                                     trajectory = 1)
+    times2, xs2 = Mestra.time_series(t, "u"; node = 1, trajectory = 1)
     @test times2 == [0.0, 0.25]
 
     # a split that honours the unit of generalisation
-    sc = Mestra.read(case_file("scalars_only"); lazy = false)
-    parts = Mestra.grouped_split(sc; fractions = ["train" => 2 / 3,
-                                                  "test" => 1 / 3])
+    parts = Mestra.grouped_split(sc, ["train" => 2 / 3, "test" => 1 / 3])
     @test sort(vcat(parts["train"], parts["test"])) == collect(1:6)
     g = Mestra.values(sc, sc.keys["geometry"])
     @test isempty(intersect(Set(g[parts["train"]]), Set(g[parts["test"]])))
+    # J1: three units and 80/20 left the test part empty
+    eighty = Mestra.grouped_split(sc, ["train" => 0.8, "test" => 0.2])
+    @test !isempty(eighty["test"]) && !isempty(eighty["train"])
+    @test sort(vcat(eighty["train"], eighty["test"])) == collect(1:6)
+    # the seed is the whole of the randomness, and its default is 0
+    @test Mestra.grouped_split(sc) == Mestra.grouped_split(sc; seed = 0)
+    @test any(Mestra.grouped_split(sc; seed = s) != eighty for s in 1:20)
+    # a Dict is taken in name order, so the answer does not depend on it
+    @test Mestra.grouped_split(sc, Dict("test" => 0.2, "train" => 0.8)) ==
+          Mestra.grouped_split(sc, ["test" => 0.2, "train" => 0.8])
+    # more parts than units is refused rather than answered with an
+    # empty part
+    e = refusal(() -> Mestra.grouped_split(sc, ["a" => 1, "b" => 1,
+                                                "c" => 1, "d" => 1]))
+    @test e !== nothing && occursin("empty", e.msg)
+
     @test isempty(Mestra.split_leaks(sc))
     leaky = Mestra.read(case_file("warn_w01"); lazy = false)
     @test !isempty(Mestra.split_leaks(leaky))
+    # J10: an empty answer means no leak and nothing else
+    e = refusal(() -> Mestra.split_leaks(lt))
+    @test e !== nothing
     # a file with no unit of generalisation is refused, not guessed at
-    none = Mestra.read(case_file("labels_tables"); lazy = false)
-    @test_throws Mestra.MestraError Mestra.grouped_split(none)
+    @test_throws Mestra.MestraError Mestra.grouped_split(lt)
 end
 
 """Run run_hostile.jl over a list of files in a process of its own,
@@ -794,13 +1173,17 @@ end
     @test "E36" in r.errors            # z_errors, after that
     @test "E39" in r.errors            # and a key after both
 
-    # a claim of a trillion elements costs nothing to refuse
+    # a claim of a trillion elements costs nothing to refuse.  The
+    # file also says it in a scalar of a length no row count matches,
+    # which is E16, so a strict read refuses it on the structure
+    # alone; this is about what it costs to carry on with it.
     huge = joinpath(hostile, "huge_declared.mes")
     Mestra.validate(huge)              # warm
     @test (@allocated Mestra.validate(huge)) < 64_000_000
-    Mestra.read(huge)
-    @test (@allocated Mestra.read(huge)) < 16_000_000
-    ds = Mestra.read(huge)
+    @test refusal(() -> Mestra.read(huge)).rule == "E16"
+    Mestra.read(huge; strict = false)
+    @test (@allocated Mestra.read(huge; strict = false)) < 16_000_000
+    ds = Mestra.read(huge; strict = false)
     # the whole slot is refused
     @test_throws Mestra.MestraError Mestra.values(ds, ds.scalars["huge"])
     e = try
@@ -822,12 +1205,17 @@ end
         ds.scalars["huge_chunk"], 1:1)
     # an eager read reports rather than throws, so that one refused
     # slot does not lose the file
-    tight = Mestra.read(huge; lazy = false, max_elements = 10)
+    tight = Mestra.read(huge; lazy = false, max_elements = 10,
+                        strict = false)
     @test any(f -> f.rule == "E41", tight.findings)
-    @test tight.scalars["huge"].data === nothing
+    @test !Mestra.materialised(tight.scalars["huge"])
 
-    # a link this reader will not follow is reported, not followed
-    ds2 = Mestra.read(joinpath(hostile, "link_external.mes"))
+    # a link this reader will not follow is reported by a non-strict
+    # read and refused by a strict one; neither follows it
+    @test refusal(() -> Mestra.read(joinpath(hostile,
+              "link_external.mes"))).rule == "E40"
+    ds2 = Mestra.read(joinpath(hostile, "link_external.mes");
+                      strict = false)
     @test any(f -> f.rule == "E40", ds2.findings)
     @test !haskey(ds2.scalars, "elsewhere")
     @test !haskey(ds2.scalars, "neighbour")
