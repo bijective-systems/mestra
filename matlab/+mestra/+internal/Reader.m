@@ -437,7 +437,25 @@ classdef Reader
         %   which the axis has no name to permute by.  Both are noted
         %   here so that a strict read refuses the file and a lenient
         %   one says what it passed over.
+        %
+        %   A leading extent that disagrees with the `row` dimension it
+        %   is attached to is E16, and is noted here for the same
+        %   reason: a dataset that says it holds three rows in a file
+        %   of two is not a dataset a caller can line up against the
+        %   keys, and handing it back would be worse than refusing it
+        %   (docs/api-conventions.md, section 2).
             if nargin < 5, map = []; end
+            if ~isempty(info.dims)
+                leading = mestra.internal.H5.scaleNames(did, 0, map);
+                if ~isempty(leading) && strcmp(leading(1).name, 'row') && ...
+                        leading(1).length >= 0 && ...
+                        info.dims(1) ~= leading(1).length
+                    mestra.internal.Reader.note(d, path, 'E16', sprintf( ...
+                        ['the leading extent is %d where the row ' ...
+                         'dimension it is attached to has %d'], ...
+                        info.dims(1), leading(1).length));
+                end
+            end
             for i = 1:size(info.filters, 1)
                 id = info.filters(i, 1);
                 ok = (id == 1 && info.filters(i, 2) >= 1 && ...
@@ -559,6 +577,8 @@ classdef Reader
                 rec(1).values = [];
                 rec(1).dtype = '';
                 rec(1).dims = {};
+                mestra.internal.Reader.checkSlotKind(rec(1).source, true, ...
+                                                     d, path);
                 H5G.close(oid);
                 return
             end
@@ -573,6 +593,7 @@ classdef Reader
             rec(1).quantile = R().num(did, 'quantile', d, path);
             rec(1).dtype = info.type;
             rec(1).chunk = info.chunk;
+            mestra.internal.Reader.checkSlotKind(rec(1).source, false, d, path);
             mestra.internal.Reader.inspect(did, info, d, path, map);
             if eager
                 values = mestra.internal.Reader.readValues(did, info, d, path);
@@ -691,9 +712,12 @@ classdef Reader
             if ~isempty(rec(1).recomputed)
                 rec(1).recomputed = rec(1).recomputed ~= 0;
             end
+            mestra.internal.Reader.checkSlotKind(rec(1).source, isGroup, ...
+                                                 d, path);
             if isGroup
                 rec(1).values = [];
                 rec(1).dims = {};
+                rec(1).shape = [];
                 rec(1).dtype = '';
                 rec(1).chunk = [];
                 H5G.close(oid);
@@ -703,6 +727,9 @@ classdef Reader
             names = mestra.internal.Reader.axisNames(oid, numel(info.dims), ...
                                                      map);
             rec(1).dims = fliplr(names);
+            % The extents in the file's own order, so that a lazy read
+            % can still say what shape a slot has (section 29).
+            rec(1).shape = reshape(double(info.dims), 1, []);
             rec(1).dtype = info.type;
             rec(1).chunk = info.chunk;
             R().inspect(oid, info, d, path, map);
@@ -792,6 +819,30 @@ classdef Reader
             d.skipped{end + 1} = sprintf( ...
                 ['E19 %s: the attribute %s is not the scalar section 18 ' ...
                  'requires, and was not used'], path, name);
+        end
+
+        function checkSlotKind(source, isGroup, d, path)
+        %checkSlotKind  E30: a slot with `source = data` stored as a
+        %   group, or a slot served by a callable stored as a dataset.
+        %
+        %   Section 19 makes the two kinds of slot distinguishable
+        %   without reading any data, and a reader that takes one for
+        %   the other reads a callable slot as an empty array or an
+        %   array as a slot with no data.  Neither is something to
+        %   hand back, so a strict read refuses the file.
+            if isempty(source), return, end
+            servedByCallable = numel(source) > 9 && ...
+                               strncmp(source, 'callable:', 9);
+            if isGroup && ~servedByCallable
+                mestra.internal.Reader.note(d, path, 'E30', sprintf( ...
+                    ['source is "%s" and the slot is a group; a slot ' ...
+                     'holding data is a dataset'], source));
+            elseif ~isGroup && servedByCallable
+                mestra.internal.Reader.note(d, path, 'E30', ...
+                    ['source names a callable and the slot is a ' ...
+                     'dataset; a slot served by a callable is a group ' ...
+                     'with no data']);
+            end
         end
 
         function note(d, path, id, why)

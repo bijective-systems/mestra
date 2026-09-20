@@ -131,6 +131,15 @@ classdef CorpusTest < matlab.unittest.TestCase
             testCase.verifyFalse(any(ismember({'E07', 'W09'}, ...
                                               [gotE gotW])), ...
                 'a retired rule identifier was emitted');
+            % One finding per rule per object (docs/api-conventions.md,
+            % section 5).  It is checked here, on every case, because
+            % this is where the corpus is validated anyway.
+            if ~isempty(r.findings)
+                seen = arrayfun(@(f) [f.id ' ' f.path], r.findings, ...
+                                'UniformOutput', false);
+                testCase.verifyEqual(numel(unique(seen)), numel(seen), ...
+                    sprintf('%s: a rule fired twice at one path', caseName));
+            end
         end
 
         function supportIds(testCase, caseName)

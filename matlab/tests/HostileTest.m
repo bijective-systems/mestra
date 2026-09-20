@@ -199,13 +199,41 @@ classdef HostileTest < matlab.unittest.TestCase
         %   Opening must cost nothing, one row range must read one row,
         %   and the whole dataset must be refused by the stated limit
         %   rather than by whatever the machine happens to have.
+        %
+        %   A strict read never gets as far as the limit, and should
+        %   not: a dataset of a million rows in a file of two breaks
+        %   E16, which is a structural rule, and a strict read refuses
+        %   a file that breaks one (docs/api-conventions.md, section
+        %   2).  The element limit is what refuses the dataset once
+        %   the caller has asked for it anyway, which is a non-strict
+        %   read, a row range wider than the limit, or the validator;
+        %   all three are checked below.
             path = HostileTest.caseFile('huge_shape');
             started = tic;
             d = mestra.open(path, 'Strict', false);
             testCase.verifyLessThan(toc(started), 5, ...
                 'opening must not touch the data');
 
-            testCase.verifyError(@() mestra.read(path), 'mestra:E41');
+            err = [];
+            try
+                mestra.read(path);
+            catch err %#ok<CTCH>
+            end
+            testCase.verifyNotEmpty(err, 'a strict read must refuse it');
+            testCase.verifyEqual(err.identifier, 'mestra:E16', ...
+                'the first structural rule it breaks is the row count');
+
+            started = tic;
+            lenient = mestra.read(path, 'Strict', false);
+            testCase.verifyLessThan(toc(started), 10, ...
+                'and it still never attempts the allocation');
+            testCase.verifyTrue( ...
+                any(startsWith(lenient.skipped, 'E41 ')), ...
+                sprintf(['the element limit is what refuses the data: ' ...
+                         '%s'], strjoin(lenient.skipped, '; ')));
+            testCase.verifyTrue( ...
+                any(contains(lenient.skipped, 'enormous')), ...
+                'and it names the dataset it would not read');
 
             one = d.readRows('/supports/s0/node_arrays/enormous', [1 1]);
             testCase.verifyEqual(numel(one.values), 1e6, ...

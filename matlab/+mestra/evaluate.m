@@ -138,6 +138,11 @@ function slot = fill(d, results, slot, path, keysTable, nRows, fileDims)
             slot.components = size(slot.values, 1);
         end
     end
+    if isfield(slot, 'shape')
+        sz = size(slot.values);
+        sz = [sz ones(1, numel(slot.dims) - numel(sz))];
+        slot.shape = fliplr(sz(1:numel(slot.dims)));
+    end
 end
 
 function [id, output] = splitSource(source, output, path)

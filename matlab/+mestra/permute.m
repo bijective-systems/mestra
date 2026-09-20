@@ -39,9 +39,21 @@ function out = permute(array, names, wanted)
     sz = size(array);
     if numel(sz) > numel(names)
         if any(sz(numel(names) + 1:end) ~= 1)
+            hint = '';
+            if numel(sz) == 2 && any(sz == 1)
+                % MATLAB has no one-dimensional array, so a plain
+                % vector is 1-by-N or N-by-1 and always has two axes.
+                % Naming one of them can never be right, and this is
+                % the commonest way to arrive here.
+                hint = [' A MATLAB vector is 1-by-N or N-by-1, so a ' ...
+                        'plain vector has two axes and needs two ' ...
+                        'names; the singleton is usually the ' ...
+                        'component axis, as in {''component'', ' ...
+                        '''node''}.'];
+            end
             error('mestra:dims', ...
-                  'the array has %d axes and %d names; name every axis', ...
-                  numel(sz), numel(names));
+                  ['the array has %d axes and %d names; name every ' ...
+                   'axis.%s'], numel(sz), numel(names), hint);
         end
         sz = sz(1:nd);
     elseif numel(sz) < nd

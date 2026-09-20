@@ -307,6 +307,9 @@ classdef Writer
             localRows = mestra.internal.Writer.localRowCount(d, s);
             if ~isempty(localRows)
                 local('row') = H5.makeScale(sid, 'row', localRows, true);
+                rowCount = localRows;
+            else
+                rowCount = d.nRows;
             end
 
             if s.nCells > 0
@@ -321,7 +324,7 @@ classdef Writer
 
             if ~isempty(s.coordinates)
                 mestra.internal.Writer.writeSlot(sid, s.coordinates, ...
-                                                 scales, local);
+                                                 scales, local, rowCount);
             end
             present = s.groupsPresent;
             if isempty(present), present = {}; end
@@ -329,7 +332,7 @@ classdef Writer
                 ng = mestra.internal.Writer.group(sid, 'node_arrays');
                 for i = 1:numel(s.nodeArrays)
                     mestra.internal.Writer.writeSlot(ng, s.nodeArrays(i), ...
-                                                     scales, local);
+                                                     scales, local, rowCount);
                 end
                 H5G.close(ng);
             end
@@ -337,7 +340,7 @@ classdef Writer
                 cg = mestra.internal.Writer.group(sid, 'cell_arrays');
                 for i = 1:numel(s.cellArrays)
                     mestra.internal.Writer.writeSlot(cg, s.cellArrays(i), ...
-                                                     scales, local);
+                                                     scales, local, rowCount);
                 end
                 H5G.close(cg);
             end
@@ -379,8 +382,12 @@ classdef Writer
             H5D.close(did);
         end
 
-        function writeSlot(g, slot, scales, local)
+        function writeSlot(g, slot, scales, local, rowCount)
         %writeSlot  One array slot, stored or served by a callable.
+        %   ROWCOUNT is the length of the `row` dimension the leading
+        %   axis is attached to, which is what section 23 measures the
+        %   default chunk against, and not the dataset's own leading
+        %   extent.
             H5 = mestra.internal.H5;
             if ~strcmp(slot.source, 'data')
                 oid = mestra.internal.Writer.group(g, slot.name);
@@ -400,7 +407,7 @@ classdef Writer
                 if isempty(chunk)
                     c = mestra.internal.Writer.rowChunk( ...
                         mestra.internal.Writer.itemSize(slot.dtype), ...
-                        dims(2:end), dims(1));
+                        dims(2:end), rowCount);
                     chunk = [c dims(2:end)];
                 end
             end
