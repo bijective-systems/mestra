@@ -72,6 +72,286 @@ def test_bounds_default_to_the_observed_range():
     assert (other.lower, other.upper) == (None, None)
 
 
+def test_bounds_are_the_observed_finite_range():
+    """A missing value must not become the domain of validity."""
+    ds = mestra.Dataset(writer="t")
+    key = ds.add_key("alpha", [-2.0, np.nan, 10.0, np.inf],
+                     role="condition", units="degree")
+    assert (key.lower, key.upper) == (-2.0, 10.0)
+
+
+def test_a_bound_the_caller_gave_is_kept_and_the_other_observed():
+    ds = mestra.Dataset(writer="t")
+    key = ds.add_key("alpha", [1.0, 2.0, 3.0], role="condition",
+                     units="degree", lower=0.0)
+    assert (key.lower, key.upper) == (0.0, 3.0)
+
+
+def test_dims_names_the_axes_of_the_array_you_are_passing():
+    """P3: `dims` settles what no shape can settle."""
+    ds = mestra.Dataset(writer="t")
+    ds.add_key("mach", np.linspace(0.1, 0.6, 6), role="condition",
+               units="1")
+    support = ds.add_support("s0", coordinates=XY, cells=CELLS)
+    slot = support.add_node_array("p", np.arange(36.).reshape(6, 6),
+                                  units="Pa", dims=("row", "node"))
+    assert slot.varies == "row"
+    assert slot.components == 1
+    assert slot.dims == ("row", "node", "component")
+    assert slot.values.shape == (6, 6, 1)
+
+
+def test_dims_may_be_in_the_callers_own_axis_order():
+    """The builder stores it in the order section 19 requires."""
+    ds = mestra.Dataset(writer="t")
+    support = ds.add_support("s0", coordinates=XY, cells=CELLS)
+    given = np.arange(12.).reshape(2, 6)
+    slot = support.add_node_array("q", given, units="Pa",
+                                  dims=("component", "node"))
+    assert slot.varies == "none"
+    assert slot.components == 2
+    assert slot.dims == ("node", "component")
+    assert slot.values.at(node=1, component=1) == given[1, 1]
+
+
+def test_dims_and_varies_that_disagree_are_refused():
+    ds = mestra.Dataset(writer="t")
+    support = ds.add_support("s0", coordinates=XY, cells=CELLS)
+    with pytest.raises(MestraError) as caught:
+        support.add_node_array("p", np.zeros((2, 6)), units="Pa",
+                               dims=("row", "node"), varies="none")
+    assert caught.value.rule == "E04"
+    assert "varies" in str(caught.value) and "dims" in str(caught.value)
+
+
+def test_dims_that_names_the_wrong_number_of_axes():
+    ds = mestra.Dataset(writer="t")
+    support = ds.add_support("s0", coordinates=XY, cells=CELLS)
+    with pytest.raises(MestraError) as caught:
+        support.add_node_array("p", np.zeros((2, 6)), units="Pa",
+                               dims=("node",))
+    assert caught.value.rule == "E04"
+
+
+def test_dims_that_names_an_axis_the_format_does_not_have():
+    ds = mestra.Dataset(writer="t")
+    support = ds.add_support("s0", coordinates=XY, cells=CELLS)
+    with pytest.raises(MestraError) as caught:
+        support.add_node_array("p", np.zeros((2, 6)), units="Pa",
+                               dims=("sample", "node"))
+    assert caught.value.rule == "E04"
+    with pytest.raises(MestraError) as other:
+        support.add_node_array("p", np.zeros((2, 6)), units="Pa",
+                               dims=("instance", "node"))
+    assert "group:" in str(other.value)
+
+
+def test_a_group_varying_array_from_dims(tmp_path):
+    ds = mestra.Dataset(writer="t")
+    ds.add_category_table("member", ["wing_a", "wing_b"])
+    ds.add_key("member", [0, 1], role="group", category="member")
+    ds.set_generalisation_group("member")
+    support = ds.add_support(
+        "s0", coordinates=np.stack([XY, XY * [1.5, 1.0]]),
+        varies="group:member", cells=CELLS)
+    slot = support.add_node_array(
+        "pressure", np.zeros((6, 2)), units="Pa",
+        dims=("node", "group:member"))
+    assert slot.varies == "group:member"
+    assert slot.dims == ("group:member", "node", "component")
+    path = str(tmp_path / "group.mes")
+    mestra.write(ds, path)
+    assert mestra.validate(path).error_ids == []
+
+
+def test_a_group_varying_array_of_the_wrong_length():
+    ds = mestra.Dataset(writer="t")
+    ds.add_category_table("member", ["wing_a", "wing_b"])
+    ds.add_key("member", [0, 1], role="group", category="member")
+    support = ds.add_support("s0", coordinates=XY, cells=CELLS)
+    with pytest.raises(MestraError) as caught:
+        support.add_node_array("pressure", np.zeros((3, 6)),
+                               units="Pa", varies="group:member")
+    assert caught.value.rule == "E34"
+
+
+def test_a_varies_naming_a_group_the_file_does_not_declare():
+    ds = mestra.Dataset(writer="t")
+    support = ds.add_support("s0", coordinates=XY, cells=CELLS)
+    with pytest.raises(MestraError) as caught:
+        support.add_node_array("pressure", np.zeros((2, 6)),
+                               units="Pa", varies="group:member")
+    assert caught.value.rule == "E04"
+
+
+def test_a_category_table_comes_before_the_key_that_names_it():
+    ds = mestra.Dataset(writer="t")
+    ds.add_category_table("member", ["wing_a", "wing_b"])
+    key = ds.add_key("member", [0, 1], role="group", category="member")
+    assert key.category == "member"
+    assert ds.categories["member"][1] == "wing_b"
+
+
+def test_a_key_whose_table_is_not_there_yet():
+    ds = mestra.Dataset(writer="t")
+    with pytest.raises(MestraError) as caught:
+        ds.add_key("member", [0, 1], role="group", category="member")
+    assert caught.value.rule == "E39"
+    assert "add_category_table" in str(caught.value)
+
+
+def test_a_category_id_outside_the_table():
+    ds = mestra.Dataset(writer="t")
+    with pytest.raises(MestraError) as caught:
+        ds.add_key("member", [0, 2], role="group",
+                   categories=["wing_a", "wing_b"])
+    assert caught.value.rule == "E10"
+
+
+def test_the_unit_of_generalisation_is_a_dataset_property():
+    ds = mestra.Dataset(writer="t")
+    ds.add_key("member", [0, 1], role="group",
+               categories=["wing_a", "wing_b"])
+    assert ds.generalisation_group is None
+    ds.set_generalisation_group("member")
+    assert ds.generalisation_group == "member"
+    ds.set_generalisation_group(None)
+    assert ds.generalisation_group is None
+
+
+def test_the_unit_of_generalisation_is_a_group_key():
+    ds = mestra.Dataset(writer="t")
+    ds.add_key("mach", [0.4, 0.8], role="condition", units="1")
+    with pytest.raises(MestraError) as caught:
+        ds.set_generalisation_group("mach")
+    assert caught.value.rule == "E03"
+    with pytest.raises(MestraError):
+        ds.set_generalisation_group("nothing_of_the_sort")
+
+
+def test_units_are_required_where_section_3_requires_them():
+    ds = mestra.Dataset(writer="t")
+    with pytest.raises(MestraError) as caught:
+        ds.add_key("mach", [0.4], role="condition")
+    assert caught.value.rule == "E39"
+    with pytest.raises(MestraError) as other:
+        ds.add_scalar("cl", [0.25])
+    assert other.value.rule == "E11"
+    support = ds.add_support("s0", coordinates=XY, cells=CELLS)
+    with pytest.raises(MestraError) as third:
+        support.add_node_array("p", np.zeros(6))
+    assert third.value.rule == "E11"
+
+
+def test_a_key_that_carries_units_it_should_not():
+    ds = mestra.Dataset(writer="t")
+    with pytest.raises(MestraError) as caught:
+        ds.add_key("member", [0, 1], role="group", units="m",
+                   categories=["wing_a", "wing_b"])
+    assert caught.value.rule == "E39"
+
+
+def test_a_second_key_of_a_role_that_allows_one():
+    ds = mestra.Dataset(writer="t")
+    ds.add_key("t", [0.0, 1.0], role="time", units="s")
+    with pytest.raises(MestraError) as caught:
+        ds.add_key("t2", [0.0, 1.0], role="time", units="s")
+    assert caught.value.rule == "E03"
+
+
+def test_a_derived_array_carries_what_section_3_requires():
+    ds = mestra.Dataset(writer="t")
+    support = ds.add_support("s0", coordinates=XY, cells=CELLS)
+    with pytest.raises(MestraError) as caught:
+        support.add_node_array("dx", np.zeros(6), role="derived",
+                               units="m")
+    assert caught.value.rule == "E13"
+
+
+def test_an_axis_supports_coordinates_do_not_vary():
+    ds = mestra.Dataset(writer="t")
+    with pytest.raises(MestraError) as caught:
+        ds.add_support("s0", kind="axis",
+                       coordinates=np.zeros((2, 4)), units="s",
+                       varies="row")
+    assert caught.value.rule == "E35"
+
+
+def test_a_mesh_support_carries_cells():
+    ds = mestra.Dataset(writer="t")
+    with pytest.raises(MestraError) as caught:
+        ds.add_support("s0", kind="mesh", coordinates=XY)
+    assert caught.value.rule == "E38"
+
+
+def test_a_quantile_slot_carries_its_quantile():
+    ds = mestra.Dataset(writer="t")
+    support = ds.add_support("s0", coordinates=XY, cells=CELLS)
+    with pytest.raises(MestraError) as caught:
+        support.add_node_array("p_q90", np.zeros(6), units="Pa",
+                               statistic="quantile", of="p")
+    assert caught.value.rule == "E12"
+
+
+def test_a_callable_slot_names_a_callable_that_is_there(tmp_path):
+    ds = mestra.Dataset(writer="t")
+    ds.add_key("mach", [], role="condition", units="1", lower=0.1,
+               upper=0.9)
+    support = ds.add_support("s0", coordinates=XY, cells=CELLS)
+    with pytest.raises(MestraError) as caught:
+        support.add_callable_slot("pressure", units="Pa",
+                                  callable="m1", components=1)
+    assert caught.value.rule == "E14"
+
+    model = mestra.Affine(
+        ["mach"], {"pressure": {"A": [[1.0]] * 6, "b": [0.0] * 6,
+                                "shape": [6, 1]}})
+    ds.add_callable("m1", model)
+    slot = support.add_callable_slot("pressure", units="Pa",
+                                     callable=model, components=1)
+    assert slot.source == "callable:m1"
+    assert slot.output == "pressure"
+    assert slot.varies == "row"
+    ds.add_callable_slot("cl", units="1", callable="m1", output="cl")
+    assert ds.scalars["cl"].source == "callable:m1"
+    path = str(tmp_path / "model.mes")
+    mestra.write(ds, path)
+    assert mestra.validate(path).error_ids == []
+
+
+def test_a_callable_slot_declares_its_shape():
+    ds = mestra.Dataset(writer="t")
+    ds.add_callable("m1", mestra.Affine(["mach"], {}))
+    support = ds.add_support("s0", coordinates=XY, cells=CELLS)
+    with pytest.raises(MestraError) as caught:
+        support.add_callable_slot("pressure", units="Pa",
+                                  callable="m1")
+    assert caught.value.rule == "E31"
+
+
+def test_a_small_array_prints_its_values():
+    """P11: a one-element scalar should print the number."""
+    ds = mestra.Dataset(writer="t")
+    ds.add_scalar("cl", [1.45], units="1")
+    assert "1.45" in repr(ds.scalars["cl"].values)
+    assert "dims=row" in repr(ds.scalars["cl"].values)
+    big = mestra.NamedArray(np.zeros((6, 6, 1)), ("row", "node",
+                                                  "component"))
+    assert "6x6x1" in repr(big)
+
+
+def test_coordinates_are_on_the_support_and_the_error_says_so():
+    """P9: the natural first guess gets an answer, not a KeyError."""
+    ds = build_example()
+    support = ds.supports["s0"]
+    with pytest.raises(KeyError) as caught:
+        support.node_arrays["coordinates"]
+    assert "support.coordinates" in str(caught.value)
+    with pytest.raises(KeyError) as other:
+        support.node_arrays["pressur"]
+    assert "pressure" in str(other.value)
+
+
 def test_a_scalar_only_file_needs_no_support(tmp_path):
     ds = mestra.Dataset(writer="t")
     ds.add_key("geometry", [0, 0, 1, 1], role="group",
