@@ -70,7 +70,7 @@ Five minutes with the tool
         the thing wrong with it has no name. It exits 1 when the file
         is rejected and 0 otherwise, so warnings alone still exit 0.
 
-            E11 /scalars/power: a scalar without units
+            E11 /scalars/power: a scalar with no `units`
             W02 /keys/status: 7 row(s) whose status is not converged;
                 rows 5, 6, 7
             1 error(s), 1 warning(s)
@@ -84,8 +84,8 @@ Five minutes with the tool
         which is what a shell script wants.
 
     mestra-cli read FILE
-        check the file, refuse it with the rule identifiers if the
-        validator rejects it, and otherwise read the whole of it and
+        check the file, refuse it with the findings if the validator
+        rejects it, and otherwise read the whole of it and
         say what came back: the row count, how
         many keys, scalars, supports and callables, and how many array
         values.
@@ -135,7 +135,9 @@ Five minutes with the tool
         not read from the attribute.
 
     mestra-cli roundtrip IN OUT
-        read IN and write OUT.
+        read IN and write OUT. Both ends check: the read is strict and
+        the write validates, so a round trip that finishes is a round
+        trip between two files that validate.
 
     mestra-cli evaluate FILE KEYS.csv OUT
         evaluate every callable slot on a keys table and write the
@@ -300,6 +302,23 @@ of `units`. A label names its table the same way, through the
 `category` argument of `add_node_label` and `add_cell_label`, and a
 label that names none has values that are their own categories.
 
+What a builder does not take, you assign, on the object
+`d.key(name)`, `d.scalar(name)` or `d.support(name)` gives back:
+
+    d.key("time")->trajectory_group = "trajectory";
+    d.key("trajectory")->parent = "member";
+    slot.statistic = "quantile";   // with `of` and `quantile`,
+    slot.of = "pressure";          //   section 9
+    slot.quantile = 0.95;
+    slot.role = "derived";         // with `derived_from`, `recipe`
+    slot.derived_from = "coordinates";   //   and `reference`,
+    slot.recipe = "minus reference";     //   section 5
+    slot.reference = "group:member=wing_a";
+
+Those are plain attributes with no shape behind them, so assigning
+them takes effect. `varies` and `components` are the two that do not,
+and the builders are the only way to set them.
+
 Weights and integration. Section 3 of the specification says a weight
 array is computed from connectivity and never imported, so this
 library computes them:
@@ -378,6 +397,14 @@ The keys table of section 26 is a struct holding the key names beside
 one vector per key, looked up by name through `column(name)`, because
 C++ has no run-time member names. That is the form section 26 now
 gives for this language.
+
+A callable goes into a dataset with `d.add_callable("m1", model)`,
+which takes the type, the dictionary and the optional one-line `repr`
+from the object itself; `add_callable_node_array`,
+`add_callable_cell_array` and `add_callable_scalar` then point slots
+at it by id and output. A callable slot stores nothing, so it has no
+values for a component axis to take a length from: write
+`{"row", "node", {"component", 3}}`.
 
 To add your own callable type, derive from `mestra::Callable` and
 register a factory:

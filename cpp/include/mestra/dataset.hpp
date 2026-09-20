@@ -228,9 +228,11 @@ struct Dataset {
   // are decidable on the result.  A caller who wants a wider domain of
   // validity assigns `lower` and `upper` on the key it gets back;
   // those are plain attributes and assigning them takes effect.
+  // `units` has no default: section 3 requires it on a key of role
+  // design, condition or time, and those are the roles this builder
+  // is for.  "1" is the dimensionless unit and is said out loud.
   Key& add_key(const std::string& name, std::vector<double> values,
-               const std::string& role,
-               const std::string& units = "1");
+               const std::string& role, const std::string& units);
   // The convenience of section 1 for a key that names a category table
   // instead of units: add the table first with `add_category_table`
   // and name it here.  It is `add_key` with an integer column and
