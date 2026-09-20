@@ -31,6 +31,7 @@ Run it
     python python.py
     matlab -nodisplay -batch "addpath('<repo>/matlab'); run('matlab.m')"
     ../../../cpp/build/examples/validating
+    julia --project=../../../julia julia.jl
 
 It writes `family.mes` in the working directory and validates it.
 

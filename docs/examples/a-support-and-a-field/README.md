@@ -33,6 +33,7 @@ Run it
     python python.py
     matlab -nodisplay -batch "addpath('<repo>/matlab'); run('matlab.m')"
     ../../../cpp/build/examples/a-support-and-a-field
+    julia --project=../../../julia julia.jl
 
 It writes `family.mes` in the working directory and reads it back.
 

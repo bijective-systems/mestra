@@ -1962,7 +1962,7 @@ def case_two_supports_row_varying(f):
 
 
 def case_notes_and_private(f):
-    """Finding 20: no valid case carried /notes or /private."""
+    """A valid case that carries /notes and /private."""
     n_rows = 2
     mach = np.array([0.40, 0.80])
     cl = np.array([0.25, 0.55])

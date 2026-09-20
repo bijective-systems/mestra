@@ -34,6 +34,7 @@ Run it
     python python.py
     matlab -nodisplay -batch "addpath('<repo>/matlab'); run('matlab.m')"
     ../../../cpp/build/examples/reading-someone-elses-file
+    julia --project=../../../julia julia.jl
 
 It reads the committed file and writes nothing.
 

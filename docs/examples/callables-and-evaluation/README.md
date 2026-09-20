@@ -37,6 +37,7 @@ Run it
     python python.py
     matlab -nodisplay -batch "addpath('<repo>/matlab'); run('matlab.m')"
     ../../../cpp/build/examples/callables-and-evaluation
+    julia --project=../../../julia julia.jl
 
 It writes `model.mes` in the working directory, reads it back and
 evaluates it. The evaluated dataset holds data and no callables.

@@ -35,6 +35,7 @@ Run it
     python python.py
     matlab -nodisplay -batch "addpath('<repo>/matlab'); run('matlab.m')"
     ../../../cpp/build/examples/uncertainty-as-draws
+    julia --project=../../../julia julia.jl
 
 It writes `draws.mes` in the working directory and reads it back.
 
