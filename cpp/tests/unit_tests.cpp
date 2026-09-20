@@ -26,6 +26,38 @@ void sha256_vectors() {
       mestra::sha256_hex(std::string(
           "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")),
       "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+  // The block boundaries, where a padding mistake hides.
+  check::equal(
+      "sha256 of 55 a's", mestra::sha256_hex(std::string(55, 'a')),
+      "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318");
+  check::equal(
+      "sha256 of 56 a's", mestra::sha256_hex(std::string(56, 'a')),
+      "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a");
+  check::equal(
+      "sha256 of 57 a's", mestra::sha256_hex(std::string(57, 'a')),
+      "f13b2d724659eb3bf47f2dd6af1accc87b81f09f59f2b75e5c0bed6589dfe8c6");
+  check::equal(
+      "sha256 of 63 a's", mestra::sha256_hex(std::string(63, 'a')),
+      "7d3e74a05d7db15bce4ad9ec0658ea98e3f06eeecf16b4c6fff2da457ddc2f34");
+  check::equal(
+      "sha256 of 64 a's", mestra::sha256_hex(std::string(64, 'a')),
+      "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb");
+  check::equal(
+      "sha256 of 65 a's", mestra::sha256_hex(std::string(65, 'a')),
+      "635361c48bb9eab14198e76ea8ab7f1a41685d6ad62aa9146d301d4f17eb0ae0");
+  check::equal(
+      "sha256 of 119 a's", mestra::sha256_hex(std::string(119, 'a')),
+      "31eba51c313a5c08226adf18d4a359cfdfd8d2e816b13f4af952f7ea6584dcfb");
+  check::equal(
+      "sha256 of 120 a's", mestra::sha256_hex(std::string(120, 'a')),
+      "2f3d335432c70b580af0e8e1b3674a7c020d683aa5f73aaaedfdc55af904c21c");
+  check::equal(
+      "sha256 of 127 a's", mestra::sha256_hex(std::string(127, 'a')),
+      "c57e9278af78fa3cab38667bef4ce29d783787a2f731d4e12200270f0c32320a");
+  check::equal(
+      "sha256 of 128 a's", mestra::sha256_hex(std::string(128, 'a')),
+      "6836cf13bac400e9105071cd6af47084dfacad4e5e302c94bfed24e013afb73e");
+
   // A message longer than one block, to exercise the padding.
   check::equal(
       "sha256 of a million a's",
