@@ -88,6 +88,14 @@ if(MESTRA_BUILD_TESTS)
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_corpus.py
       --cli $<TARGET_FILE:mestra-cli>
       --vectors ${CMAKE_CURRENT_SOURCE_DIR}/../vectors)
+    # Files that are legal HDF5 and are not this format.  They say
+    # nothing about what a conforming file means; they say that a
+    # reader answers for a file it did not write.
+    add_test(NAME hostile COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_hostile.py
+      --cli $<TARGET_FILE:mestra-cli>
+      --dir ${CMAKE_CURRENT_SOURCE_DIR}/tests/hostile)
+    set_tests_properties(hostile PROPERTIES TIMEOUT 600)
   endif()
 endif()
 

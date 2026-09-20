@@ -55,6 +55,11 @@ Five minutes with the tool
         clean. It exits 1 when the file is rejected and 0 otherwise, so
         warnings alone still exit 0.
 
+    mestra-cli read FILE
+        read the whole file and say what came back: the row count, how
+        many keys, scalars, supports and callables, and how many array
+        values.
+
     mestra-cli info FILE
         the row count, the keys with their roles and bounds, the
         supports with their ids, and every slot. Reads attributes and
@@ -209,6 +214,52 @@ their UTF-8 bytes, which is the order section 25 tells a writer to
 visit them in.
 
 
+A file is untrusted input
+-------------------------
+
+A reader of an open format opens files it did not write, and a file is
+a program's input and not its instructions. This one is written so
+that a crafted file gets an answer rather than a crash, and every
+limit below is a stated number rather than whatever the stack happened
+to allow.
+
+What the reader refuses, and says so:
+
+  - an attribute whose dataspace declares more elements than the
+    encoding of section 18 implies. Every buffer is sized from the
+    count the file declares, never from the encoding, and a count past
+    a stated maximum is left unread and reported;
+  - a dictionary, a group tree or a dump nested deeper than 64. A
+    stack overflow cannot be caught, so the limit is enforced before
+    the descent, and a dictionary accounts its own nesting as values
+    go in, which makes a deeper one impossible to hold rather than
+    merely unsafe to walk;
+  - an element count or a byte length whose product overflows, or
+    passes a stated maximum. A dataset that declares a trillion
+    elements and stores none is refused before anything is allocated;
+  - a soft link, which is not resolved, and an external link, which is
+    never opened. Following one would let a file name another file on
+    the machine and have this reader open it. The link's own type is
+    read before anything is opened, so nothing under a link of either
+    kind is ever asked about;
+  - a member of a container group that is neither a group nor a
+    dataset.
+
+Two things follow from that. The validator reports rather than fails:
+one object it cannot read is recorded against its path and the rest of
+the file is still checked, because a validator that stops at the first
+fault tells a caller almost nothing. And a fault that no rule of
+section 14 covers is still printed, as `! path: why`, so that a file
+is never reported clean because the thing wrong with it has no
+identifier.
+
+`cpp/tests/hostile/` holds one small file for each of these, with
+`make_hostile.py` saying how each was made, and the `hostile` ctest
+case runs `validate`, `info` and `read` over all of them under a
+timeout. Building with `-DMESTRA_SANITIZE=ON` adds the address and
+undefined-behaviour sanitizers to the whole suite.
+
+
 What this build has been checked against
 ----------------------------------------
 
@@ -216,7 +267,9 @@ All 69 corpus cases: the validator outcome, every support id, every
 probe, every codec round trip, every worked evaluation, a lazy row
 read of every row-dimensioned probe, and, for the 30 cases that
 validate without an error, read-write-compare under the structural
-equality rule of section 30.
+equality rule of section 30. Then every file of the hostile corpus
+through `validate`, `info` and `read`. The whole of it also runs under
+the address and undefined-behaviour sanitizers.
 
 Byte identity with the corpus files is not required and section 30
 says it must not be tested: the HDF5 library decides the superblock,
