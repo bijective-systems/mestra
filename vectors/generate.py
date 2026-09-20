@@ -379,15 +379,16 @@ def mesh_base(f, o):
     row = scale(f, "row", n_rows, unlimited=True)
     component_1 = scale(f, "component_1", 1)
     component_2 = scale(f, "component_2", 2)
+    member_cats = g("member_cats", ["wing_a", "wing_b"])
     group_member = scale(f, "group_member", g("n_group", 2))
-    category_member = scale(f, "category_member", 2)
+    category_member = scale(f, "category_member", len(member_cats))
     category_region = scale(f, "category_region", 2)
     extra_scales = {}
     for name, length in g("extra_scales", []):
         extra_scales[name] = scale(f, name, length)
 
     categories = f.create_group("categories")
-    strings(categories, "member", ["wing_a", "wing_b"],
+    strings(categories, "member", member_cats,
             category_member, size=g("category_size", None))
     strings(categories, "region", ["inlet", "outlet"], category_region,
             raw=g("region_raw", None))
@@ -400,7 +401,8 @@ def mesh_base(f, o):
                    n_rows=n_rows)
     if not g("mach_no_role", False):
         sattr(mach, "role", "condition")
-    sattr(mach, "units", g("mach_units", "1"))
+    if g("mach_units", "1") is not None:
+        sattr(mach, "units", g("mach_units", "1"))
     bounds = g("mach_bounds", (0.1, 0.9))
     if bounds is not None:
         fattr(mach, "lower", bounds[0])
@@ -1540,7 +1542,6 @@ def case_draws_and_summaries(f):
     iattr(a, "components", 1)
     sattr(a, "source", "data")
     sattr(a, "statistic", "draw")
-    sattr(a, "of", "pressure")
     for name, values, stat in (("pressure_mean", mean, "mean"),
                                ("pressure_q90", q90, "quantile"),
                                ("pressure_std", std, "std")):
@@ -1559,7 +1560,8 @@ def case_draws_and_summaries(f):
     return expect(
         "Three joint draws of one field, with the mean, the standard "
         "deviation and the 0.9 quantile stored beside them as "
-        "statistics of the same base quantity.",
+        "statistics of it. The draw slot is the base quantity, so it "
+        "carries no `of`.",
         support_ids={"s0": MESH_SID},
         probes=[
             probe("/supports/s0/node_arrays/pressure", draws, row=1,
@@ -1820,6 +1822,104 @@ def case_support_kind_none(f):
                 probe("/keys/mach", mach, row=0)])
 
 
+def case_two_supports_row_varying(f):
+    """Section 22: a row-varying array in an unaligned file holds one
+    entry per row referencing its support, in the file's row order,
+    over the support-local `row` dimension of section 21."""
+    n_rows = 3
+    row_support = [0, 1, 0]
+    mach = np.array([0.40, 0.50, 0.60])
+    cl = np.array([0.25, 0.35, 0.45])
+    # s0 carries file rows 0 and 2, s1 carries file row 1. The values
+    # are keyed to the file row, so an implementation that mapped the
+    # leading index to the file row number reads the wrong number.
+    p0 = np.array([[[100.0 + j] for j in range(6)],
+                   [[300.0 + j] for j in range(6)]])
+    p1 = np.array([[[200.0 + j] for j in range(4)]])
+
+    sattr(f, "created", CREATED)
+    sattr(f, "format", "mestra/0")
+    sattr(f, "writer", WRITER)
+    battr(f, "aligned", False)
+
+    row = scale(f, "row", n_rows, unlimited=True)
+    component_1 = scale(f, "component_1", 1)
+    component_2 = scale(f, "component_2", 2)
+
+    keys = f.create_group("keys")
+    k = dataset(keys, "mach", mach, "<f8", [row], n_rows=n_rows)
+    sattr(k, "role", "condition")
+    sattr(k, "units", "1")
+
+    scalars = f.create_group("scalars")
+    sc = dataset(scalars, "cl", cl, "<f8", [row], n_rows=n_rows)
+    sattr(sc, "units", "1")
+    sattr(sc, "source", "data")
+
+    dataset(f, "row_support", row_support, "<i4", [row], n_rows=n_rows)
+
+    supports = f.create_group("supports")
+    sup0 = supports.create_group("s0")
+    node0, _c0 = mesh_cells(sup0, N_NODES, CELL_TYPES, CELL_OFFSETS,
+                            CELL_CONNECTIVITY)
+    row0 = scale(sup0, "row", 2, unlimited=True)
+    c = dataset(sup0, "coordinates", BASE_COORDS, "<f8",
+                [node0, component_2])
+    sattr(c, "role", "coordinates")
+    sattr(c, "varies", "none")
+    sattr(c, "units", "m")
+    iattr(c, "components", 2)
+    sattr(c, "source", "data")
+    a = dataset(sup0.create_group("node_arrays"), "pressure", p0,
+                "<f8", [row0, node0, component_1], n_rows=2)
+    sattr(a, "role", "field")
+    sattr(a, "varies", "row")
+    sattr(a, "units", "Pa")
+    iattr(a, "components", 1)
+    sattr(a, "source", "data")
+
+    sup1 = supports.create_group("s1")
+    node1, _c1 = mesh_cells(sup1, S1_NODES, S1_TYPES, S1_OFFSETS,
+                            S1_CONN)
+    row1 = scale(sup1, "row", 1, unlimited=True)
+    c = dataset(sup1, "coordinates", S1_COORDS, "<f8",
+                [node1, component_2])
+    sattr(c, "role", "coordinates")
+    sattr(c, "varies", "none")
+    sattr(c, "units", "m")
+    iattr(c, "components", 2)
+    sattr(c, "source", "data")
+    a = dataset(sup1.create_group("node_arrays"), "pressure", p1,
+                "<f8", [row1, node1, component_1], n_rows=1)
+    sattr(a, "role", "field")
+    sattr(a, "varies", "row")
+    sattr(a, "units", "Pa")
+    iattr(a, "components", 1)
+    sattr(a, "source", "data")
+
+    return expect(
+        "Three rows over two supports with a row-varying field on "
+        "each. File rows 0 and 2 are on s0 and file row 1 is on s1, "
+        "so the leading index of each field is a position within its "
+        "own support's rows and not a file row number.",
+        warnings=["W05"],
+        support_ids={"s0": MESH_SID, "s1": S1_SID},
+        probes=[
+            probe("/row_support", np.array(row_support), row=1),
+            probe("/row_support", np.array(row_support), row=2),
+            # s0 entry 1 is file row 2. An implementation that read
+            # it as file row 1 would return 200 and something.
+            probe("/supports/s0/node_arrays/pressure", p0, row=1,
+                  node=2, component=0),
+            probe("/supports/s0/node_arrays/pressure", p0, row=0,
+                  node=4, component=0),
+            # s1 has one entry, which is file row 1.
+            probe("/supports/s1/node_arrays/pressure", p1, row=0,
+                  node=3, component=0),
+            probe("/scalars/cl", cl, row=2),
+        ])
+
+
 # --------------------------------------- one file per rule identifier
 
 PRESSURE_3 = pressures(3)
@@ -1866,6 +1966,7 @@ CASES = {
     "family_with_time": case_family_with_time,
     "derived_displacement": case_derived_displacement,
     "support_kind_none": case_support_kind_none,
+    "two_supports_row_varying": case_two_supports_row_varying,
 
     # ---------------------------------------------------------- errors
     "err_e01": mk(
@@ -1902,13 +2003,6 @@ CASES = {
         "is unavoidable here because the rule needs more than one "
         "support to be reachable at all.",
         errors=["E06"], warnings=["W05"],
-        support_ids={"s0": MESH_SID, "s1": S1_SID}),
-    "err_e07": mk(
-        two_support_base, {"n_rows": 2, "aligned": True,
-                           "row_support": [0, 1]},
-        "Rows on two supports with aligned = true. E28 and E37 come "
-        "with it: section 22 makes E07 unreachable on its own.",
-        errors=["E07", "E28", "E37"], warnings=["W05"],
         support_ids={"s0": MESH_SID, "s1": S1_SID}),
     "err_e08": mk(
         mesh_base, {"support_id": WRONG_SID},
@@ -1973,8 +2067,9 @@ CASES = {
         mesh_base, {"gen_group": None, "private_gen": True},
         "The file declares a group key and names the unit of "
         "generalisation only under /private, where a reader is told "
-        "not to look.",
-        errors=["E18"], support_ids={"s0": MESH_SID}),
+        "not to look. A validator sees the missing root attribute as "
+        "E39; E18 is what a writer review adds to it.",
+        errors=["E18", "E39"], support_ids={"s0": MESH_SID}),
     "err_e19": mk(
         mesh_base, {"cl_units_vlen": True},
         "A units attribute stored as a variable-length string, which "
@@ -2075,11 +2170,24 @@ CASES = {
         "it and cannot be avoided.",
         errors=["E37"], warnings=["W05"],
         support_ids={"s0": MESH_SID, "s1": S1_SID}),
+    "err_e37_false": mk(
+        mesh_base, {"aligned": False, "row_support_values": [0, 0]},
+        "One support declared with aligned = false, the other "
+        "direction of the same rule. The /row_support column is "
+        "present, which is what a file claiming to be unaligned must "
+        "carry, so E28 is not in question.",
+        errors=["E37"], support_ids={"s0": MESH_SID}),
     "err_e38": mk(
         axis_base, {"stray_cells": True},
         "An axis support carrying a cell_types dataset and a cell "
         "dimension.",
         errors=["E38"], support_ids={"s0": E_AXIS_SID}),
+    "err_e39": mk(
+        mesh_base, {"mach_units": None},
+        "A condition key with no units, which section 19 requires "
+        "and no other rule catches: E11 covers a field and a scalar, "
+        "not a key.",
+        errors=["E39"], support_ids={"s0": MESH_SID}),
 
     # -------------------------------------------------------- warnings
     "warn_w01": mk(
@@ -2130,26 +2238,16 @@ CASES = {
         "connectivity.",
         warnings=["W06"], support_ids={"s0": MESH_SID}),
     "warn_w07": mk(
-        mesh_base, {"member_values": [0, 2]},
-        "A group key value with no entry in its category table. E10 "
-        "comes with it: the two rules describe the same fact.",
-        errors=["E10"], warnings=["W07"],
-        support_ids={"s0": MESH_SID}),
+        mesh_base, {"member_cats": ["wing_a", "wing_b", "wing_c"],
+                    "n_group": 3, "coords": MEMBER_COORDS_3},
+        "A group key whose category table has a third entry no row "
+        "uses.",
+        warnings=["W07"], support_ids={"s0": MESH_SID}),
     "warn_w08": mk(
         mesh_base, {"mach_bounds": (-1000.0, 1000.0)},
         "Declared bounds thousands of times wider than the "
         "observed range, which is what stale bounds look like.",
         warnings=["W08"], support_ids={"s0": MESH_SID}),
-    "warn_w09": mk(
-        mesh_base, {"extra_scales": [("category_regime", 2)],
-                    "extra_categories": [("regime", ["low", "high"])],
-                    "extra_keys": [
-                        ("regime", "categorical", [0.0, 1.0], "<f8",
-                         [("category", "regime")])]},
-        "A categorical key stored as float64. E20 comes with it: the "
-        "dtype table of section 19 already forbids this.",
-        errors=["E20"], warnings=["W09"],
-        support_ids={"s0": MESH_SID}),
     "warn_w10": mk(
         mesh_base, {"mach_units": "kg/(m s"},
         "A units string with an unbalanced parenthesis, which no "

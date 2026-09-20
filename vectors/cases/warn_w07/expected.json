@@ -1,1 +1,1 @@
-{"codec":{},"description":"A group key value with no entry in its category table. E10 comes with it: the two rules describe the same fact.","evaluation":[],"probes":[],"support_ids":{"s0":"96df395d80ef548444562292de441525ba0b5c8ad00a8dadff19a19c943936c7"},"validator":{"errors":["E10"],"warnings":["W07"]}}
+{"codec":{},"description":"A group key whose category table has a third entry no row uses.","evaluation":[],"probes":[],"support_ids":{"s0":"96df395d80ef548444562292de441525ba0b5c8ad00a8dadff19a19c943936c7"},"validator":{"errors":[],"warnings":["W07"]}}

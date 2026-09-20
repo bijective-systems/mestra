@@ -22,7 +22,7 @@ somebody's code.
 What is in it
 -------------
 
-68 cases, one directory each, holding exactly the two files section
+69 cases, one directory each, holding exactly the two files section
 30 requires:
 
     cases/<case>/case.mes        the golden file
@@ -40,13 +40,19 @@ sorted by name. The cases fall into five groups:
     toy size: `family_static`, `cascade_varying_geometry`,
     `scalars_only`, `transient_fixed_mesh`, `axis_signature`;
   - the rest of the model: rows together with callable slots, one
-    callable filling two slots, two supports, draws with their
-    summaries, labels with and without a category table, a family with
-    time, a derived array, and a support of kind none;
+    callable filling two slots, two supports, a row-varying field in
+    an unaligned file, draws with their summaries, labels with and
+    without a category table, a family with time, a derived array,
+    and a support of kind none;
   - one file per error identifier of section 14, named `err_<id>`,
     each violating that rule and, where the rule cannot be reached
-    alone, saying so in its description;
+    alone, saying so in its description. E37 has two, `err_e37` and
+    `err_e37_false`, one for each direction of the rule;
   - one file per warning identifier, named `warn_<id>`, the same way.
+
+E07 and W09 were retired on 2026-09-20 and have no case. Their
+identifiers are not reused, per section 14: within a major version a
+retired rule's identifier is never given to anything else.
 
 Every file is a few tens of kilobytes. That is almost all HDF5 object
 headers and dimension scales; the data in each file is a few hundred
@@ -105,7 +111,10 @@ A probe names one value by axis and never by axis position, so that it
 means the same thing to a row-major and a column-major reader:
 
   slot        the HDF5 path of the dataset
-  row         the row index, when the slot has a row dimension
+  row         the row index, when the slot has a row dimension. For a
+              row-varying array in an unaligned file it is the index
+              within that support's own rows, which section 22 says
+              is not the file's row number
   instance    the index along a `group:<k>` leading dimension
   draw        the draw index, when the slot has a draw dimension
   node        the node index, or the cell index for a cell array
@@ -118,7 +127,11 @@ means the same thing to a row-major and a column-major reader:
 Several probes are chosen so that a transposed read is caught: the
 row, the node and the component are all different and the values
 differ along every axis, so a reader that took the axes by position
-returns a number that is in the file but in the wrong place.
+returns a number that is in the file but in the wrong place. The
+probes of `two_supports_row_varying` do the same for the row mapping:
+its two supports hold file rows 0 and 2, and row 1, and the values
+are keyed to the file row, so a reader that took the leading index
+for a file row number returns the wrong one.
 
 An evaluation entry states what a callable must produce:
 
@@ -132,49 +145,42 @@ An evaluation entry states what a callable must produce:
               table happens to be the design the file also carries
 
 
-Three places the specification leaves a choice
-----------------------------------------------
+Where the corpus drove a change to the specification
+----------------------------------------------------
 
-The corpus had to decide these to exist at all. Each is a proposed
-correction to the specification, not a private convention, and the
-phase report carries the proposed wording.
+Building one file per rule found fourteen places where the text was
+silent, self-contradictory, or describing something no file could do.
+All fourteen were settled in the specification on 2026-09-20 and are
+listed in its section 16; the corpus follows the settled text and
+carries no private convention of its own. The three that shaped this
+directory most:
 
-  - section 30 names five fields for expected.json and says "exactly
-    these fields". This corpus writes a sixth, `evaluation`, present
-    on every case and empty where there is nothing to evaluate,
-    because the affine callable of section 27 has to be conformance
-    tested and there is nowhere else to state its result.
-  - the probe fields of section 30 name a row, a node and a component.
-    They do not name the leading dimension of a `group:<k>` array or
-    the flat connectivity axis, both of which the corpus has to probe.
-    `instance` and `index` above are the two added names.
-  - W08 fires when the observed range of a key differs from its
-    declared bounds "by more than a stated tolerance", and no
-    tolerance is stated anywhere. The corpus avoids depending on the
-    choice: `warn_w08` declares bounds two thousand units wide around
-    data that spans four tenths of one, so any tolerance fires, and
-    every other case keeps the declared range within twice the
-    observed one, which docs/example.md already treats as clean.
+  - expected.json has a sixth field, `evaluation`, without which the
+    affine callable of section 27 could not be conformance tested;
+  - the probe schema gained `instance` for the leading dimension of a
+    group-varying array and `index` for the flat connectivity axis,
+    neither of which had a name;
+  - W08 gained a number, four times the observed width, in place of a
+    tolerance that was stated nowhere. `warn_w08` declares a range
+    five thousand times the observed one so that it fires under any
+    reading, and no other case comes near the threshold.
 
 
 Rules a file cannot break on its own
 ------------------------------------
 
-Six identifiers cannot be reached by a file that breaks nothing else.
-Their cases say so in their own description, and the extra identifier
-is in the expected list because an implementation will and should
-report it:
+Four identifiers cannot be reached by a file that breaks nothing
+else. Their cases say so in their own description, and the extra
+identifier is in the expected list because an implementation will and
+should report it:
 
-  E06, E07, E37, W15   need more than one support, so W05 comes with
-                       them; E07 additionally implies E28 and E37,
-                       because section 22 makes `aligned` decidable
-                       from the file
-  W07                  is the same fact as E10 for a group key
-  W09                  is already an error by the dtype table of
-                       section 19, so E20 comes with it
+  E06, E37, W15   need more than one support, so W05 comes with them.
+                  `err_e37_false` is the exception: one support with
+                  `aligned = false` breaks E37 on its own
+  E18             is a rule for a writer. A validator sees only the
+                  missing public attribute, which is E39, so
+                  `err_e18` expects both
 
-E18 is not mechanically decidable at all: it asks a reader to notice
-that public information is only under `/private`, and section 29 tells
-the same reader not to interpret `/private`. The case `err_e18` is the
-clearest instance that could be built, a file that declares a group
-key and names its unit of generalisation only under `/private`.
+`err_e18` is the clearest instance that could be built: a file that
+declares a group key and names its unit of generalisation only under
+`/private`, where section 29 forbids a reader to look.
