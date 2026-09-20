@@ -1483,9 +1483,14 @@ end
 function check_every_dataset!(v::Validator)
     walk_objects(v.f; skip = unchecked_group) do path, obj
         obj isa HDF5.Dataset || return
-        is_scale(obj) && return
+        if is_scale(obj)
+            guard!(v, path) do
+                check_scale!(v, path, obj)
+            end
+            return
+        end
         guard!(v, path) do
-        cdims, _ = disk_shape(obj)
+        cdims, cmax = disk_shape(obj)
         layout, chunk, filters = dataset_layout(obj)
         for (fid, cd) in filters
             if fid == 1
@@ -1499,6 +1504,18 @@ function check_every_dataset!(v::Validator)
         end
         axes = axis_scales(obj, v.idx)
         names = Union{String,Nothing}[t[2] for t in axes]
+        # E43: only `row` may be unlimited, and an axis attached to
+        # any other scale carries a maximum equal to its length.
+        for (axis, m) in pairs(cmax)
+            m == -1 || continue
+            n = axis <= length(names) ? names[axis] : nothing
+            n === nothing && continue          # E25 has the axis
+            n == "row" && continue
+            dict_zero_axis(path, cdims, axis) && continue
+            report!(v, "E43", path,
+                    "axis $(axis - 1) is unlimited on the dimension " *
+                    "`$(n)`, and section 19 leaves only `row` unlimited")
+        end
         for (axis, n) in pairs(names)
             k = axes[axis][1]
             if k < 0
@@ -1564,6 +1581,49 @@ function check_every_dataset!(v::Validator)
         ti.vlen && report!(v, "E19", path,
             "a variable-length type is never legal")
         end
+    end
+    return v
+end
+
+"""Section 25's one exception to E43: a zero-length axis of a dataset
+inside a callable's dictionary, which HDF5 has no other legal way to
+write.  Five corpus cases carry one."""
+dict_zero_axis(path::AbstractString, cdims::Vector{Int}, axis::Int) =
+    startswith(String(path), "/callables/") &&
+    axis <= length(cdims) && cdims[axis] == 0
+
+"""E42 and E43 on a dimension scale, which is the one object in this
+format whose creation property list is not the library's default
+(sections 21 and 23).
+
+E42 is exactly what section 14 words it as: attribute creation order
+not tracked and indexed.  That is what gives the scale a version 2
+object header and so lets its REFERENCE_LIST grow in the file's heap;
+without it the scale takes 4085 attachments and the 4086th destroys
+the REFERENCE_LIST it was extending, leaving a file nothing else in
+this section would reject.  Object time tracking is section 21's rule
+for a writer and byte reproducibility, and no identifier is about it,
+so nothing is reported for it here.
+
+E43 is the scale's own maximum extent.  `row` is unlimited, file-level
+or support-local, and every other scale is fixed; the exception is the
+zero-length dictionary axis of section 25."""
+function check_scale!(v::Validator, path::AbstractString, d::HDF5.Dataset)
+    # Neither rule is one a strict read refuses a file with, so a
+    # structural pass does not open a property list to decide them.
+    v.structural && return v
+    name = String(last(split(String(path), '/'; keepempty = false)))
+    scale_order_tracked(d) || report!(v, "E42", path,
+        "this dimension scale was not created with attribute creation " *
+        "order tracked and indexed, so its REFERENCE_LIST lives in an " *
+        "object header message and it takes at most 4085 attachments " *
+        "(section 21)")
+    cdims, cmax = disk_shape(d)
+    if !isempty(cmax) && cmax[1] == -1 && name != "row" &&
+       !dict_zero_axis(path, cdims, 1)
+        report!(v, "E43", path,
+                "the scale `$(name)` is unlimited, and section 21 leaves " *
+                "only `row` unlimited")
     end
     return v
 end

@@ -804,7 +804,18 @@ scale_order_tracked(d::HDF5.Dataset) =
     (f = scale_attr_order(d); f !== nothing && (f & SCALE_ATTR_ORDER) ==
                                                SCALE_ATTR_ORDER)
 
-"""Create a dimension scale exactly as netCDF-C writes one (21)."""
+"""Create a dimension scale exactly as netCDF-C writes one (21).
+
+The creation property list is the point of it: attribute creation
+order tracked and indexed, so that the scale gets a version 2 object
+header and its REFERENCE_LIST can grow in the file's heap past the
+64 KiB an object header message may hold, and object time tracking
+off, because a version 2 object header records four timestamps unless
+it is told not to and a file that records when it was written is not
+byte reproducible.  Without the first, a scale takes at most 4085
+attachments and the 4086th destroys the REFERENCE_LIST it was
+extending (E42).  This is the only property list in this format that
+is not the library's default."""
 function create_scale(parent, name::AbstractString, length_::Integer;
                       unlimited::Bool = false)
     len = Int(length_)
@@ -812,7 +823,8 @@ function create_scale(parent, name::AbstractString, length_::Integer;
     cmax = [unlimited ? -1 : len]
     chunk = unlimited ? [1] : [max(1, len)]
     d = create_raw_dataset(parent, name, le(HDF5.API.H5T_IEEE_F32BE),
-                           cdims, cmax, UInt8[]; chunk = chunk)
+                           cdims, cmax, UInt8[]; chunk = chunk,
+                           attr_order = true)
     HDF5.API.h5ds_set_scale(d, dim_scale_name(len))
     return d
 end

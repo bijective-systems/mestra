@@ -801,6 +801,14 @@ function header_versions(path::AbstractString)
     return out
 end
 
+"""The paths of every dimension scale in a file, by this package's own
+walk and never by asking the library for a scale's path."""
+function scale_paths(path::AbstractString)
+    HDF5.h5open(String(path), "r") do f
+        sort([p for (_, p, _, _) in Mestra.collect_scales(f)])
+    end
+end
+
 @testset "the writer writes the corpus's object header layout (finding 8)" begin
     # libhdf5 2.0 changed the default low libver bound from
     # `earliest` to `v18`, so a writer that takes the default writes
@@ -808,9 +816,17 @@ end
     # file was written, which costs byte reproducibility, and every
     # reader pays for the layout as well.  `Mestra.WRITER_LIBVER` is
     # the one call that decides it.
+    #
+    # Section 21 makes one exception, and it is the whole of decision
+    # 52: a dimension scale is created with attribute creation order
+    # tracked and indexed, which gives that one object a version 2
+    # header so that its REFERENCE_LIST can live in the file's heap.
+    # So every scale is version 2, every other object is version 1,
+    # and the corpus says the same thing object for object.
     for name in ("mesh_two_rows", "affine_with_rows", "scalars_only",
                  "two_supports_unaligned", "labels_tables",
-                 "cascade_varying_geometry")
+                 "cascade_varying_geometry", "compressed_field",
+                 "notes_and_private")
         src = case_file(name)
         dst = joinpath(SCRATCH, "hdr_" * name * ".mes")
         Mestra.write(Mestra.read(src; lazy = false), dst)
@@ -819,7 +835,15 @@ end
         got = header_versions(dst)
         @test sort(collect(keys(got))) == sort(collect(keys(want)))
         @test got == want
-        @test all(==(1), values(got))
+        # /private is copied and never interpreted, so a scale a
+        # producer keeps in there is not one section 21 rules on
+        scales = Set(p for p in scale_paths(dst)
+                     if !startswith(p, "/private"))
+        @test !isempty(scales)
+        @test all(p -> got[p] == 2, scales)
+        @test all(p -> got[p] == 1,
+                  [p for p in keys(got)
+                   if !(p in scales) && !startswith(p, "/private")])
     end
     # and two writes a second apart are the same bytes, which is what
     # `julia/README.md` claims and what section 30 asks of a generator
@@ -830,6 +854,70 @@ end
     sleep(1.1)
     Mestra.write(ds, b)
     @test read(a) == read(b)
+end
+
+@testset "every scale is created as section 21 requires (E42)" begin
+    # Decision 52, and the only decision in three rounds that changes
+    # the bytes of every golden file.  A scale created with the
+    # library's defaults takes at most 4085 attachments, and the
+    # 4086th fails after deleting the REFERENCE_LIST it was extending,
+    # leaving a file every reader and every validator accepts.  So the
+    # property is asserted on the written file and not inferred from
+    # the fact that a write succeeded.
+    for name in ("mesh_two_rows", "two_supports_unaligned",
+                 "affine_zero_rows", "support_kind_none")
+        dst = joinpath(SCRATCH, "e42_" * name * ".mes")
+        Mestra.write(Mestra.read(case_file(name); lazy = false), dst)
+        HDF5.h5open(dst, "r") do f
+            n = 0
+            for (_, p, d, _) in Mestra.collect_scales(f)
+                startswith(p, "/private") && continue
+                n += 1
+                @test Mestra.scale_attr_order(d) ==
+                      Mestra.SCALE_ATTR_ORDER
+                @test Mestra.scale_order_tracked(d)
+                dcpl = HDF5.get_create_properties(d)
+                @test HDF5.API.h5p_get_obj_track_times(dcpl) == false
+            end
+            @test n > 0
+        end
+        @test Mestra.validate(dst).errors == String[]
+    end
+    # and the corpus case that breaks it on purpose, plus the one that
+    # would not exist without the rule
+    @test Mestra.validate(case_file("err_e42")).errors == ["E42"]
+    @test Mestra.validate(case_file("wide_keys")).errors == String[]
+    # a scale a producer keeps under /private is not section 21's
+    # business: the byte-level rules are checked on the public objects
+    @test Mestra.validate(case_file("notes_and_private")).errors ==
+          String[]
+end
+
+@testset "only `row` is unlimited (E43)" begin
+    @test Mestra.validate(case_file("err_e43")).errors == ["E43"]
+    # the five cases that must survive the rule: section 25 requires a
+    # zero-length dictionary axis to be unlimited, and there is no
+    # other legal way to write one
+    for name in ("affine_zero_rows", "affine_with_rows",
+                 "callable_two_slots")
+        @test !("E43" in Mestra.validate(case_file(name)).errors)
+    end
+    HDF5.h5open(case_file("affine_zero_rows"), "r") do f
+        unlimited = String[]
+        for (n, p, d, _) in Mestra.collect_scales(f)
+            _, cmax = Mestra.disk_shape(d)
+            isempty(cmax) || cmax[1] != -1 || push!(unlimited, p)
+        end
+        @test "/row" in unlimited
+        @test any(p -> occursin("/callables/", p), unlimited)
+        @test all(p -> p == "/row" || occursin("/callables/", p), unlimited)
+    end
+    # a writer never makes one on its own: what it writes carries no
+    # unlimited dimension but `row`
+    dst = joinpath(SCRATCH, "e43_draws.mes")
+    Mestra.write(Mestra.read(case_file("draws_and_summaries");
+                             lazy = false), dst)
+    @test Mestra.validate(dst).errors == String[]
 end
 
 @testset "an evaluated file carries no /callables (conventions 7)" begin
