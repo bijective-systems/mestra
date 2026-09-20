@@ -343,9 +343,67 @@ classdef PackageTest < matlab.unittest.TestCase
                                  {'component', 'node', 'row'});
             testCase.verifyEqual(d.support('s0').supportId(1:8), '96df395d');
         end
+
+        function anUnknownDatasetInAKnownGroupIsChecked(testCase)
+        %anUnknownDatasetInAKnownGroupIsChecked  Section 14 says the
+        %   byte-level rules "are checked on the public objects only.
+        %   /private is not checked, and neither is any group this
+        %   version of the format does not know".  A dataset this
+        %   version does not know, inside a group it does, is neither
+        %   exception, so it is a public object and the rules are
+        %   checked on it.  The rules that need nothing this version
+        %   does not know are section 23's: a dataset with a row
+        %   dimension must be chunked (E27).
+        %
+        %   Finding 12 of the Phase 3 report: two implementations
+        %   reported E27 on such a file and two reported nothing.
+        %   Both names below are the same rule, and the one this
+        %   version happens to know as a support's own dimension scale
+        %   draws no W11 while the other does.
+            for probe = {{'row', false}, {'extra', true}}
+                name = probe{1}{1};
+                unknownName = probe{1}{2};
+                path = [tempname() '.mes'];
+                cleanup = onCleanup( ...
+                    @() PackageTest.removeIfPresent(path)); %#ok<NASGU>
+                PackageTest.putContiguousRowDataset( ...
+                    fullfile(corpusRoot(), 'mesh_two_rows', 'case.mes'), ...
+                    path, name);
+                r = mestra.validate(path);
+                testCase.verifyTrue(ismember('E27', r.errors), sprintf( ...
+                    ['a contiguous row-dimensioned dataset named %s ' ...
+                     'in a support group: [%s]'], name, ...
+                    strjoin(r.errors, ' ')));
+                found = r.findings(strcmp({r.findings.id}, 'E27'));
+                testCase.verifyEqual(found(1).path, ...
+                                     ['/supports/s0/' name]);
+                testCase.verifyEqual(ismember('W11', r.warnings), ...
+                                     unknownName, strjoin(r.warnings, ' '));
+            end
+        end
     end
 
     methods (Static)
+
+        function putContiguousRowDataset(src, dst, name)
+        %putContiguousRowDataset  A copy of SRC with one contiguous
+        %   dataset of NAME in /supports/s0, attached to the file's
+        %   `row` scale.  Built here rather than committed: it is one
+        %   dataset added to a corpus file.
+            copyfile(src, dst);
+            fileattrib(dst, '+w');
+            fid = H5F.open(dst, 'H5F_ACC_RDWR', 'H5P_DEFAULT');
+            closer = onCleanup(@() H5F.close(fid)); %#ok<NASGU>
+            gid = H5G.open(fid, '/supports/s0');
+            did = mestra.internal.H5.createDataset(gid, name, 'float64', ...
+                                                   2, 2, []);
+            mestra.internal.H5.writeData(did, 'float64', [1 2]);
+            scale = H5D.open(fid, 'row');
+            H5DS.attach_scale(did, scale, 0);
+            H5D.close(scale);
+            H5D.close(did);
+            H5G.close(gid);
+        end
 
         function removeIfPresent(path)
             if exist(path, 'file') == 2

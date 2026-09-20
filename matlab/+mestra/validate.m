@@ -127,23 +127,6 @@ end
 
 % ===================================================== the vocabulary
 
-function m = attrKinds()
-%attrKinds  The encoding section 18 requires of each named attribute.
-    m = containers.Map( ...
-        {'format', 'writer', 'created', 'generalisation_group', 'role', ...
-         'units', 'category', 'trajectory_group', 'parent', 'kind', ...
-         'support_id', 'varies', 'source', 'output', 'statistic', 'of', ...
-         'derived_from', 'recipe', 'reference', 'type', 'repr', ...
-         'aligned', 'recomputed', 'n_nodes', 'n_cells', 'components', ...
-         'lower', 'upper', 'quantile'}, ...
-        {'string', 'string', 'string', 'string', 'string', ...
-         'string', 'string', 'string', 'string', 'string', ...
-         'string', 'string', 'string', 'string', 'string', 'string', ...
-         'string', 'string', 'string', 'string', 'string', ...
-         'int8', 'int8', 'int64', 'int64', 'int64', ...
-         'float64', 'float64', 'float64'});
-end
-
 function names = keyRoles()
     names = {'design', 'condition', 'time', 'categorical', 'group', ...
              'split', 'id', 'status'};
@@ -954,12 +937,46 @@ function checkOneSupport(ctx, parent, name, index)
 
     known = [cellNames {'coordinates', 'node_arrays', 'cell_arrays', ...
                         'node', 'cell', 'cell_plus_one', 'index', 'row'}];
+    checked = [cellNames {'coordinates', 'node_arrays', 'cell_arrays'}];
     for nm = H5.children(sid)
         if ~ismember(nm{1}, known)
             rep.add('W11', [path '/' nm{1}], ...
                 'this reader does not know this object; it is ignored');
         end
+        if ~ismember(nm{1}, checked)
+            checkUnknownDataset(ctx, sid, nm{1}, [path '/' nm{1}]);
+        end
     end
+end
+
+function checkUnknownDataset(ctx, gid, name, path)
+%checkUnknownDataset  The byte-level rules on a dataset this version
+%   does not describe, inside a group it does.
+%
+%   Section 14 says of the rules of sections 18 to 25: "They are
+%   checked on the public objects only. /private is not checked, and
+%   neither is any group this version of the format does not know".
+%   A dataset this version does not know, inside a group it does, is
+%   neither of the two exceptions, so it is a public object and the
+%   rules are checked on it.  That is the reading taken here; the
+%   other reading, that only the objects this version names are
+%   checked, would leave a file free to put an unchunked
+%   row-dimensioned dataset anywhere it liked and still pass.
+%
+%   Only the rules that need nothing this version does not know are
+%   decidable: section 23's, which are about the row dimension the
+%   dataset is attached to and not about what the dataset means.  A
+%   dimension scale is not subject to them (section 23), and a
+%   dataset this version does know is checked as the slot it is.
+    H5 = mestra.internal.H5;
+    if ~mestra.internal.Reader.hasKind(gid, name, 'dataset'), return, end
+    did = H5D.open(gid, name);
+    closer = onCleanup(@() H5D.close(did)); %#ok<NASGU>
+    info = H5.dsetInfo(did);
+    if info.isScale || isempty(info.dims), return, end
+    leading = H5.scaleNames(did, 0, ctx.scales);
+    if isempty(leading) || ~strcmp(leading(1).name, 'row'), return, end
+    checkChunking(ctx, did, info, path, info.dims(1));
 end
 
 function [values, info] = plainValues(ctx, sid, name, path, wanted)
@@ -1314,67 +1331,12 @@ end
 
 function checkAttrEncodings(ctx, oid, path)
 %checkAttrEncodings  E19, E26 and the variable-length string ban.
-    H5 = mestra.internal.H5;
-    kinds = attrKinds();
-    for name = H5.publicAttrNames(oid)
-        try
-            info = H5.attrInfo(oid, name{1});
-        catch err
-            ctx.rep.add('E41', path, ...
-                'the attribute %s would not be described: %s', name{1}, ...
-                regexprep(strtrim(err.message), '\s+', ' '));
-            continue
-        end
-        if strcmp(info.type, 'vlstring')
-            ctx.rep.add('E19', path, ...
-                'the attribute %s is a variable-length string', name{1});
-            continue
-        end
-        if ~info.scalar
-            % Section 18 gives every attribute this format names a
-            % scalar dataspace, so an array there is the wrong
-            % encoding whatever its type.
-            if kinds.isKey(name{1})
-                ctx.rep.add('E19', path, ...
-                    ['the attribute %s is an array where a scalar ' ...
-                     'is required'], name{1});
-            else
-                ctx.rep.add('W11', path, ...
-                    'the attribute %s is not a scalar and is ignored', ...
-                    name{1});
-            end
-            continue
-        end
-        if kinds.isKey(name{1})
-            want = kinds(name{1});
-            if ~strcmp(info.type, want)
-                ctx.rep.add('E19', path, ...
-                    'the attribute %s is %s where %s is required', ...
-                    name{1}, info.type, want);
-                continue
-            end
-            if strcmp(want, 'int8')
-                v = H5.readAttr(oid, name{1});
-                if ~any(double(v) == [0 1])
-                    ctx.rep.add('E19', path, ...
-                        'the boolean %s has the value %g', name{1}, double(v));
-                end
-            end
-        end
-        if strcmp(info.type, 'string')
-            try
-                bytes = H5.readRawStrAttr(oid, name{1});
-                [ok, why] = mestra.internal.Text.checkStringBytes(bytes);
-                if ~ok
-                    ctx.rep.add('E26', path, 'the attribute %s has %s', ...
-                                name{1}, why);
-                end
-            catch err
-                ctx.rep.add('E41', path, ...
-                    'the attribute %s could not be read as bytes: %s', ...
-                    name{1}, regexprep(strtrim(err.message), '\s+', ' '));
-            end
-        end
+%   The rules themselves are in mestra.internal.Attrs, because the
+%   reader applies the same ones to refuse a file rather than open it
+%   half understood (docs/api-conventions.md, section 2).
+    found = mestra.internal.Attrs.findings(oid);
+    for i = 1:numel(found)
+        ctx.rep.add(found(i).id, path, '%s', found(i).message);
     end
 end
 

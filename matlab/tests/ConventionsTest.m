@@ -350,13 +350,42 @@ classdef ConventionsTest < matlab.unittest.TestCase
             testCase.verifyEmpty(r.warnings, strjoin(r.warnings, ','));
         end
 
+        function anEvaluatedFileValidatesClean(testCase)
+        %anEvaluatedFileValidatesClean  Section 2: a file this package
+        %   writes validates clean, and an evaluated file is one of
+        %   them.  Finding 10 of the Phase 3 report is a chunk carried
+        %   over from a file of no rows onto a file of two, which
+        %   every validator then warns about (W12).  Section 23
+        %   measures the default against the row dimension the leading
+        %   axis is attached to, and after evaluation that is the
+        %   table's row count and not the source file's.
+            for name = {'affine_zero_rows', 'callable_two_slots'}
+                file = fullfile(corpusRoot(), name{1}, 'case.mes');
+                e = CorpusTest.expected(name{1});
+                entry = e.evaluation;
+                if iscell(entry), entry = entry{1}; else, entry = entry(1); end
+                d = mestra.read(file);
+                out = [tempname() '.mes'];
+                cleanup = onCleanup(@() ...
+                    ConventionsTest.removeIfPresent(out)); %#ok<NASGU>
+                mestra.write(mestra.evaluate(d, ...
+                    CorpusTest.keysTable(entry.keys)), out);
+                r = mestra.validate(out);
+                testCase.verifyEmpty(r.errors, ...
+                    sprintf('%s: %s', name{1}, strjoin(r.errors, ',')));
+                testCase.verifyEmpty(r.warnings, ...
+                    sprintf('%s: %s', name{1}, strjoin(r.warnings, ',')));
+            end
+        end
+
         function aStrictReadRefusesAStructuralFault(testCase)
         %aStrictReadRefusesAStructuralFault  Section 2: a read is
         %   strict by default and refuses a file that breaks a
         %   structural rule, because half of such a file is worse
         %   than none of it.
             for probe = {{'err_e01', 'E01'}, {'err_e16', 'E16'}, ...
-                         {'err_e25', 'E25'}, {'err_e29', 'E29'}, ...
+                         {'err_e19', 'E19'}, {'err_e25', 'E25'}, ...
+                         {'err_e26', 'E26'}, {'err_e29', 'E29'}, ...
                          {'err_e30', 'E30'}}
                 name = probe{1}{1};
                 rule = probe{1}{2};
@@ -368,14 +397,48 @@ classdef ConventionsTest < matlab.unittest.TestCase
                 end
                 testCase.verifyNotEmpty(err, ...
                     sprintf('%s was read without a word', name));
-                testCase.verifyTrue(startsWith(err.identifier, 'mestra:E'), ...
-                                    err.identifier);
+                testCase.verifyEqual(err.identifier, ['mestra:' rule], ...
+                                     err.identifier);
                 if ~strcmp(rule, 'E01')
                     d = mestra.read(file, 'Strict', false);
                     testCase.verifyTrue( ...
                         any(startsWith(d.skipped, [rule ' '])), ...
                         sprintf('%s: %s', name, strjoin(d.skipped, '; ')));
                 end
+            end
+        end
+
+        function theMetadataOpenNamesWhatTheReadNames(testCase)
+        %theMetadataOpenNamesWhatTheReadNames  Section 30: opening a
+        %   file for its metadata alone must refuse with the same ids
+        %   as an operation that reads a slot, rather than return
+        %   something.  Finding 13 of the Phase 3 report is the two
+        %   entry points naming different rules; the nine structural
+        %   rules of section 2 of docs/api-conventions.md are decided
+        %   from attributes and dataspaces, so the open reaches the
+        %   same verdict without reading an array.
+            files = {};
+            for name = CorpusTest.allCases()
+                files{end + 1} = CorpusTest.caseFile(name{1}); %#ok<AGROW>
+            end
+            for name = HostileSubsetTest.allCases()
+                files{end + 1} = HostileSubsetTest.caseFile(name{1}); %#ok<AGROW>
+            end
+            for name = HostileTest.allCases()
+                files{end + 1} = HostileTest.caseFile(name{1}); %#ok<AGROW>
+            end
+            for i = 1:numel(files)
+                file = files{i};
+                opened = ConventionsTest.identifierOf(@() mestra.open(file));
+                read = ConventionsTest.identifierOf(@() mestra.read(file));
+                if isempty(opened) && strcmp(read, 'mestra:E41')
+                    % Section 29 puts the element cap on an eager read
+                    % alone, so an open that returns here is right.
+                    continue
+                end
+                testCase.verifyEqual(opened, read, sprintf( ...
+                    '%s: the open says "%s" and the read says "%s"', ...
+                    file, opened, read));
             end
         end
 
@@ -575,6 +638,16 @@ classdef ConventionsTest < matlab.unittest.TestCase
     end
 
     methods (Static)
+        function id = identifierOf(thunk)
+        %identifierOf  The identifier a call refused with, or ''.
+            id = '';
+            try
+                thunk();
+            catch err
+                id = err.identifier;
+            end
+        end
+
 
         function d = twoRows()
         %twoRows  A two-row, two-member, six-node dataset, built the

@@ -48,6 +48,7 @@ function out = evaluate(dataset, keysTable)
 
     out = copyDataset(dataset);
     out.path = '';
+    rerowed = nRows ~= dataset.nRows;
     out.nRows = nRows;
     for i = 1:numel(out.keys)
         name = out.keys(i).name;
@@ -57,6 +58,7 @@ function out = evaluate(dataset, keysTable)
         else
             out.keys(i).values = reshape(column, 1, []);
         end
+        if rerowed, out.keys(i).chunk = []; end
     end
     if ~isempty(out.rowSupport) && numel(out.rowSupport) ~= nRows
         out.rowSupport = [];
@@ -66,7 +68,7 @@ function out = evaluate(dataset, keysTable)
     for i = 1:numel(out.scalars)
         out.scalars(i) = fill(out, results, out.scalars(i), ...
                               ['/scalars/' out.scalars(i).name], ...
-                              keysTable, nRows, {'row'});
+                              keysTable, nRows, {'row'}, rerowed);
     end
     for i = 1:numel(out.supports)
         s = out.supports(i);
@@ -74,17 +76,17 @@ function out = evaluate(dataset, keysTable)
         if ~isempty(s.coordinates)
             s.coordinates = fill(out, results, s.coordinates, ...
                 [base '/coordinates'], keysTable, nRows, ...
-                {'row', 'node', 'component'});
+                {'row', 'node', 'component'}, rerowed);
         end
         for j = 1:numel(s.nodeArrays)
             s.nodeArrays(j) = fill(out, results, s.nodeArrays(j), ...
                 [base '/node_arrays/' s.nodeArrays(j).name], keysTable, ...
-                nRows, {'row', 'node', 'component'});
+                nRows, {'row', 'node', 'component'}, rerowed);
         end
         for j = 1:numel(s.cellArrays)
             s.cellArrays(j) = fill(out, results, s.cellArrays(j), ...
                 [base '/cell_arrays/' s.cellArrays(j).name], keysTable, ...
-                nRows, {'row', 'cell', 'component'});
+                nRows, {'row', 'cell', 'component'}, rerowed);
         end
         out.supports(i) = s;
     end
@@ -93,8 +95,21 @@ end
 
 % ---------------------------------------------------------------------
 
-function slot = fill(d, results, slot, path, keysTable, nRows, fileDims)
+function slot = fill(d, results, slot, path, keysTable, nRows, fileDims, ...
+                     rerowed)
 %fill  One slot: call its callable, or check the data it already has.
+%   With REROWED true the file being made has a different row count
+%   from the one it was read from, so a chunk shape carried over from
+%   that file is measured against a row count that is no longer the
+%   one it has.  Section 23 measures the default against the length of
+%   the row dimension the leading axis is attached to, so the chunk is
+%   dropped and the writer computes the default for the new count; a
+%   chunk that is not the default is W12 and no file this package
+%   writes should draw one.
+    if rerowed && isfield(slot, 'chunk') && ...
+            ~isempty(slot.dims) && strcmp(slot.dims{end}, 'row')
+        slot.chunk = [];
+    end
     if strcmp(slot.source, 'data')
         if strcmp(slot.varies, 'row') && ~isempty(slot.values)
             n = size(slot.values, numel(slot.dims));

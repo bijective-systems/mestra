@@ -1,0 +1,135 @@
+classdef Attrs
+%Attrs  The encodings section 18 requires of an attribute, in one place.
+%
+%   Two callers need the same answer.  The validator reports E19 and
+%   E26 against a path; the reader refuses a file that breaks one of
+%   them, because both are structural rules and section 2 of
+%   docs/api-conventions.md has a strict read refuse a file that breaks
+%   a structural rule.  They ask this class rather than each carrying
+%   its own reading of section 18, so that the two cannot drift apart.
+%
+%   Everything here is decided from attributes alone, which is what
+%   lets mestra.open apply the same rules as mestra.read without
+%   reading an array (section 29).
+%
+%   See also mestra.validate, mestra.internal.Reader.
+
+    methods (Static)
+
+        function m = kinds()
+        %kinds  The encoding section 18 requires of each named attribute.
+            m = containers.Map( ...
+                {'format', 'writer', 'created', 'generalisation_group', ...
+                 'role', 'units', 'category', 'trajectory_group', ...
+                 'parent', 'kind', 'support_id', 'varies', 'source', ...
+                 'output', 'statistic', 'of', 'derived_from', 'recipe', ...
+                 'reference', 'type', 'repr', 'aligned', 'recomputed', ...
+                 'n_nodes', 'n_cells', 'components', 'lower', 'upper', ...
+                 'quantile'}, ...
+                {'string', 'string', 'string', 'string', ...
+                 'string', 'string', 'string', 'string', ...
+                 'string', 'string', 'string', 'string', 'string', ...
+                 'string', 'string', 'string', 'string', 'string', ...
+                 'string', 'string', 'string', 'int8', 'int8', ...
+                 'int64', 'int64', 'int64', 'float64', 'float64', ...
+                 'float64'});
+        end
+
+        function found = findings(oid)
+        %findings  Every section 18 fault on one object's attributes.
+        %   A 1-by-n struct array with fields `id`, `attr` and
+        %   `message`, in the order the attributes come back in.  W11
+        %   is included, because an attribute this version does not
+        %   know and cannot use is a warning and not an error; a
+        %   caller that only refuses errors passes over it.
+            H5 = mestra.internal.H5;
+            found = mestra.internal.Attrs.none();
+            kinds = mestra.internal.Attrs.kinds();
+            for name = H5.publicAttrNames(oid)
+                try
+                    info = H5.attrInfo(oid, name{1});
+                catch err
+                    found = mestra.internal.Attrs.add(found, 'E41', ...
+                        name{1}, sprintf( ...
+                        'the attribute %s would not be described: %s', ...
+                        name{1}, regexprep(strtrim(err.message), '\s+', ' ')));
+                    continue
+                end
+                if strcmp(info.type, 'vlstring')
+                    found = mestra.internal.Attrs.add(found, 'E19', ...
+                        name{1}, sprintf( ...
+                        'the attribute %s is a variable-length string', ...
+                        name{1}));
+                    continue
+                end
+                if ~info.scalar
+                    % Section 18 gives every attribute this format
+                    % names a scalar dataspace, so an array there is
+                    % the wrong encoding whatever its type.
+                    if kinds.isKey(name{1})
+                        found = mestra.internal.Attrs.add(found, 'E19', ...
+                            name{1}, sprintf( ...
+                            ['the attribute %s is an array where a ' ...
+                             'scalar is required'], name{1}));
+                    else
+                        found = mestra.internal.Attrs.add(found, 'W11', ...
+                            name{1}, sprintf( ...
+                            ['the attribute %s is not a scalar and is ' ...
+                             'ignored'], name{1}));
+                    end
+                    continue
+                end
+                if kinds.isKey(name{1})
+                    want = kinds(name{1});
+                    if ~strcmp(info.type, want)
+                        found = mestra.internal.Attrs.add(found, 'E19', ...
+                            name{1}, sprintf( ...
+                            'the attribute %s is %s where %s is required', ...
+                            name{1}, info.type, want));
+                        continue
+                    end
+                    if strcmp(want, 'int8')
+                        v = H5.readAttr(oid, name{1});
+                        if ~any(double(v) == [0 1])
+                            found = mestra.internal.Attrs.add(found, 'E19', ...
+                                name{1}, sprintf( ...
+                                'the boolean %s has the value %g', ...
+                                name{1}, double(v)));
+                        end
+                    end
+                end
+                if strcmp(info.type, 'string')
+                    try
+                        bytes = H5.readRawStrAttr(oid, name{1});
+                        [ok, why] = ...
+                            mestra.internal.Text.checkStringBytes(bytes);
+                        if ~ok
+                            found = mestra.internal.Attrs.add(found, 'E26', ...
+                                name{1}, sprintf( ...
+                                'the attribute %s has %s', name{1}, why));
+                        end
+                    catch err
+                        found = mestra.internal.Attrs.add(found, 'E41', ...
+                            name{1}, sprintf( ...
+                            ['the attribute %s could not be read as ' ...
+                             'bytes: %s'], name{1}, ...
+                            regexprep(strtrim(err.message), '\s+', ' ')));
+                    end
+                end
+            end
+        end
+    end
+
+    methods (Static, Access = private)
+
+        function found = none()
+        %none  An empty finding list of the right shape.
+            found = struct('id', {}, 'attr', {}, 'message', {});
+        end
+
+        function found = add(found, id, attr, message)
+            found(end + 1) = struct('id', id, 'attr', attr, ...
+                                    'message', message); %#ok<AGROW>
+        end
+    end
+end
