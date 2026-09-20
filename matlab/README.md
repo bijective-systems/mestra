@@ -518,7 +518,11 @@ What the reader refuses, and under which rule:
   * an eager read of more than `maxElements`, E41. A lazy read and a
     row-range read are not subject to it, so `mestra.open` and
     `readRows` still work on a file `mestra.read` refuses; a
-    fixed-length string wider than `maxStringSize` is E41 too;
+    fixed-length string wider than `maxStringSize` is E41 too.
+    `mestra.open` does read a category table, so it meets the cap
+    there, and does not read a slot or a dataset inside a callable's
+    dictionary, so it never meets it on one of those (section 7 of
+    `docs/api-conventions.md`);
   * a filter that is not gzip or shuffle, E29, which section 23 tells
     a reader to refuse;
   * a slot whose `source` says data and which is stored as a group, or

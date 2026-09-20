@@ -212,7 +212,8 @@ classdef Reader
                         continue
                     end
                     [record, limits] = ...
-                        mestra.internal.Reader.readCallable(g, name{1}, d);
+                        mestra.internal.Reader.readCallable(g, name{1}, ...
+                                                            d, eager);
                     d.callables = [d.callables record];
                     for i = 1:numel(limits)
                         mestra.internal.Reader.note(d, ...
@@ -779,26 +780,47 @@ classdef Reader
             H5D.close(oid);
         end
 
-        function [rec, limits] = readCallable(g, id, d)
+        function [rec, limits] = readCallable(g, id, d, eager)
         %readCallable  One callable: its type, its dictionary and, when
         %   the type is registered, the object itself.  A reader that
         %   does not know the type keeps the dictionary and must not
         %   interpret it (section 25).
+        %
+        %   With `eager` false the dictionary is walked and not read.
+        %   Section 7 of docs/api-conventions.md: an open never reads a
+        %   dataset inside a callable's dictionary.  The walk still
+        %   decides what the structure decides, so a dictionary nested
+        %   past the cap is E41 from the open as it is from the read,
+        %   which is what section 30 asks of the hostile subset; what
+        %   the bytes decide waits for the read.  The dictionary
+        %   itself is then dropped rather than handed back with its
+        %   arrays missing, and with it the object built from it:
+        %   `id`, `type` and `repr` are attributes, so a metadata open
+        %   still names every callable and mestra.info still prints
+        %   one.
             if nargin < 3, d = []; end
+            if nargin < 4, eager = true; end
             gid = mestra.internal.H5.openGroup(g, id);
             mestra.internal.Reader.checkAttrs(d, gid, ['/callables/' id]);
             rec = mestra.Dataset.emptyCallable();
             rec(1).id = id;
             rec(1).type = mestra.internal.Reader.str(gid, 'type');
             rec(1).repr = mestra.internal.Reader.str(gid, 'repr');
-            [rec(1).dict, problems] = mestra.internal.Codec.read(gid, true);
+            rec(1).obj = [];
+            [dict, problems] = mestra.internal.Codec.read(gid, true, 0, eager);
             limits = {};
             for i = 1:numel(problems)
                 if numel(problems{i}) > 4 && strcmp(problems{i}(1:4), 'U03 ')
                     limits{end + 1} = problems{i}(5:end); %#ok<AGROW>
                 end
             end
-            rec(1).obj = [];
+            if ~eager
+                rec(1).dict = containers.Map('KeyType', 'char', ...
+                                             'ValueType', 'any');
+                H5G.close(gid);
+                return
+            end
+            rec(1).dict = dict;
             if ~isempty(rec(1).type) && mestra.Registry.isKnown(rec(1).type)
                 try
                     rec(1).obj = mestra.Registry.create(rec(1).type, ...

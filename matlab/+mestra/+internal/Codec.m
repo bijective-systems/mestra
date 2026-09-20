@@ -27,7 +27,7 @@ classdef Codec
 
     methods (Static)
 
-        function [dict, problems] = read(gid, isTop, depth)
+        function [dict, problems] = read(gid, isTop, depth, eager)
         %read  Rebuild a dictionary from an HDF5 group.
         %   `problems` lists the section 25 violations found, by rule
         %   identifier and reason, so that the validator can report
@@ -40,8 +40,19 @@ classdef Codec
         %   walk stops at maxDepth levels rather than descending until
         %   the stack gives out, and it never follows a soft or an
         %   external link.
+        %
+        %   With `eager` false the walk is the same and no dataset's
+        %   data is read, because section 7 of docs/api-conventions.md
+        %   says an open never reads a dataset inside a dictionary.
+        %   Everything the structure decides is still found: the depth
+        %   cap, a zero-dimensional dataset, a dtype section 25 does
+        %   not allow, a link that is not a hard one, and a top-level
+        %   key the container owns.  What the bytes decide -- a string
+        %   holding a NUL, and a dataset above the element cap --
+        %   waits for the read.
             if nargin < 2, isTop = false; end
             if nargin < 3, depth = 0; end
+            if nargin < 4, eager = true; end
             dict = containers.Map('KeyType', 'char', 'ValueType', 'any');
             problems = {};
             H5 = mestra.internal.H5;
@@ -124,7 +135,8 @@ classdef Codec
                     end
                     sub = H5G.open(gid, key);
                     [dict(key), subProblems] = ...
-                        mestra.internal.Codec.read(sub, false, depth + 1);
+                        mestra.internal.Codec.read(sub, false, depth + 1, ...
+                                                   eager);
                     H5G.close(sub);
                     problems = [problems subProblems]; %#ok<AGROW>
                 else
@@ -152,6 +164,10 @@ classdef Codec
                         problems{end + 1} = sprintf( ...
                             '%s: a top-level key the container owns', ...
                             key); %#ok<AGROW>
+                    end
+                    if ~eager
+                        H5D.close(did);
+                        continue
                     end
                     try
                         data = H5.readData(did, info);
