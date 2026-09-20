@@ -17,16 +17,20 @@ class MestraError(Exception):
     `rule` is the identifier ("E11"), `where` the HDF5 path or the
     name the mistake is about, and `message` says what is wrong in
     plain words.
+
+    `rule` is empty when the mistake is the caller's and not the
+    file's: a slot named that is not in the file, a region that is
+    not in a label. The identifiers stay for findings about a file,
+    so that a caller who catches E05 catches a malformed file and
+    not their own typo.
     """
 
     def __init__(self, rule: str, message: str, where: str = "") -> None:
         self.rule = rule
         self.message = message
         self.where = where
-        text = "%s: %s" % (rule, message)
-        if where:
-            text = "%s: %s: %s" % (rule, where, message)
-        super().__init__(text)
+        super().__init__(": ".join(
+            [part for part in (rule, where) if part] + [message]))
 
 
 class TooLarge(MestraError):

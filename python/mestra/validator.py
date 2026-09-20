@@ -738,20 +738,25 @@ class _FileValidator:
         if kind in ("mesh", "axis") and "coordinates" not in inside:
             self.error("E03", where, "a %s support has exactly one "
                                      "coordinates array" % kind)
-        roles: dict[str, list[str]] = {}
+        roles: dict[tuple[str, str], list[str]] = {}
         for slot_name, member, location in arrays:
             role = self.guarded(
                 "%s/%s" % (where, slot_name), self._array, where, name,
                 slot_name, member, location, kind, n_nodes, n_cells)
             if role is not None:
-                roles.setdefault(
-                    role if role != "coordinates" else "coordinates",
-                    []).append(slot_name)
-        for role, limit in ARRAY_ROLES.items():
-            if limit is not None and len(roles.get(role, [])) > limit:
+                roles.setdefault((role, location), []).append(slot_name)
+        # Section 3 counts a role at each location: "weight 0..1 per
+        # location", and a support may have both node and cell
+        # weights. Coordinates are on the nodes, so for them the two
+        # readings are the same count.
+        for (role, location), found in sorted(roles.items()):
+            limit = ARRAY_ROLES.get(role)
+            if limit is not None and len(found) > limit:
                 self.error("E03", where, "a support has at most %d "
-                                         "array with the role %s"
-                           % (limit, role))
+                                         "array with the role %s at the "
+                                         "%ss, and this has %d: %s"
+                           % (limit, role, location, len(found),
+                              ", ".join(sorted(found))))
         for member_name, member in inside.items():
             if member_name in _SUPPORT_MEMBERS:
                 continue
@@ -1653,6 +1658,17 @@ def _validate_dataset(ds: Dataset) -> Report:
                 support.stored_support_id != support.computed_support_id():
             error("E08", where, "the stored support_id does not match "
                                 "the arrays")
+        counted_arrays: dict[tuple[str, str], int] = {}
+        for array in support.arrays().values():
+            at = (array.role, array.location)
+            counted_arrays[at] = counted_arrays.get(at, 0) + 1
+        for (role, location), found in sorted(counted_arrays.items()):
+            limit = ARRAY_ROLES.get(role)
+            if limit is not None and found > limit:
+                error("E03", where, "a support has at most %d array "
+                                    "with the role %s at the %ss, and "
+                                    "this has %d"
+                      % (limit, role, location, found))
         for slot_name, array in support.arrays().items():
             slot_where = "%s/%s" % (where, slot_name)
             if array.role not in ARRAY_ROLES:
