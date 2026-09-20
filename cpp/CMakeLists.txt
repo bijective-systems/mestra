@@ -60,6 +60,27 @@ target_compile_options(mestra-cli PRIVATE
   -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion
   -ffp-contract=off)
 
+if(MESTRA_BUILD_TESTS)
+  enable_testing()
+
+  add_executable(mestra-unit tests/unit_tests.cpp)
+  target_link_libraries(mestra-unit PRIVATE mestra)
+  target_include_directories(mestra-unit PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_compile_options(mestra-unit PRIVATE
+    -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion
+    -ffp-contract=off)
+  add_test(NAME unit COMMAND mestra-unit)
+
+  find_package(Python3 COMPONENTS Interpreter)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME corpus COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_corpus.py
+      --cli $<TARGET_FILE:mestra-cli>
+      --vectors ${CMAKE_CURRENT_SOURCE_DIR}/../vectors)
+  endif()
+endif()
+
 install(TARGETS mestra mestra-cli
         RUNTIME DESTINATION bin
         LIBRARY DESTINATION lib
