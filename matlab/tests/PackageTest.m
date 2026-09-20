@@ -223,21 +223,20 @@ classdef PackageTest < matlab.unittest.TestCase
             d = mestra.Dataset();
             d.writer = 'mestra matlab tests';
             d.created = '2026-09-19T00:00:00Z';
-            d.addCategory('member', {'wing_a', 'wing_b'});
-            d.addKey('mach', 'condition', [0.4 0.8], 'Units', '1', ...
+            d.addCategoryTable('member', {'wing_a', 'wing_b'});
+            d.addKey('mach', [0.4 0.8], 'condition', '1', ...
                      'Lower', 0.1, 'Upper', 0.9);
-            d.addKey('member', 'group', int32([0 1]), 'Category', 'member');
-            d.generalisationGroup = 'member';
+            d.addKey('member', int32([0 1]), 'group', 'Category', 'member');
+            d.setGeneralisationGroup('member');
             coords = cat(3, [0 1 2 0 1 2; 0 0 0 1 1 1], ...
                             [0 1.5 3 0 1.5 3; 0 0 0 1 1 1]);
             d.addMeshSupport('s0', coords, uint8([9 9]), int64([0 4 8]), ...
-                             int64([0 1 4 3 1 2 5 4]), 'Units', 'm', ...
-                             'Varies', 'group:member', ...
+                             int64([0 1 4 3 1 2 5 4]), 'm', ...
                              'Dims', {'component', 'node', 'group:member'});
             p = [101 102 103 104 105 106; 201 202 203 204 205 206];
-            d.addNodeArray('s0', 'pressure', p, 'field', 'Units', 'Pa', ...
+            d.addNodeArray('s0', 'pressure', p, 'field', 'Pa', ...
                            'Dims', {'row', 'node'});
-            d.addScalar('cl', [0.25 0.55], 'Units', '1');
+            d.addScalar('cl', [0.25 0.55], '1');
 
             meshDigest = ['96df395d80ef548444562292de441525' ...
                           'ba0b5c8ad00a8dadff19a19c943936c7'];
@@ -265,7 +264,7 @@ classdef PackageTest < matlab.unittest.TestCase
         %errorIdentifiersNameTheRule  A mistake says which rule it broke.
             d = mestra.Dataset();
             testCase.verifyError( ...
-                @() d.addNodeArray('nothing', 'p', 1, 'field'), ...
+                @() d.addNodeArray('nothing', 'p', 1, 'field', '1'), ...
                 'mestra:noSupport');
             dict = containers.Map('KeyType', 'char', 'ValueType', 'any');
             dict('bad') = {1, 'two'};
@@ -284,7 +283,10 @@ classdef PackageTest < matlab.unittest.TestCase
             d.created = '2026-09-19T00:00:00Z';
             out = [tempname() '.mes'];
             cleanup = onCleanup(@() PackageTest.removeIfPresent(out));
-            mestra.write(d, out);
+            % A file of another major version is E01, so writing it
+            % takes the escape hatch section 2 of the conventions
+            % gives for deliberately invalid files.
+            mestra.write(d, out, 'Check', false);
             testCase.verifyError(@() mestra.read(out), 'mestra:E01');
             r = mestra.validate(out);
             testCase.verifyEqual(r.errors, {'E01'});
@@ -301,10 +303,10 @@ classdef PackageTest < matlab.unittest.TestCase
         %   something else.
             d = mestra.Dataset();
             d.created = '2026-09-19T00:00:00Z';
-            d.addCategory('member', {'aile', ['fl' char(252) 'gel']});
-            d.addKey('member', 'group', int32([0 1]), ...
+            d.addCategoryTable('member', {'aile', ['fl' char(252) 'gel']});
+            d.addKey('member', int32([0 1]), 'group', ...
                      'Category', 'member');
-            d.generalisationGroup = 'member';
+            d.setGeneralisationGroup('member');
             out = [tempname() '.mes'];
             cleanup = onCleanup(@() PackageTest.removeIfPresent(out));
             testCase.verifyError(@() mestra.write(d, out), ...
@@ -323,7 +325,9 @@ classdef PackageTest < matlab.unittest.TestCase
                 'the private group was captured');
             out = [tempname() '.mes'];
             cleanup = onCleanup(@() PackageTest.removeIfPresent(out));
-            mestra.write(d, out);
+            % err_e18 is an invalid case on purpose, so this is the
+            % one place the round trip takes the escape hatch.
+            mestra.write(d, out, 'Check', false);
             differences = mestra.internal.Compare.structural(source, out);
             testCase.verifyEmpty(differences, strjoin(differences, '; '));
         end
