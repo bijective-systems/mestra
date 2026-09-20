@@ -9,14 +9,19 @@ Building one from arrays takes a handful of calls:
 
     ds = mestra.Dataset(writer="my tool 1")
     ds.add_key("mach", [0.4, 0.8], role="condition", units="1")
-    ds.add_key("member", [0, 1], role="group",
-               categories=["wing_a", "wing_b"], generalisation=True)
+    ds.add_category_table("member", ["wing_a", "wing_b"])
+    ds.add_key("member", [0, 1], role="group", category="member")
+    ds.set_generalisation_group("member")
     ds.add_scalar("cl", [0.25, 0.55], units="1")
     s = ds.add_support("s0", coordinates=xy, cells=(types, offsets,
                                                     conn))
-    s.add_node_array("pressure", p, units="Pa")
+    s.add_node_array("pressure", p, units="Pa",
+                     dims=("row", "node"))
 
-The dimensions, the bounds and the support id are filled in.
+The dimensions, the bounds, the component axis and the support id are
+filled in. Every builder refuses at build time, naming the rule of
+section 14 and the argument to change, anything the validator would
+refuse in the file.
 """
 
 from __future__ import annotations
@@ -45,6 +50,7 @@ __all__ = [
     "KEY_ROLES",
     "ARRAY_ROLES",
     "STATISTICS",
+    "STATUS_WORDS",
     "FORMAT",
 ]
 
@@ -67,6 +73,18 @@ STATISTICS = ("value", "mean", "std", "quantile", "draw")
 
 #: Section 19: which keys are stored as integers.
 _INTEGER_KEY_ROLES = ("categorical", "group", "split", "status")
+
+#: Roles whose key carries units, and roles whose key names a
+#: category table instead (section 3).
+_UNIT_KEY_ROLES = ("design", "condition", "time")
+_TABLE_KEY_ROLES = ("categorical", "group", "split", "status")
+
+#: The status words section 3 recommends. A producer may add its own,
+#: and only `converged` means the row is fit for modelling.
+STATUS_WORDS = ("converged", "failed", "partial")
+
+#: How many elements `NamedArray` prints rather than summarises.
+_REPR_ELEMENTS = 12
 
 
 # --------------------------------------------------------------- arrays
@@ -173,9 +191,18 @@ class NamedArray:
         return NamedArray(self.values.transpose(order), dims)
 
     def __repr__(self) -> str:
-        return "NamedArray(%s, dims=%s)" % (
-            "x".join(str(n) for n in self.values.shape) or "scalar",
-            ", ".join(self.dims))
+        """The values themselves when there are few, as numpy does.
+
+        A one-element scalar column is the commonest thing to print,
+        and a shape is not what the caller wanted to see. Above
+        `_REPR_ELEMENTS` the shape is all that would fit.
+        """
+        if self.values.size <= _REPR_ELEMENTS:
+            body = np.array2string(self.values, separator=", ",
+                                   threshold=_REPR_ELEMENTS)
+        else:
+            body = "x".join(str(n) for n in self.values.shape) or "scalar"
+        return "NamedArray(%s, dims=%s)" % (body, ", ".join(self.dims))
 
 
 class Storage:
@@ -542,6 +569,30 @@ def array_dims(varies: str, statistic: str | None,
 
 # ------------------------------------------------------------- supports
 
+class _Arrays(dict):
+    """The arrays at one location, with an answer for a name that is
+    not there.
+
+    A plain `KeyError` for `node_arrays["coordinates"]` tells a
+    caller nothing, and coordinates are the one array that is an
+    attribute of the support rather than a member of this mapping.
+    """
+
+    def __init__(self, location: str) -> None:
+        super().__init__()
+        self._location = location
+
+    def __missing__(self, name: str) -> Any:
+        if name == "coordinates":
+            raise KeyError(
+                "the coordinates are support.coordinates, not "
+                "support.%s_arrays['coordinates']" % self._location)
+        raise KeyError(
+            "no %s array called %r; this support has %s"
+            % (self._location, name,
+               ", ".join(sorted(self)) or "none"))
+
+
 class Support:
     """The structure a field lives on: a mesh, an axis, or none."""
 
@@ -561,8 +612,8 @@ class Support:
             "cell_connectivity": _wrap(cell_connectivity, "<i8"),
         }
         self.coordinates: ArraySlot | None = None
-        self.node_arrays: dict[str, ArraySlot] = {}
-        self.cell_arrays: dict[str, ArraySlot] = {}
+        self.node_arrays: dict[str, ArraySlot] = _Arrays("node")
+        self.cell_arrays: dict[str, ArraySlot] = _Arrays("cell")
         #: What the file said, kept so that the validator can check
         #: it. Changing a cell array clears it, so that a support
         #: whose arrays have changed writes a fresh digest.
@@ -667,72 +718,198 @@ class Support:
         return out
 
     def add_node_array(self, name: str, values: Any = None, *,
-                       role: str = "field", units: str | None = None,
-                       varies: str | None = None, **rest: Any
-                       ) -> ArraySlot:
-        """Add an array over this support's nodes."""
-        return self._add(self.node_arrays, "node", name, values,
-                         role=role, units=units, varies=varies, **rest)
+                       units: str | None = None,
+                       dims: Sequence[str] | None = None,
+                       role: str = "field", varies: str | None = None,
+                       components: int | None = None,
+                       category: str | None = None,
+                       categories: Sequence[str] | None = None,
+                       statistic: str | None = None,
+                       of: str | None = None,
+                       quantile: float | None = None,
+                       recomputed: bool | None = None,
+                       derived_from: str | None = None,
+                       recipe: str | None = None,
+                       reference: str | None = None,
+                       callable_id: str | None = None,
+                       output: str | None = None,
+                       dtype: Any = None, **rest: Any) -> ArraySlot:
+        """Add an array over this support's nodes.
+
+        `dims` names the axes of the array you are passing, in your
+        own axis order: "row" or "group:<k>", "draw", "node" and
+        "component". The builder reads `varies` and `components` off
+        it and stores the array in the order section 19 requires.
+        """
+        return self._add(
+            self.node_arrays, "node", name, values, units=units,
+            dims=dims, role=role, varies=varies, components=components,
+            category=category, categories=categories,
+            statistic=statistic, of=of, quantile=quantile,
+            recomputed=recomputed, derived_from=derived_from,
+            recipe=recipe, reference=reference,
+            callable_id=callable_id, output=output, dtype=dtype, **rest)
 
     def add_cell_array(self, name: str, values: Any = None, *,
-                       role: str = "field", units: str | None = None,
-                       varies: str | None = None, **rest: Any
-                       ) -> ArraySlot:
-        """Add an array over this support's cells."""
-        return self._add(self.cell_arrays, "cell", name, values,
-                         role=role, units=units, varies=varies, **rest)
+                       units: str | None = None,
+                       dims: Sequence[str] | None = None,
+                       role: str = "field", varies: str | None = None,
+                       components: int | None = None,
+                       category: str | None = None,
+                       categories: Sequence[str] | None = None,
+                       statistic: str | None = None,
+                       of: str | None = None,
+                       quantile: float | None = None,
+                       recomputed: bool | None = None,
+                       derived_from: str | None = None,
+                       recipe: str | None = None,
+                       reference: str | None = None,
+                       callable_id: str | None = None,
+                       output: str | None = None,
+                       dtype: Any = None, **rest: Any) -> ArraySlot:
+        """Add an array over this support's cells. As
+        `add_node_array`, with `cell` in place of `node` in `dims`."""
+        return self._add(
+            self.cell_arrays, "cell", name, values, units=units,
+            dims=dims, role=role, varies=varies, components=components,
+            category=category, categories=categories,
+            statistic=statistic, of=of, quantile=quantile,
+            recomputed=recomputed, derived_from=derived_from,
+            recipe=recipe, reference=reference,
+            callable_id=callable_id, output=output, dtype=dtype, **rest)
+
+    def add_callable_slot(self, name: str, *, location: str = "node",
+                          units: str | None = None,
+                          dims: Sequence[str] | None = None,
+                          callable: Any = None,
+                          output: str | None = None,
+                          role: str = "field",
+                          varies: str | None = None,
+                          components: int | None = None,
+                          **rest: Any) -> ArraySlot:
+        """Add an array slot a callable serves rather than data.
+
+        `callable` is the id you gave `Dataset.add_callable`, or the
+        object itself; `output` names which of that callable's
+        outputs fills this slot, and defaults to the slot's name. A
+        callable slot stores no values, so it declares its shape:
+        `dims` or `components`.
+        """
+        if location not in ("node", "cell"):
+            raise MestraError(
+                "E30", "location is node or cell, and this is %r; pass "
+                "location=\"node\" or location=\"cell\"" % location,
+                name)
+        into = self.node_arrays if location == "node" else self.cell_arrays
+        return self._add(
+            into, location, name, None, units=units, dims=dims,
+            role=role, varies=varies, components=components,
+            callable_id=_callable_id(self.dataset, callable, name),
+            output=output, **rest)
 
     def _add(self, into: dict[str, ArraySlot], location: str, name: str,
-             values: Any, *, role: str, units: str | None,
-             varies: str | None, categories: Sequence[str] | None = None,
+             values: Any, *, units: str | None,
+             dims: Sequence[str] | None = None, role: str = "field",
+             varies: str | None = None,
+             categories: Sequence[str] | None = None,
              category: str | None = None, callable_id: str | None = None,
              output: str | None = None, components: int | None = None,
-             dtype: Any = None, **rest: Any) -> ArraySlot:
+             statistic: str | None = None, dtype: Any = None,
+             **rest: Any) -> ArraySlot:
         _check_name(name)
         if role not in ARRAY_ROLES:
             raise MestraError(
-                "E02", "%r is not an array role; section 3 has %s"
+                "E02", "%r is not an array role; pass role= one of %s"
                 % (role, ", ".join(sorted(ARRAY_ROLES))), name)
         if name in into:
             raise MestraError(
-                "E33", "this support already has an array called %r"
-                % name, name)
+                "E33", "this support already has a %s array called %r; "
+                "give this one another name" % (location, name), name)
         if categories is not None:
             if self.dataset is None:
                 raise MestraError(
                     "E10", "add the support to a dataset before naming "
                     "categories", name)
             category = category or name
-            self.dataset.add_categories(category, categories)
-        statistic = rest.get("statistic")
+            self.dataset.add_category_table(category, categories)
+        _check_statistic(statistic, rest.get("of"), rest.get("quantile"),
+                         name)
         if callable_id is not None:
+            if self.dataset is None or \
+                    callable_id not in self.dataset.callables:
+                raise MestraError(
+                    "E14", "this dataset holds no callable called %r; "
+                    "call add_callable(%r, ...) first"
+                    % (callable_id, callable_id), name)
+            if dims is not None:
+                varies = _split_dims(dims, location, varies, statistic,
+                                     name)[1]
             if components is None:
                 raise MestraError(
-                    "E31", "a slot served by a callable must declare "
-                    "its components", name)
+                    "E31", "a slot served by a callable stores no "
+                    "values, so it declares its shape; pass "
+                    "components=", name)
+            varies = varies or "row"
+            _check_varies(self.dataset, varies, None, name)
             slot = ArraySlot(
-                name, role, varies=varies or "row",
+                name, role, varies=varies,
                 components=components, location=location, units=units,
                 category=category, support=self,
                 source="callable:" + callable_id,
-                output=output or name, **rest)
+                output=output or name, statistic=statistic, **rest)
+            _check_array_attrs(slot, name)
             into[name] = slot
             return slot
         array = _as_array(values, role, dtype, name)
-        if varies is None:
-            varies = _guess_varies(array, self, location, statistic,
-                                   name)
-        array = _shape_array(array, location, varies, statistic, name)
-        if components is None:
-            components = int(array.shape[-1])
+        if dims is not None:
+            array, varies, components = _array_from_dims(
+                array, dims, location, self, varies, statistic,
+                components, name)
+        else:
+            if varies is None:
+                varies = _guess_varies(array, self, location, statistic,
+                                       name)
+            array = _shape_array(array, location, varies, statistic,
+                                 name)
+            if components is None:
+                components = int(array.shape[-1])
+        _check_extent(array, location, varies, statistic, self, name)
+        _check_varies(self.dataset, varies, array, name)
         slot = ArraySlot(name, role, varies=varies, components=components,
                          location=location, units=units,
                          category=category, support=self,
+                         statistic=statistic,
                          data=MemorySource(array), **rest)
-        into[name] = slot
+        _check_array_attrs(slot, name)
+        _check_categories(self.dataset, slot, array, name)
+        # The row count is checked before the slot goes in, so that a
+        # refused call leaves the support as it found it.
         if self.dataset is not None and varies == "row":
-            self.dataset._note_rows(int(array.shape[0]), name)
+            self._note_rows(int(array.shape[0]), name)
+        into[name] = slot
         return slot
+
+    def _note_rows(self, count: int, name: str) -> None:
+        """E16: the leading extent against the rows it must have.
+
+        Section 22: in an unaligned file a row-varying array on a
+        support holds one entry per row referencing *that support*,
+        and not one per row of the file.
+        """
+        dataset = self.dataset
+        if dataset is None:
+            return
+        if dataset.has_row_support and len(dataset.supports) > 1:
+            mine = len(dataset.rows_on(self))
+            if count != mine:
+                raise MestraError(
+                    "E16", "values holds %d entries where %d rows of "
+                    "this file are on support %s; a row-varying array "
+                    "on a support in an unaligned file holds one entry "
+                    "per row that references it (section 22)"
+                    % (count, mine, self.name), name)
+            return
+        dataset._note_rows(count, name)
 
     def __repr__(self) -> str:
         return "Support(%r, kind=%r, n_nodes=%d, n_cells=%d)" % (
@@ -835,8 +1012,9 @@ class Dataset:
             self._n_rows = count
         elif self._n_rows != count:
             raise MestraError(
-                "E16", "this holds %d rows where the dataset has %d"
-                % (count, self._n_rows), where)
+                "E16", "values holds %d rows where the dataset has %d; "
+                "every key, scalar and row-varying array has one entry "
+                "per row" % (count, self._n_rows), where)
 
     # -- keys
 
@@ -851,39 +1029,56 @@ class Dataset:
                 if self.keys[n].role == role]
 
     def add_key(self, name: str, values: Any, *, role: str,
-                units: str | None = None, lower: float | None = None,
+                units: str | None = None,
+                category: str | None = None,
+                lower: float | None = None,
                 upper: float | None = None,
                 categories: Sequence[str] | None = None,
-                category: str | None = None,
                 trajectory_group: str | None = None,
                 parent: str | None = None,
                 generalisation: bool = False,
                 bounds: str | None = "observed",
                 dtype: Any = None) -> Key:
-        """Add a key column.
+        """Add a key column: `add_key(name, values, role, units)`.
 
-        `role` is one of section 3. A categorical, group, split or
-        status key stores category ids, and `categories` writes the
-        table for it. Bounds default to the observed range of a
-        design, condition or time key; pass `lower` and `upper` to
-        declare the domain instead, or `bounds=None` to leave them
-        out.
+        `role` is one of section 3. A design, condition or time key
+        carries `units`; a categorical, group, split, id or status
+        key carries `category`, naming a table
+        `add_category_table` has already written, instead.
+
+        Bounds: when you give neither, the builder records the
+        observed finite minimum and maximum, so that the same arrays
+        give the same file in every language and W04 and W08 are
+        decidable. Pass `lower` and `upper` to declare a wider domain
+        of validity, or `bounds=None` to leave them out.
+
+        `categories=[...]` is sugar for `add_category_table` on a
+        table of this key's own name, and nothing more.
         """
         _check_name(name)
         if role not in KEY_ROLES:
             raise MestraError(
-                "E02", "%r is not a key role; section 3 has %s"
+                "E02", "%r is not a key role; pass role= one of %s"
                 % (role, ", ".join(sorted(KEY_ROLES))), name)
         if name in self.keys:
             raise MestraError(
-                "E33", "this dataset already has a key called %r"
-                % name, name)
+                "E33", "this dataset already has a key called %r; give "
+                "this one another name" % name, name)
+        limit = KEY_ROLES[role]
+        if limit is not None and len(self.keys_of_role(role)) >= limit:
+            raise MestraError(
+                "E03", "a file has at most %d key with the role %s, and "
+                "this one already has %s; pass another role="
+                % (limit, role,
+                   ", ".join(k.name for k in self.keys_of_role(role))),
+                name)
         if role in _INTEGER_KEY_ROLES:
             given = np.asarray(values)
             if given.dtype.kind not in "iub":
                 raise MestraError(
                     "E20", "a %s key stores category ids, which are "
-                    "integers; these are %s" % (role, given.dtype),
+                    "integers; these values are %s. Pass the ids, and "
+                    "their names as categories=" % (role, given.dtype),
                     name)
             array = given.astype(dtype or "<i4")
         elif role == "id":
@@ -896,62 +1091,129 @@ class Dataset:
             array = np.asarray(values, dtype=dtype or "<f8")
         if array.ndim != 1:
             raise MestraError(
-                "E04", "a key column has one dimension, row; this one "
-                "has %d" % array.ndim, name)
+                "E04", "a key column has one dimension, row; these "
+                "values have %d. Pass one value per row" % array.ndim,
+                name)
         if categories is not None:
             category = category or name
-            self.add_categories(category, categories)
-        if (role in ("design", "condition", "time") and bounds
-                and lower is None and upper is None and array.size):
-            lower = float(np.nanmin(array))
-            upper = float(np.nanmax(array))
+            self.add_category_table(category, categories)
+        _check_key_units(role, units, name)
+        _check_key_table(self, role, category, array, name)
+        if role in _UNIT_KEY_ROLES and bounds:
+            lower, upper = _observed_bounds(array, lower, upper)
         key = Key(name, role, units=units, lower=lower, upper=upper,
                   category=category, trajectory_group=trajectory_group,
                   parent=parent, data=MemorySource(array))
-        self.keys[name] = key
+        # Before the key goes in, so that a refused call leaves the
+        # dataset as it found it.
         self._note_rows(int(array.shape[0]), name)
+        self.keys[name] = key
         if generalisation:
-            self.generalisation_group = name
+            self.set_generalisation_group(name)
         return key
+
+    def set_generalisation_group(self, name: str | None) -> None:
+        """Name the key that is the unit of generalisation.
+
+        Section 7: exactly one group key is the unit a split must
+        keep whole. `None` clears it. `add_key(...,
+        generalisation=True)` is sugar for this call.
+        """
+        if name is None:
+            self.generalisation_group = None
+            return
+        key = self.keys.get(name)
+        if key is None:
+            raise MestraError(
+                "E03", "this dataset declares no key called %r; add the "
+                "group key first" % name, "/generalisation_group")
+        if key.role != "group":
+            raise MestraError(
+                "E03", "the unit of generalisation is a key of role "
+                "group, and %r has the role %s" % (name, key.role),
+                "/keys/" + name)
+        self.generalisation_group = name
 
     # -- scalars
 
     def add_scalar(self, name: str, values: Any = None, *,
                    units: str | None = None,
                    callable_id: str | None = None,
-                   output: str | None = None, **rest: Any) -> ScalarSlot:
-        """Add a per-row quantity of interest, with units.
+                   output: str | None = None,
+                   statistic: str | None = None, of: str | None = None,
+                   quantile: float | None = None,
+                   **rest: Any) -> ScalarSlot:
+        """Add a per-row quantity of interest:
+        `add_scalar(name, values, units)`.
 
-        Pass `values` for stored data, or `callable_id` and `output`
-        for a slot a callable serves.
+        Pass `values` for stored data, or use `add_callable_slot` for
+        a slot a callable serves.
         """
         _check_name(name)
         if name in self.scalars:
             raise MestraError(
-                "E33", "this dataset already has a scalar called %r"
-                % name, name)
+                "E33", "this dataset already has a scalar called %r; "
+                "give this one another name" % name, name)
+        if not units:
+            raise MestraError(
+                "E11", "a scalar carries units; pass units= (\"1\" for "
+                "a dimensionless one)", name)
+        _check_statistic(statistic, of, quantile, name)
         if callable_id is not None:
+            if callable_id not in self.callables:
+                raise MestraError(
+                    "E14", "this dataset holds no callable called %r; "
+                    "call add_callable(%r, ...) first"
+                    % (callable_id, callable_id), name)
             slot = ScalarSlot(name, units=units,
                               source="callable:" + callable_id,
-                              output=output or name, **rest)
+                              output=output or name, statistic=statistic,
+                              of=of, quantile=quantile, **rest)
             self.scalars[name] = slot
             return slot
+        if values is None:
+            raise MestraError(
+                "E30", "a scalar holding data needs values; pass "
+                "values=, or add_callable_slot for a slot a callable "
+                "serves", name)
         array = np.asarray(values, dtype="<f8")
         if array.ndim != 1:
             raise MestraError(
-                "E04", "a scalar has one dimension, row; this one has "
-                "%d" % array.ndim, name)
+                "E04", "a scalar has one dimension, row; these values "
+                "have %d. Pass one value per row" % array.ndim, name)
         slot = ScalarSlot(name, units=units, data=MemorySource(array),
+                          statistic=statistic, of=of, quantile=quantile,
                           **rest)
-        self.scalars[name] = slot
         self._note_rows(int(array.shape[0]), name)
+        self.scalars[name] = slot
         return slot
+
+    def add_callable_slot(self, name: str, *, units: str | None = None,
+                          callable: Any = None,
+                          output: str | None = None,
+                          **rest: Any) -> ScalarSlot:
+        """Add a scalar slot a callable serves rather than data.
+
+        `callable` is the id you gave `add_callable`, or the object
+        itself; `output` names which of that callable's outputs fills
+        this slot, and defaults to the slot's name.
+        `Support.add_callable_slot` is the same call for an array.
+        """
+        return self.add_scalar(
+            name, units=units,
+            callable_id=_callable_id(self, callable, name),
+            output=output, **rest)
 
     # -- categories
 
-    def add_categories(self, name: str,
-                       entries: Sequence[str]) -> CategoryTable:
-        """Add or replace a category table."""
+    def add_category_table(self, name: str,
+                           entries: Sequence[str]) -> CategoryTable:
+        """Add or replace a category table.
+
+        Call it before the key or the label that names it with
+        `category`. A category id is the position of its entry, so
+        the first entry is id 0 (section 21).
+        """
         _check_name(name)
         table = CategoryTable(entries)
         self.categories[name] = table
@@ -967,16 +1229,19 @@ class Dataset:
         """Add a support, from its coordinates and its cells.
 
         `cells` is (cell_types, cell_offsets, cell_connectivity) as
-        section 6 stores them. The kind, the node and cell counts and
-        the support id are worked out from what is given.
+        section 6 stores them; `kind="axis"` and no cells is a
+        support of nodes along one coordinate, and `kind="none"` is
+        no support at all, for a file of scalars. The kind, the node
+        and cell counts and the support id are worked out from what
+        is given.
         """
         if name is None:
             name = "s%d" % len(self.supports)
         _check_name(name)
         if name in self.supports:
             raise MestraError(
-                "E33", "this dataset already has a support called %r"
-                % name, name)
+                "E33", "this dataset already has a support called %r; "
+                "give this one another name" % name, name)
         coords = None if coordinates is None else _shape_array(
             np.asarray(coordinates, dtype="<f8"), "node", varies, None,
             "coordinates")
@@ -989,8 +1254,32 @@ class Dataset:
                 kind = "none"
         if kind not in ("mesh", "axis", "none"):
             raise MestraError(
-                "E03", "a support is mesh, axis or none, not %r" % kind,
-                name)
+                "E03", "a support is mesh, axis or none; pass kind= one "
+                "of those, not %r" % kind, name)
+        if coords is not None and not units:
+            raise MestraError(
+                "E39", "coordinates carry units; pass units=", name)
+        if kind == "axis" and varies != "none":
+            raise MestraError(
+                "E35", "the coordinates of an axis support have varies "
+                "= none, because the axis is part of the support's "
+                "identity; pass varies=\"none\", or make the quantity "
+                "that differs between rows a field on the axis", name)
+        if kind in ("mesh", "axis") and coords is None:
+            raise MestraError(
+                "E03", "a %s support has exactly one coordinates "
+                "array; pass coordinates=" % kind, name)
+        _check_varies(self, varies, coords, name)
+        if kind == "mesh" and cells is None:
+            raise MestraError(
+                "E38", "a mesh support carries cell_types, cell_offsets "
+                "and cell_connectivity; pass cells=(types, offsets, "
+                "connectivity), or kind=\"axis\" for nodes along one "
+                "coordinate", name)
+        if kind != "mesh" and cells is not None:
+            raise MestraError(
+                "E38", "a support of kind %s carries no cells; drop "
+                "cells=, or leave kind out to get a mesh" % kind, name)
         types = offsets = conn = None
         if cells is not None:
             types, offsets, conn = cells
@@ -1025,8 +1314,8 @@ class Dataset:
             raise MestraError(
                 "E04", "/row_support has one dimension, row",
                 "/row_support")
-        self._row_support = MemorySource(array)
         self._note_rows(int(array.shape[0]), "/row_support")
+        self._row_support = MemorySource(array)
 
     def support_names(self) -> list[str]:
         """The file's support order: names sorted by UTF-8 bytes."""
@@ -1063,11 +1352,15 @@ class Dataset:
 
     # -- callables
 
-    def add_callable(self, identifier: str, obj: Any) -> Any:
-        """Store a callable under an id that slots may reference."""
+    def add_callable(self, identifier: str, callable: Any) -> Any:
+        """Store a callable under an id that slots may reference.
+
+        `add_callable(id, callable)`, and then `add_callable_slot`
+        for each slot it serves.
+        """
         _check_name(identifier)
-        self.callables[identifier] = obj
-        return obj
+        self.callables[identifier] = callable
+        return callable
 
     # -- everything at once
 
@@ -1212,21 +1505,288 @@ def _as_array(values: Any, role: str, dtype: Any, name: str
               ) -> np.ndarray:
     if values is None:
         raise MestraError(
-            "E30", "a slot holding data needs values; pass "
-            "callable_id for a slot a callable serves", name)
+            "E30", "a slot holding data needs values; pass values=, or "
+            "add_callable_slot for a slot a callable serves", name)
     if role == "label":
         array = np.asarray(values, dtype=dtype or "<i4")
         if array.dtype.kind not in "iu":
             raise MestraError(
-                "E20", "a label is int32 or int64, not %s" % array.dtype,
-                name)
+                "E20", "a label is int32 or int64, and these values are "
+                "%s; pass integer category ids" % array.dtype, name)
         return array
     array = np.asarray(values, dtype=dtype or "<f8")
     if array.dtype != np.dtype("<f8"):
         raise MestraError(
-            "E20", "a %s array is float64, not %s" % (role, array.dtype),
-            name)
+            "E20", "a %s array is float64, and these values are %s"
+            % (role, array.dtype), name)
     return array
+
+
+def _observed_bounds(array: np.ndarray, lower: float | None,
+                     upper: float | None
+                     ) -> tuple[float | None, float | None]:
+    """The bounds to record: what the caller gave, and the observed
+    finite range for what they did not (section 1 of the
+    conventions)."""
+    if lower is not None and upper is not None:
+        return lower, upper
+    if array.dtype.kind not in "fiu" or not array.size:
+        return lower, upper
+    finite = array[np.isfinite(array)] if array.dtype.kind == "f" \
+        else array
+    if not finite.size:
+        return lower, upper
+    if lower is None:
+        lower = float(np.min(finite))
+    if upper is None:
+        upper = float(np.max(finite))
+    return lower, upper
+
+
+def _check_key_units(role: str, units: str | None, name: str) -> None:
+    """E39: which key roles carry units, and which do not."""
+    if role in _UNIT_KEY_ROLES and not units:
+        raise MestraError(
+            "E39", "a %s key carries units; pass units= (\"1\" for a "
+            "dimensionless one)" % role, name)
+    if role not in _UNIT_KEY_ROLES and units:
+        raise MestraError(
+            "E39", "a %s key carries no units, because its values are "
+            "%s; drop units="
+            % (role, "row identifiers" if role == "id"
+               else "category ids"), name)
+
+
+def _check_key_table(dataset: Dataset, role: str, category: str | None,
+                     array: np.ndarray, name: str) -> None:
+    """E39 and E10: the category table a key role requires."""
+    if role not in _TABLE_KEY_ROLES:
+        return
+    if not category:
+        raise MestraError(
+            "E39", "a %s key names its category table; call "
+            "add_category_table(name, entries) and pass category=name, "
+            "or pass categories=[...]" % role, name)
+    table = dataset.categories.get(category)
+    if table is None:
+        raise MestraError(
+            "E39", "this dataset has no category table called %r; call "
+            "add_category_table(%r, entries) first" % (category,
+                                                       category), name)
+    if array.size and ((array < 0) | (array >= len(table))).any():
+        raise MestraError(
+            "E10", "a value is outside the category table %r, which has "
+            "%d entries; the id of an entry is its position, counting "
+            "from 0" % (category, len(table)), name)
+
+
+def _check_statistic(statistic: str | None, of: str | None,
+                     quantile: float | None, name: str) -> None:
+    """E02 and E12: a statistic with what it needs (section 9)."""
+    if statistic is None:
+        return
+    if statistic not in STATISTICS:
+        raise MestraError(
+            "E02", "%r is not a statistic of section 9; pass statistic= "
+            "one of %s" % (statistic, ", ".join(STATISTICS)), name)
+    if statistic == "quantile" and quantile is None:
+        raise MestraError(
+            "E12", "a quantile statistic carries its quantile; pass "
+            "quantile=", name)
+    if statistic not in ("value", "draw") and not of:
+        raise MestraError(
+            "E12", "a %s names the quantity it is a statistic of; pass "
+            "of=" % statistic, name)
+
+
+def _callable_id(dataset: Dataset | None, obj: Any, name: str) -> str:
+    """The id a callable is stored under, from the id or the object."""
+    if obj is None:
+        raise MestraError(
+            "E14", "a callable slot names the callable that serves it; "
+            "pass callable=<id>", name)
+    if isinstance(obj, str):
+        return obj
+    if dataset is not None:
+        for identifier, held in dataset.callables.items():
+            if held is obj:
+                return identifier
+    raise MestraError(
+        "E14", "this callable is not in the dataset; call "
+        "add_callable(<id>, callable) first, and pass callable=<id>",
+        name)
+
+
+def _check_array_attrs(slot: ArraySlot, name: str) -> None:
+    """E11, E13 and E39: what an array role requires (section 3)."""
+    if slot.role == "field" and not slot.units:
+        raise MestraError(
+            "E11", "a field carries units; pass units= (\"1\" for a "
+            "dimensionless one)", name)
+    if slot.role in ("coordinates", "derived") and not slot.units:
+        raise MestraError(
+            "E39", "a %s array carries units; pass units=" % slot.role,
+            name)
+    if slot.role == "derived" and not (slot.derived_from and slot.recipe):
+        raise MestraError(
+            "E13", "a derived array carries derived_from and recipe; "
+            "pass both, naming the arrays it came from and the "
+            "operation", name)
+
+
+def _check_categories(dataset: Dataset | None, slot: ArraySlot,
+                      array: np.ndarray, name: str) -> None:
+    """E10: a label's values inside the table it names.
+
+    Section 3: a label's category table is optional, and when it is
+    absent the values are their own categories.
+    """
+    if slot.category is None:
+        return
+    table = None if dataset is None else dataset.categories.get(
+        slot.category)
+    if table is None:
+        raise MestraError(
+            "E39", "this dataset has no category table called %r; call "
+            "add_category_table(%r, entries) first" % (slot.category,
+                                                       slot.category),
+            name)
+    if array.dtype.kind in "iu" and array.size and \
+            ((array < 0) | (array >= len(table))).any():
+        raise MestraError(
+            "E10", "a value is outside the category table %r, which has "
+            "%d entries; the id of an entry is its position, counting "
+            "from 0" % (slot.category, len(table)), name)
+
+
+def _check_varies(dataset: Dataset | None, varies: str,
+                  array: np.ndarray | None, name: str) -> None:
+    """E04 and E34: a group-varying array against its group key."""
+    if not varies.startswith("group:"):
+        if varies not in ("none", "row"):
+            raise MestraError(
+                "E04", "varies is none, row or group:<k>, and this is "
+                "%r" % varies, name)
+        return
+    group = varies[len("group:"):]
+    key = None if dataset is None else dataset.keys.get(group)
+    if key is None:
+        raise MestraError(
+            "E04", "varies is %r and this dataset declares no key "
+            "called %r; add the group key before the arrays that vary "
+            "along it" % (varies, group), name)
+    if key.role != "group":
+        raise MestraError(
+            "E04", "varies is %r and %r has the role %s, not group"
+            % (varies, group, key.role), name)
+    table = None if dataset is None else dataset.categories.get(
+        key.category or "")
+    if array is not None and table is not None and \
+            int(array.shape[0]) != len(table):
+        raise MestraError(
+            "E34", "this holds %d instances where the group %r has %d "
+            "categories; a group-varying array holds one instance per "
+            "category" % (int(array.shape[0]), group, len(table)), name)
+
+
+def _check_extent(array: np.ndarray, location: str, varies: str,
+                  statistic: str | None, support: Support,
+                  name: str) -> None:
+    """E05: the node or cell axis against the support."""
+    width = support.n_nodes if location == "node" else support.n_cells
+    at = len(array_dims(varies, statistic, location)) - 2
+    if int(array.shape[at]) != width:
+        raise MestraError(
+            "E05", "the %s axis of this array is %d long where the "
+            "support has %d %ss; check values, or name the axes with "
+            "dims=" % (location, int(array.shape[at]), width, location),
+            name)
+
+
+def _split_dims(dims: Sequence[str], location: str, varies: str | None,
+                statistic: str | None, name: str
+                ) -> tuple[tuple[str, ...], str]:
+    """The caller's axis names, checked, and the `varies` they mean.
+
+    `dims` names the axes of the array the caller is passing, in the
+    caller's own order: "row" or "group:<k>", "draw", the location,
+    and "component". A name the array does not have is simply not
+    listed; the builder adds a component axis of length one.
+    """
+    names = tuple(str(d) for d in dims)
+    if len(set(names)) != len(names):
+        raise MestraError(
+            "E04", "dims names an axis twice (%s); name each axis of "
+            "your array once" % ", ".join(names), name)
+    other = "cell" if location == "node" else "node"
+    for one in names:
+        if one in ("row", "draw", location, "component") or \
+                one.startswith("group:"):
+            continue
+        if one == other:
+            raise MestraError(
+                "E04", "dims names a %s axis on an array over the %ss; "
+                "add_%s_array is the call for that" % (other, location,
+                                                       other), name)
+        if one in ("instance", "group"):
+            raise MestraError(
+                "E04", "dims says %r; name the group key it varies "
+                "along, as in \"group:member\"" % one, name)
+        raise MestraError(
+            "E04", "dims may name row or group:<k>, draw, %s and "
+            "component, and this names %r" % (location, one), name)
+    leading = [n for n in names if n == "row" or n.startswith("group:")]
+    if len(leading) > 1:
+        raise MestraError(
+            "E04", "dims names %d leading axes (%s); an array varies "
+            "along one of them, or along none"
+            % (len(leading), ", ".join(leading)), name)
+    found = leading[0] if leading else "none"
+    if varies is not None and varies != found:
+        raise MestraError(
+            "E04", "varies says %r and dims says %r; change one of "
+            "them" % (varies, found), name)
+    if statistic == "draw" and "draw" not in names:
+        raise MestraError(
+            "E04", "the statistic is draw, so the array has a draw "
+            "axis; name it in dims", name)
+    if statistic != "draw" and "draw" in names:
+        raise MestraError(
+            "E04", "dims names a draw axis, so pass statistic=\"draw\"",
+            name)
+    if location not in names:
+        raise MestraError(
+            "E04", "dims names no %s axis; every array on a support "
+            "has one" % location, name)
+    return names, found
+
+
+def _array_from_dims(array: np.ndarray, dims: Sequence[str],
+                     location: str, support: Support,
+                     varies: str | None, statistic: str | None,
+                     components: int | None, name: str
+                     ) -> tuple[np.ndarray, str, int]:
+    """The array in the order section 19 stores it, from the order
+    the caller has it in."""
+    names, found = _split_dims(dims, location, varies, statistic, name)
+    if len(names) != array.ndim:
+        raise MestraError(
+            "E04", "dims names %d axes and the array has %d; name every "
+            "axis of the array you are passing"
+            % (len(names), array.ndim), name)
+    wanted = array_dims(found, statistic, location)
+    array = array.transpose([names.index(d) for d in wanted
+                             if d in names])
+    if "component" not in names:
+        # Section 19: the component axis is always present, with
+        # length one for a single-component quantity.
+        array = array.reshape(array.shape + (1,))
+    if components is not None and components != int(array.shape[-1]):
+        raise MestraError(
+            "E31", "components says %d and the component axis of this "
+            "array is %d long; change one of them"
+            % (components, int(array.shape[-1])), name)
+    return array, found, int(array.shape[-1])
 
 
 def _guess_varies(array: np.ndarray, support: Support, location: str,
@@ -1261,8 +1821,9 @@ def _guess_varies(array: np.ndarray, support: Support, location: str,
                                  location, location, location), name)
     raise MestraError(
         "E05", "an array of shape %s does not fit a support of %d "
-        "%ss; the %s axis is the one of that length"
-        % (array.shape, width, location, location), name)
+        "%ss; the %s axis is the one of that length, and dims= names "
+        "the axes you have" % (array.shape, width, location, location),
+        name)
 
 
 def _shape_array(array: np.ndarray, location: str, varies: str,
@@ -1277,4 +1838,5 @@ def _shape_array(array: np.ndarray, location: str, varies: str,
         return array.reshape(array.shape + (1,))
     raise MestraError(
         "E04", "an array that varies along %s on %ss has %d axes; this "
-        "one has %d" % (varies, location, wanted, array.ndim), name)
+        "one has %d. Name the axes you have with dims="
+        % (varies, location, wanted, array.ndim), name)

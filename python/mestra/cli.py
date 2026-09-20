@@ -1,12 +1,21 @@
 """The command line: `mestra validate FILE` and `mestra info FILE`.
 
     $ mestra validate run.mes
-    run.mes: no error and no warning
+    0 error(s), 0 warning(s)
+
+    $ mestra validate suspect.mes
+    E11 /supports/s0/node_arrays/pressure: a field carries units
+    1 error(s), 0 warning(s)
 
     $ mestra info run.mes
-    ... one screen: the keys with their roles and bounds, the
-    supports with their ids, every slot with its shape, units and
-    source, and the callables with their types.
+    ... one screen: the keys with their roles, units, bounds,
+    category, trajectory group and parent, the supports with their
+    kind, counts and id, and every slot with its shape under named
+    axes, its units and its source.
+
+Section 5 of `docs/api-conventions.md` fixes both shapes: a finding
+is `<id> <path>: <message>` and a run ends with
+`<n> error(s), <m> warning(s)`, in every language.
 """
 
 from __future__ import annotations
@@ -17,7 +26,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from .errors import MestraError
-from .model import ArraySlot, Dataset
+from .model import Dataset
 from .reader import read
 from .validator import validate
 
@@ -49,29 +58,33 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _validate(paths: Sequence[str], quiet: bool) -> int:
-    status = 0
+    """Every finding, then the one summary line of section 5.
+
+    With more than one file the findings of each are introduced by
+    its name, because a finding's own path is a path inside the
+    file; the summary counts the run.
+    """
+    errors = warnings = 0
     for path in paths:
         try:
             report = validate(path)
         except (OSError, MestraError) as exc:
-            print("%s: cannot be read: %s" % (path, exc))
-            status = 1
+            errors += 1
+            if not quiet:
+                if len(paths) > 1:
+                    print(path)
+                print("E01 %s: this file cannot be read: %s"
+                      % (path, exc))
             continue
+        errors += len(report.errors)
+        warnings += len(report.warnings)
         if not quiet:
+            if len(paths) > 1:
+                print(path)
             for finding in report.findings:
-                print("  %s" % finding)
-        if report.errors:
-            status = 1
-            print("%s: %d error(s), %d warning(s): %s"
-                  % (path, len(report.errors), len(report.warnings),
-                     " ".join(report.error_ids + report.warning_ids)))
-        elif report.warnings:
-            print("%s: valid, %d warning(s): %s"
-                  % (path, len(report.warnings),
-                     " ".join(report.warning_ids)))
-        else:
-            print("%s: no error and no warning" % path)
-    return status
+                print(finding)
+    print("%d error(s), %d warning(s)" % (errors, warnings))
+    return 1 if errors else 0
 
 
 def _info(paths: Sequence[str]) -> int:
@@ -94,8 +107,13 @@ def _print_dataset(path: str, ds: Dataset) -> None:
         print("  %s" % finding)
     print("  %s written by %r on %s" % (ds.format, ds.writer,
                                         ds.created))
-    line = "  %d row(s), %s" % (
-        ds.n_rows, "aligned" if ds.aligned else "not aligned")
+    # A file with no support at all is not "aligned with" anything,
+    # so it does not say so.
+    if not ds.supports:
+        structure = "no support"
+    else:
+        structure = "aligned" if ds.aligned else "not aligned"
+    line = "  %d row(s), %s" % (ds.n_rows, structure)
     if ds.generalisation_group:
         line += ", generalisation unit %s" % ds.generalisation_group
     print(line)
@@ -110,8 +128,8 @@ def _print_dataset(path: str, ds: Dataset) -> None:
         print("  scalars")
         for name in sorted(ds.scalars):
             slot = ds.scalars[name]
-            print("    %-16s (row)%s %s" % (
-                name, " " * 26, _slot_detail(slot)))
+            print("    %-16s %-30s %s" % (name, _dims(slot),
+                                          _slot_detail(slot)))
     for sname in ds.support_names():
         support = ds.supports[sname]
         print("  support %s  %s, %d node(s), %d cell(s)"
@@ -147,10 +165,13 @@ def _key_detail(ds: Dataset, key: Any) -> str:
         out.append("categories %s (%s)" % (key.category, entries))
     if key.trajectory_group:
         out.append("trajectory %s" % key.trajectory_group)
+    if key.parent:
+        out.append("parent %s" % key.parent)
     return "  ".join(out)
 
 
-def _dims(slot: ArraySlot) -> str:
+def _dims(slot: Any) -> str:
+    """The slot's shape under the name of each of its axes."""
     shape = ""
     if slot.data is not None:
         shape = "x".join(str(n) for n in slot.data.shape)

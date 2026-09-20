@@ -8,6 +8,8 @@ machine produce the same bytes.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 import mestra
@@ -15,6 +17,32 @@ from mestra.model import FileSource
 from tests import corpus
 
 VALID = corpus.valid_case_names()
+
+
+def test_write_validates_first_and_refuses_on_an_error(tmp_path):
+    """Section 2 of the conventions: no writer emits a file its own
+    validator rejects."""
+    ds = mestra.read(corpus.case_path("mesh_two_rows"), lazy=False)
+    ds.scalars["cl"].units = None
+    path = str(tmp_path / "bad.mes")
+    with pytest.raises(mestra.MestraError) as caught:
+        mestra.write(ds, path)
+    assert caught.value.rule == "E11"
+    assert "check=False" in str(caught.value)
+    assert "/scalars/cl" in str(caught.value)
+    assert not os.path.exists(path)
+
+    mestra.write(ds, path, check=False)
+    assert mestra.validate(path).error_ids == ["E11"]
+
+
+def test_a_warning_does_not_stop_a_write(tmp_path):
+    """W05 is the file saying something true about itself."""
+    source = corpus.case_path("warn_w05")
+    written = str(tmp_path / "again.mes")
+    with mestra.read(source) as ds:
+        mestra.write(ds, written)
+    assert mestra.validate(written).warning_ids == ["W05"]
 
 
 @pytest.mark.parametrize("name", VALID)

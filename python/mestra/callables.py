@@ -59,20 +59,20 @@ def keys_table(table: Any, names: Sequence[str] | None = None
         values = np.asarray(table)
         if values.ndim != 2:
             raise MestraError(
-                "section 26", "a keys table is a mapping of name to "
-                "column, or a two-dimensional array with the key "
-                "names")
+                "", "a keys table is a mapping of name to column, or a "
+                "two-dimensional array with the key names (section 26)")
         if names is None or len(names) != values.shape[1]:
             raise MestraError(
-                "section 26", "a two-dimensional keys table needs one "
-                "name per column, in the file's key order")
+                "", "a two-dimensional keys table needs one name per "
+                "column, in the file's key order; pass names="
+                "(section 26)")
         out = {str(name): values[:, at]
                for at, name in enumerate(names)}
     lengths = {len(column) for column in out.values()}
     if len(lengths) > 1:
         raise MestraError(
-            "section 26", "every column of a keys table has the same "
-            "length; these have %s"
+            "", "every column of a keys table has the same length; "
+            "these have %s"
             % ", ".join(str(n) for n in sorted(lengths)))
     return out
 
@@ -83,8 +83,8 @@ def _column(name: Any, values: Any) -> np.ndarray:
         column = column.reshape(1)
     if column.ndim != 1:
         raise MestraError(
-            "section 26", "the column of a keys table has one "
-            "dimension", str(name))
+            "", "the column of a keys table has one dimension, row",
+            str(name))
     return column
 
 
@@ -254,8 +254,9 @@ class Affine(Callable):
         missing = [k for k in self.keys if k not in table]
         if missing:
             raise MestraError(
-                "section 26", "the keys table has no column %s"
-                % ", ".join(missing))
+                "", "the keys table has no column %s; this callable "
+                "reads %s" % (", ".join(missing),
+                              ", ".join(self.keys)))
         rows = table_length(table)
         columns = np.empty((rows, len(self.keys)), dtype="<f8")
         for at, name in enumerate(self.keys):

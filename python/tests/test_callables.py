@@ -117,6 +117,20 @@ def test_the_reserved_prefix_is_refused(tmp_path):
     assert caught.value.rule == "E33"
 
 
+def test_a_keys_table_the_caller_got_wrong_carries_no_rule_id():
+    """P4: a rule identifier is a finding about a file."""
+    model = mestra.Affine(
+        ["mach", "alpha"],
+        {"cl": {"A": [[2.0, 0.1]], "b": [0.05], "shape": []}})
+    with pytest.raises(MestraError) as caught:
+        model({"mach": [0.5]})
+    assert caught.value.rule == ""
+    assert "alpha" in str(caught.value)
+    with pytest.raises(MestraError) as other:
+        mestra.keys_table({"mach": [0.5], "alpha": [1.0, 2.0]})
+    assert other.value.rule == ""
+
+
 # ------------------------------------------------------------- affine
 
 def test_the_worked_example_of_section_27():

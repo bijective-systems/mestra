@@ -29,7 +29,13 @@ from .encoding import (
     support_digest,
 )
 from .errors import Finding, MestraError, TooLarge
-from .model import ARRAY_ROLES, KEY_ROLES, STATISTICS, Dataset
+from .model import (
+    ARRAY_ROLES,
+    KEY_ROLES,
+    STATISTICS,
+    STATUS_WORDS,
+    Dataset,
+)
 from .names import MACHINERY, RESERVED_PREFIX, is_legal_name
 from .units import is_parseable
 
@@ -186,10 +192,10 @@ class _FileValidator:
     # -- collecting findings
 
     def error(self, rule: str, where: str, message: str) -> None:
-        self.report.errors.append(Finding(rule, where, message))
+        _once(self.report.errors, rule, where, message)
 
     def warn(self, rule: str, where: str, message: str) -> None:
-        self.report.warnings.append(Finding(rule, where, message))
+        _once(self.report.warnings, rule, where, message)
 
     def note(self, where: str, message: str, rule: str = "E41") -> None:
         """An object this reader could not read (E41), or a link it
@@ -557,16 +563,13 @@ class _FileValidator:
             else values
         if not finite.size:
             return
-        low, high = float(np.min(finite)), float(np.max(finite))
-        outside = ((lower is not None and low < lower)
-                   or (upper is not None and high > upper))
-        if outside:
-            self.warn("W04", where, "a value is outside the declared "
-                                    "bounds [%s, %s]" % (lower, upper))
+        said = w04(values, lower, upper)
+        if said:
+            self.warn("W04", where, said)
             return
         if lower is None or upper is None:
             return
-        observed = high - low
+        observed = float(np.max(finite)) - float(np.min(finite))
         declared = float(upper) - float(lower)
         if observed > 0 and declared > _STALE_BOUNDS_FACTOR * observed:
             self.warn("W08", where, "the declared bounds are %.1f "
@@ -596,19 +599,27 @@ class _FileValidator:
                 continue
             group = _attr(dset, "trajectory_group")
             labels: Any = None
+            table = None
             if group and group in self.keys:
                 labels = self.values(self.keys[group], "/keys/" + group)
+                table = self.categories.get(
+                    _attr(self.keys[group], "category") or "")
             if labels is None:
                 labels = np.zeros(len(values), dtype="i8")
             if len(labels) != len(values):
                 continue
-            for one in np.unique(labels):
-                inside = values[labels == one]
-                if inside.size > 1 and not np.all(
-                        np.diff(inside) > 0):
-                    self.error(
-                        "E09", "/keys/" + name, "time is not strictly "
-                        "increasing within the trajectory %s" % one)
+            bad = [one for one in np.unique(labels)
+                   if values[labels == one].size > 1
+                   and not np.all(np.diff(values[labels == one]) > 0)]
+            if bad:
+                named = [_named(table, one) for one in bad]
+                self.error(
+                    "E09", "/keys/" + name, "time is not strictly "
+                    "increasing within %d trajector%s (%s%s)"
+                    % (len(named), "y" if len(named) == 1 else "ies",
+                       ", ".join(named[:3]),
+                       " and %d more" % (len(named) - 3)
+                       if len(named) > 3 else ""))
 
     def _status(self, roles: dict[str, list[str]]) -> None:
         """W02: rows whose status is not converged."""
@@ -620,12 +631,9 @@ class _FileValidator:
             values = self.values(dset, "/keys/" + name)
             if values is None or values.dtype.kind not in "iu":
                 continue
-            for row, value in enumerate(values):
-                at = int(value)
-                if 0 <= at < len(table) and table[at] != "converged":
-                    self.warn(
-                        "W02", "/keys/" + name, "row %d has status %r"
-                        % (row, table[at]))
+            said = w02(values, table)
+            if said:
+                self.warn("W02", "/keys/" + name, said)
 
     def _split(self, roles: dict[str, list[str]]) -> None:
         """W01: a split that leaks the unit of generalisation."""
@@ -637,16 +645,15 @@ class _FileValidator:
         units = self.values(self.keys[unit], "/keys/" + unit)
         if units is None:
             return
+        table = self.categories.get(_attr(self.keys[unit],
+                                          "category") or "")
         for name in roles.get("split", []):
             split = self.values(self.keys[name], "/keys/" + name)
             if split is None or len(split) != len(units):
                 continue
-            for one in np.unique(units):
-                if len(np.unique(split[units == one])) > 1:
-                    self.warn(
-                        "W01", "/keys/" + name, "the rows of %s %s are "
-                        "on both sides of the split, so this is not a "
-                        "generalisation test" % (unit, one))
+            said = w01(units, split, str(unit), table)
+            if said:
+                self.warn("W01", "/keys/" + name, said)
 
     # -- scalars
 
@@ -738,20 +745,25 @@ class _FileValidator:
         if kind in ("mesh", "axis") and "coordinates" not in inside:
             self.error("E03", where, "a %s support has exactly one "
                                      "coordinates array" % kind)
-        roles: dict[str, list[str]] = {}
+        roles: dict[tuple[str, str], list[str]] = {}
         for slot_name, member, location in arrays:
             role = self.guarded(
                 "%s/%s" % (where, slot_name), self._array, where, name,
                 slot_name, member, location, kind, n_nodes, n_cells)
             if role is not None:
-                roles.setdefault(
-                    role if role != "coordinates" else "coordinates",
-                    []).append(slot_name)
-        for role, limit in ARRAY_ROLES.items():
-            if limit is not None and len(roles.get(role, [])) > limit:
+                roles.setdefault((role, location), []).append(slot_name)
+        # Section 3 counts a role at each location: "weight 0..1 per
+        # location", and a support may have both node and cell
+        # weights. Coordinates are on the nodes, so for them the two
+        # readings are the same count.
+        for (role, location), found in sorted(roles.items()):
+            limit = ARRAY_ROLES.get(role)
+            if limit is not None and len(found) > limit:
                 self.error("E03", where, "a support has at most %d "
-                                         "array with the role %s"
-                           % (limit, role))
+                                         "array with the role %s at the "
+                                         "%ss, and this has %d: %s"
+                           % (limit, role, location, len(found),
+                              ", ".join(sorted(found))))
         for member_name, member in inside.items():
             if member_name in _SUPPORT_MEMBERS:
                 continue
@@ -1439,15 +1451,125 @@ class _FileValidator:
         if values is None or values.dtype.kind != "f":
             return
         bad = ~np.isfinite(values)
-        if bad.any():
-            first = tuple(int(i) for i in np.argwhere(bad)[0])
-            self.warn("W03", where, "a non-finite value at %s, which "
-                                    "is how this format spells missing "
-                                    "floating-point data"
-                      % (first,))
+        if not bad.any():
+            return
+        leading = _logical(dset)
+        said = w03(values, leading[0] if leading else "index")
+        if said:
+            self.warn("W03", where, said)
 
 
 # -------------------------------------------------------------- helpers
+
+def _once(into: list[Finding], rule: str, where: str,
+          message: str) -> None:
+    """Record a finding, once per rule per object.
+
+    Section 5 of the conventions: one finding per rule per object.
+    A rule that can be broken more than once in the same place says
+    so in its own message, with the count and the first three; this
+    is the net under all of them, so that no rule has to remember.
+    """
+    for found in into:
+        if found.rule == rule and found.where == where:
+            return
+    into.append(Finding(rule, where, message))
+
+
+def _count(many: int, singular: str, plural: str) -> str:
+    """"a value" or "4 values", so that a message reads."""
+    return singular if many == 1 else "%d %s" % (many, plural)
+
+
+def _at(dimension: str, indices: Any) -> str:
+    """Where a per-row rule was broken: the first three, and a count.
+
+    Section 5 of the conventions: a finding that could repeat per
+    row reports once, with the count and the first three indices.
+    """
+    listed = [int(i) for i in list(indices)[:3]]
+    text = "at %s %s" % (dimension, ", ".join(str(i) for i in listed))
+    if len(indices) > len(listed):
+        text += " and %d more" % (len(indices) - len(listed))
+    return text
+
+
+def _named(table: Any, value: Any) -> str:
+    """A category id as the file's own table names it (section 21)."""
+    at = int(value)
+    if table is not None and 0 <= at < len(table):
+        return str(table[at])
+    return str(at)
+
+
+# The three rules that could repeat per row, each written once and
+# used by both the file validator and the in-memory one, so that the
+# same file gets the same sentence whichever way it is checked. Each
+# returns the message, or None when the rule is not broken.
+
+def w01(units: np.ndarray, split: np.ndarray, unit: str,
+        table: Any) -> str | None:
+    """W01: a split that leaks the unit of generalisation."""
+    leaked = [one for one in np.unique(units)
+              if len(np.unique(split[units == one])) > 1]
+    if not leaked:
+        return None
+    named = [_named(table, one) for one in leaked]
+    if len(named) == 1:
+        return ("the rows of %s %s are on both sides of the split, so "
+                "this is not a generalisation test" % (unit, named[0]))
+    return ("the rows of %d units of generalisation (%s%s) are on both "
+            "sides of the split, so this is not a generalisation test"
+            % (len(named), ", ".join(named[:3]),
+               " and %d more" % (len(named) - 3) if len(named) > 3
+               else ""))
+
+
+def w02(values: np.ndarray, table: Any) -> str | None:
+    """W02: rows whose status is not converged."""
+    bad = [row for row, value in enumerate(values)
+           if 0 <= int(value) < len(table)
+           and table[int(value)] != "converged"]
+    if not bad:
+        return None
+    return ("%s of %d with a status other than converged (the first is "
+            "%r), %s; section 3's words are %s, and a row that is not "
+            "converged is left out of modelling unless it is asked for"
+            % (_count(len(bad), "one row", "rows"), len(values),
+               table[int(values[bad[0]])], _at("row", bad),
+               ", ".join(STATUS_WORDS)))
+
+
+def w03(values: np.ndarray, axis: str) -> str | None:
+    """W03: non-finite values in a field, derived array or scalar."""
+    if values.dtype.kind != "f" or not values.size:
+        return None
+    bad = ~np.isfinite(values)
+    if not bad.any():
+        return None
+    rows = sorted({int(at[0]) for at in np.argwhere(bad)})
+    return ("%s, which is how this format spells missing "
+            "floating-point data, %s"
+            % (_count(int(bad.sum()), "a non-finite value",
+                      "non-finite values"), _at(axis, rows)))
+
+
+def w04(values: np.ndarray, lower: Any, upper: Any) -> str | None:
+    """W04: key values outside the declared bounds."""
+    outside = np.zeros(values.shape, dtype=bool)
+    if lower is not None:
+        outside |= values < lower
+    if upper is not None:
+        outside |= values > upper
+    if values.dtype.kind == "f":
+        outside &= np.isfinite(values)
+    if not outside.any():
+        return None
+    rows = sorted({int(at[0]) for at in np.argwhere(outside)})
+    return ("%s outside the declared bounds [%s, %s], %s"
+            % (_count(int(outside.sum()), "a value", "values"),
+               lower, upper, _at("row", rows)))
+
 
 def _names(obj: Any) -> list[str]:
     return [n for n in obj.attrs if n not in MACHINERY]
@@ -1560,18 +1682,28 @@ def _validate_dataset(ds: Dataset) -> Report:
 
     The byte-level rules of sections 18 to 25 are about a file and
     are not checked here; validate the file itself for those.
+
+    What is read: the key columns and the scalar columns, which is
+    one value per row each, so that W01, W02, W03 and W04 say the
+    same thing here as they do about the file. The arrays on a
+    support are not read, because a dataset opened lazily should not
+    have every field pulled into memory by a check; W03 on a field
+    is a finding about the file, from `validate(path)`.
     """
     report = Report()
-    # What the reader met while opening the file this dataset came
-    # from: a link it would not follow, a member of the wrong kind,
-    # something the library would not read.
-    report.unclassified.extend(ds.problems)
 
     def error(rule: str, where: str, message: str) -> None:
-        report.errors.append(Finding(rule, where, message))
+        _once(report.errors, rule, where, message)
 
     def warn(rule: str, where: str, message: str) -> None:
-        report.warnings.append(Finding(rule, where, message))
+        _once(report.warnings, rule, where, message)
+
+    # What the reader met while opening the file this dataset came
+    # from: a link it would not follow, a member of the wrong kind,
+    # something the library would not read. `unclassified` is a view
+    # of `errors`, so these belong in `errors`.
+    for problem in ds.problems:
+        error(problem.rule, problem.where, problem.message)
 
     if ds.format != "mestra/0":
         error("E01", "/", "this reader accepts mestra/0 and the "
@@ -1613,6 +1745,16 @@ def _validate_dataset(ds: Dataset) -> Report:
                     error("E10", where, "a value is outside a category "
                                         "table of %d entries"
                           % len(table))
+                elif key.role == "status":
+                    said = w02(values, table)
+                    if said:
+                        warn("W02", where, said)
+        if key.role in ("design", "condition", "time") and \
+                key.data is not None and \
+                (key.lower is not None or key.upper is not None):
+            said = w04(np.asarray(key.data.read()), key.lower, key.upper)
+            if said:
+                warn("W04", where, said)
         if key.data is not None and int(key.data.shape[0]) != ds.n_rows:
             error("E16", where, "this holds %d rows where the dataset "
                                 "has %d"
@@ -1621,6 +1763,20 @@ def _validate_dataset(ds: Dataset) -> Report:
         if limit is not None and counted.get(role, 0) > limit:
             error("E03", "/keys", "a file has at most %d key with the "
                                   "role %s" % (limit, role))
+
+    unit = ds.generalisation_group
+    if unit and unit in ds.keys and ds.keys[unit].data is not None:
+        units = np.asarray(ds.keys[unit].read().values)
+        table = ds.categories.get(ds.keys[unit].category or "")
+        for key in ds.keys_of_role("split"):
+            if key.data is None:
+                continue
+            split = np.asarray(key.read().values)
+            if len(split) != len(units):
+                continue
+            said = w01(units, split, unit, table)
+            if said:
+                warn("W01", "/keys/" + key.name, said)
 
     for name, slot in sorted(ds.scalars.items()):
         where = "/scalars/" + name
@@ -1632,8 +1788,9 @@ def _validate_dataset(ds: Dataset) -> Report:
         _check_source(ds, slot, where, error)
         if slot.data is not None:
             values = np.asarray(slot.data.read())
-            if values.size and not np.isfinite(values).all():
-                warn("W03", where, "a non-finite value")
+            said = w03(values, "row")
+            if said:
+                warn("W03", where, said)
             if int(values.shape[0]) != ds.n_rows:
                 error("E16", where, "this holds %d rows where the "
                                     "dataset has %d"
@@ -1653,6 +1810,17 @@ def _validate_dataset(ds: Dataset) -> Report:
                 support.stored_support_id != support.computed_support_id():
             error("E08", where, "the stored support_id does not match "
                                 "the arrays")
+        counted_arrays: dict[tuple[str, str], int] = {}
+        for array in support.arrays().values():
+            at = (array.role, array.location)
+            counted_arrays[at] = counted_arrays.get(at, 0) + 1
+        for (role, location), found in sorted(counted_arrays.items()):
+            limit = ARRAY_ROLES.get(role)
+            if limit is not None and found > limit:
+                error("E03", where, "a support has at most %d array "
+                                    "with the role %s at the %ss, and "
+                                    "this has %d"
+                      % (limit, role, location, found))
         for slot_name, array in support.arrays().items():
             slot_where = "%s/%s" % (where, slot_name)
             if array.role not in ARRAY_ROLES:

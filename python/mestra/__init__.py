@@ -49,6 +49,7 @@ from .model import (
 )
 from .reader import read, support_ids
 from .validator import Report, validate
+from .weights import compute_weights
 from .writer import write
 
 __version__ = "0.1.0"
@@ -76,6 +77,7 @@ __all__ = [
     "__version__",
     "callable_from_dict",
     "callable_types",
+    "compute_weights",
     "decode_dict",
     "encode_dict",
     "evaluate",
