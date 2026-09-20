@@ -14,6 +14,7 @@ from typing import Any
 
 import h5py
 import numpy as np
+import pytest
 
 from mestra.model import NamedArray
 
@@ -37,8 +38,24 @@ def case_names() -> list[str]:
     return [case["name"] for case in manifest["cases"]]
 
 
+#: The cases vectors/README.md generates on demand rather than
+#: commits, because of their size. Their expected.json is committed
+#: like every other one, so the manifest lists them either way.
+ON_DEMAND = {"wide_keys": "--wide"}
+
+
 def case_path(name: str) -> str:
-    return os.path.join(CASES, name, "case.mes")
+    """The golden file of one case.
+
+    A case that is generated on demand and has not been generated
+    skips with the flag that writes it, rather than failing as a
+    file that will not open.
+    """
+    path = os.path.join(CASES, name, "case.mes")
+    if name in ON_DEMAND and not os.path.exists(path):
+        pytest.skip("run: python vectors/generate.py %s"
+                    % ON_DEMAND[name])
+    return path
 
 
 def expected(name: str) -> dict[str, Any]:
