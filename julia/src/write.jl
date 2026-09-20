@@ -118,31 +118,59 @@ end
 # ------------------------------------------------------------- write
 
 """
-    Mestra.write(ds, path)
+    Mestra.write(ds, path; check = true)
 
 Write a dataset as a conforming `.mes` file.  Anything the dataset
 cannot legally be written as raises a `MestraError` naming the rule of
 section 14 that it breaks.
+
+What is written is then validated, and a file with any error is
+refused: the findings are in the message, nothing is left at `path`,
+and a file that was already there is untouched.  `check = false`
+writes it anyway, which is for making a file that breaks a rule on
+purpose.  This is `docs/api-conventions.md` section 2, and it is why a
+writer cannot hand you a file its own validator rejects.
 """
-function write(ds::Dataset, path::AbstractString)
+function write(ds::Dataset, path::AbstractString; check::Bool = true)
     prepare_for_write!(ds)
     if ds.path !== nothing && any_unread(ds) &&
        abspath(String(path)) == abspath(ds.path)
-        throw(MestraError(nothing,
+        throw(MestraError(nothing, String(path),
             "this dataset still reads from $(ds.path), so writing over " *
             "it would destroy what is being read; call " *
             "`Mestra.materialise!(ds)` first or write somewhere else"))
     end
+    # A checked write goes to a file beside the target and is moved
+    # into place once it has validated, so that a refusal leaves
+    # whatever was at `path` alone.
+    target = String(path)
+    out = check ? target * ".mestra-check" : target
     src = ds.path !== nothing && any_unread(ds) ?
           HDF5.h5open(ds.path, "r") : nothing
     try
-        HDF5.h5open(String(path), "w") do f
+        HDF5.h5open(out, "w") do f
             write_file(f, ds, src)
         end
+    catch
+        check && rm(out; force = true)
+        rethrow()
     finally
         src === nothing || close(src)
     end
-    return String(path)
+    if check
+        r = validate(out)
+        if !isempty(r.errors)
+            bad = [f for f in r.findings if startswith(f.rule, "E")]
+            rm(out; force = true)
+            throw(MestraError(first(bad).rule, target,
+                "this dataset does not validate, so nothing was written. " *
+                "Fix what the findings name, or pass `check = false` to " *
+                "write it anyway:\n" *
+                join(["  " * sprint(show, f) for f in bad], "\n")))
+        end
+        mv(out, target; force = true)
+    end
+    return target
 end
 
 any_unread(ds::Dataset) =
@@ -166,36 +194,41 @@ function prepare_for_write!(ds::Dataset)
     if ds.aligned
         ds.row_support = nothing
     elseif ds.row_support === nothing
-        throw(MestraError("E28",
-            "a file with more than one support must carry /row_support"))
+        throw(MestraError("E28", "/row_support",
+            "a file with more than one support says which support each " *
+            "row is on; call `set_row_support!(ds, indices)`"))
     end
     for s in ds.supports
         isempty(s.support_id) && (s.support_id = support_id(s))
     end
     for k in Base.values(ds.keys)
-        legal_name(k.name) || throw(MestraError("E33",
-            "key name $(k.name) is not a legal netCDF-4 name"))
-        reserved(k.name) && throw(MestraError("E33",
-            "key name $(k.name) begins with the reserved prefix"))
+        legal_name(k.name) || throw(MestraError("E33", k.path,
+            "`$(k.name)` is not a legal netCDF-4 name; rename the key"))
+        reserved(k.name) && throw(MestraError("E33", k.path,
+            "`$(k.name)` begins with the reserved prefix `mestra_`; " *
+            "rename the key"))
     end
     for s in all_slots(ds)
-        legal_name(s.name) || throw(MestraError("E33",
-            "slot name $(s.name) is not a legal netCDF-4 name"))
-        reserved(s.name) && throw(MestraError("E33",
-            "slot name $(s.name) begins with the reserved prefix"))
+        legal_name(s.name) || throw(MestraError("E33", s.path,
+            "`$(s.name)` is not a legal netCDF-4 name; rename the slot"))
+        reserved(s.name) && throw(MestraError("E33", s.path,
+            "`$(s.name)` begins with the reserved prefix `mestra_`; " *
+            "rename the slot"))
         s.source == "data" || startswith(s.source, "callable:") ||
-            throw(MestraError("E36",
-                "source must be `data` or `callable:<id>`, not $(s.source)"))
+            throw(MestraError("E36", s.path,
+                "`source` is `data` or `callable:<id>`, not " *
+                "`$(s.source)`; call `set_callable!(slot, id, output)`"))
         if is_callable_slot(s)
             haskey(ds.callables, callable_id(s)) || throw(MestraError("E14",
-                "slot $(s.name) names callable $(callable_id(s)), " *
-                "which the dataset does not hold"))
+                s.path,
+                "this slot names callable `$(callable_id(s))`, which the " *
+                "dataset does not hold; `add_callable!(ds, id, c)` first"))
         end
         if s.location !== :scalar && !is_callable_slot(s)
             s.components === nothing && (s.components = s.dshape[end])
-            s.components == s.dshape[end] || throw(MestraError("E31",
-                "slot $(s.name) declares $(s.components) components over " *
-                "a component dimension of $(s.dshape[end])"))
+            s.components == s.dshape[end] || throw(MestraError("E31", s.path,
+                "`components` says $(s.components) over a component " *
+                "dimension of $(s.dshape[end])"))
         end
     end
     return ds

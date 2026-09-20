@@ -480,6 +480,112 @@ end
                     instance = 2, node = 3, component = 1) == 3.0
 end
 
+"""A dataset with one support of six nodes and two quads, to build
+bad arrays on."""
+function six_node_dataset()
+    ds = Mestra.Dataset(writer = "mestra.jl test 0",
+                        created = "2026-09-19T00:00:00Z")
+    Mestra.add_category_table!(ds, "member", ["wing_a", "wing_b"])
+    Mestra.add_key!(ds, "mach", [0.4, 0.8]; role = :condition, units = "1")
+    Mestra.add_key!(ds, "member", [0, 1]; role = :group,
+                    category = "member")
+    s = Mestra.add_mesh_support!(ds, "s0";
+            coordinates = [0.0 0.0; 1.0 0.0; 2.0 0.0;
+                           0.0 1.0; 1.0 1.0; 2.0 1.0],
+            dims = (:node, :component),
+            cell_types = UInt8[9, 9], cell_offsets = Int64[0, 4, 8],
+            cell_connectivity = Int64[0, 1, 4, 3, 1, 2, 5, 4])
+    return (ds, s)
+end
+
+"""The MestraError a call raises, or nothing."""
+function refusal(f)
+    try
+        f()
+        return nothing
+    catch e
+        e isa Mestra.MestraError || rethrow()
+        return e
+    end
+end
+
+@testset "the builder follows dims, and refuses what disagrees" begin
+    ds, s = six_node_dataset()
+    # `dims` decides `varies`, and a `varies` that says otherwise is
+    # refused at build time rather than written as an invalid file
+    e = refusal(() -> Mestra.add_node_array!(ds, s, "p",
+            [101.0 102 103 104 105 106; 201.0 202 203 204 205 206];
+            units = "Pa", dims = (:row, :node), varies = "none"))
+    @test e !== nothing && e.rule == "E04"
+    @test occursin("varies", e.msg) && occursin("dims", e.msg)
+    @test occursin("/supports/s0/node_arrays/p", sprint(showerror, e))
+    # :instance does not say which group it is
+    e = refusal(() -> Mestra.add_node_array!(ds, s, "p", rand(2, 6, 1);
+            units = "Pa", dims = (:instance, :node, :component)))
+    @test e !== nothing && e.rule == "E04"
+    @test occursin("group:", e.msg)
+    # and a group key the dataset does not declare is refused
+    e = refusal(() -> Mestra.add_node_array!(ds, s, "p", rand(2, 6, 1);
+            units = "Pa", dims = (:instance, :node, :component),
+            varies = "group:nosuch"))
+    @test e !== nothing && e.rule == "E04"
+    @test occursin("nosuch", e.msg)
+    # a square array is two readings and the builder will not choose
+    e = refusal(() -> Mestra.add_node_array!(ds, s, "p", rand(6, 6);
+                                             units = "Pa"))
+    @test e !== nothing && e.rule == "E04"
+    @test occursin("(node, component)", e.msg) &&
+          occursin("(row, node)", e.msg) && occursin("dims", e.msg)
+    # `components` follows from the component axis
+    e = refusal(() -> Mestra.add_node_array!(ds, s, "p", rand(2, 6, 3);
+            units = "Pa", dims = (:row, :node, :component),
+            components = 2))
+    @test e !== nothing && e.rule == "E31"
+    # the ones that agree are built, and `varies` may be said again
+    a = Mestra.add_node_array!(ds, s, "p", rand(2, 6); units = "Pa",
+                               dims = (:row, :node), varies = "row")
+    @test a.varies == "row" && a.components == 1
+    b = Mestra.add_node_array!(ds, s, "q", rand(2, 6, 2); units = "Pa",
+                               dims = (:instance, :node, :component),
+                               varies = "group:member")
+    @test b.varies == "group:member" && b.components == 2
+    c = Mestra.add_node_array!(ds, s, "t", collect(range(0, 1, 6));
+                               units = "1")
+    @test c.varies == "none" && c.components == 1
+end
+
+@testset "bounds, and the unit of generalisation" begin
+    ds, _ = six_node_dataset()
+    # the observed finite range unless the caller says otherwise
+    @test ds.keys["mach"].lower == 0.4 && ds.keys["mach"].upper == 0.8
+    Mestra.add_key!(ds, "alpha", [1.0, 3.0]; role = :condition,
+                    units = "degree", lower = -2.0, upper = 10.0)
+    @test ds.keys["alpha"].lower == -2.0 && ds.keys["alpha"].upper == 10.0
+    Mestra.add_key!(ds, "beta", [1.0, 3.0]; role = :condition,
+                    units = "degree", lower = nothing, upper = nothing)
+    @test ds.keys["beta"].lower === nothing
+    e = refusal(() -> Mestra.add_key!(ds, "gamma", [1.0, 3.0];
+                                      role = :condition, units = "degree",
+                                      lower = 0.0))
+    @test e !== nothing && e.rule == "E19"
+    # a non-finite value is not a bound
+    Mestra.add_scalar!(ds, "cl", [0.25, NaN]; units = "1")
+    Mestra.add_key!(ds, "delta", [1.0, NaN]; role = :condition, units = "1")
+    @test ds.keys["delta"].lower == 1.0 && ds.keys["delta"].upper == 1.0
+
+    # the unit of generalisation is a dataset property
+    @test ds.generalisation_group == "member"       # the first group key
+    Mestra.add_category_table!(ds, "batch", ["b0", "b1"])
+    Mestra.add_key!(ds, "batch", [0, 1]; role = :group, category = "batch")
+    @test ds.generalisation_group == "member"
+    Mestra.set_generalisation_group!(ds, "batch")
+    @test ds.generalisation_group == "batch"
+    e = refusal(() -> Mestra.set_generalisation_group!(ds, "mach"))
+    @test e !== nothing && e.rule == "E02"
+    @test refusal(() -> Mestra.set_generalisation_group!(ds, "nope")) !==
+          nothing
+end
+
 @testset "building a model file with a callable slot" begin
     ds = Mestra.Dataset(writer = "mestra.jl test 0",
                         created = "2026-09-19T00:00:00Z")
@@ -500,11 +606,16 @@ end
                        b = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
                        shape = Int64[6, 1])))
     Mestra.add_callable!(ds, "m1", c)
-    Mestra.add_callable_scalar!(ds, "cl"; units = "1", id = "m1",
+    # `callable` names it, and `id` is the older spelling of the same
+    # argument; neither is refused with the rule it breaks
+    Mestra.add_callable_scalar!(ds, "cl"; units = "1", callable = "m1",
                                 output = "cl")
     Mestra.add_callable_slot!(ds, s, "pressure"; units = "Pa",
                               components = 1, id = "m1",
                               output = "pressure")
+    e = refusal(() -> Mestra.add_callable_scalar!(ds, "cd"; units = "1",
+                                                  output = "cd"))
+    @test e !== nothing && e.rule == "E14"
     path = joinpath(SCRATCH, "model.mes")
     Mestra.write(ds, path)
     @test Mestra.validate(path).errors == String[]
@@ -572,6 +683,33 @@ end
     @test Mestra.at(Mestra.values(back, back["pressure"]);
                     row = 7, node = 3, component = 1) == 7.0
     @test isempty(Mestra.structural_diff(path, path))
+end
+
+@testset "write validates before it writes (section 2)" begin
+    ds, s = six_node_dataset()
+    Mestra.add_node_array!(ds, s, "pressure", rand(2, 6); units = "Pa")
+    good = joinpath(SCRATCH, "checked.mes")
+    Mestra.write(ds, good)
+    @test Mestra.validate(good).errors == String[]
+    @test !isfile(good * ".mestra-check")
+    # a slot the builder never saw: setting `varies` on a built slot
+    # changes nothing about its shape, so the file this would write is
+    # one the validator rejects, and the refusal carries the findings
+    ds["pressure"].varies = "none"
+    bad = joinpath(SCRATCH, "refused.mes")
+    e = refusal(() -> Mestra.write(ds, bad))
+    @test e !== nothing
+    @test occursin("/supports/s0/node_arrays/pressure", e.msg)
+    @test occursin("check = false", e.msg)
+    @test !isfile(bad)                       # nothing was written
+    @test !isfile(bad * ".mestra-check")     # and nothing was left behind
+    # `check = false` writes it, which is how the corpus's own broken
+    # files get made, and the refusal named the first rule it breaks
+    @test Mestra.write(ds, bad; check = false) == bad
+    broken = Mestra.validate(bad)
+    @test !isempty(broken.errors) && e.rule in broken.errors
+    # a file that was already there is left alone by a refusal
+    @test Mestra.validate(good).errors == String[]
 end
 
 @testset "mistakes name the rule they break" begin
