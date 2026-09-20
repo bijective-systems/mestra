@@ -107,6 +107,56 @@ dataset builders write `.mes`. Each adoption is its own change in its
 own repository.
 
 
+Phase 5: polish, after everything above has landed
+--------------------------------------------------
+
+The repository is finished only when a stranger can use it. This
+phase produces the front door and the deeper layers, and it is
+governed by one rule: economy of words and of examples. Too much on
+the first screen scares people off; too little hurts technical
+adoption later. The answer is layers, each complete at its own depth,
+each pointing down to the next, and nothing repeated between them.
+
+  Layer 1  README.md: one screen. What the format is in two
+           sentences, what it holds, install in each language, one
+           example of ten lines that writes a file and reads it back
+           in another language, and links down. Nothing else.
+  Layer 2  docs/guide.md: five to eight pages. The concepts of SPEC
+           section 2 in plain words, one worked example per concept
+           (rows and roles, a support and a field, a group and a
+           split, a callable and evaluation, uncertainty as draws),
+           each example under thirty lines and runnable in every
+           language from docs/examples/. How to validate. How to read
+           a file someone else made. The public/private line.
+  Layer 3  SPEC.md: the reference, unchanged in role. The guide links
+           into it by section; the README never does.
+  Layer 4  docs/mappings.md and docs/design-notes.md: for people who
+           want to know why. Linked from the guide's last page.
+
+Per-language README files shrink to the same skeleton: install, the
+ten-line example in that language, the axis-order statement, the link
+to the guide. Everything else they currently carry moves into the
+guide (if it is about the format) or into docstrings and help text (if
+it is about that API).
+
+Examples: exactly one directory per guide concept under docs/examples,
+each with the same small dataset in all four languages, kept under
+thirty lines each and run by every language's test suite so they
+cannot rot. The five mapped datasets of docs/mappings.md are the
+source material; the examples use their toy sizes.
+
+A logo: a simple wordmark that works at 32 pixels and in both light
+and dark, committed as SVG. A placeholder is acceptable until the
+owner replaces it.
+
+Inputs: the ergonomics report is the primary input (fix the friction
+before documenting around it); the verification report is the second
+(anything graded NOTE that a user would hit belongs in the guide).
+
+What this phase must not do: add features, restate the spec in the
+guide, or write a tutorial longer than the guide. When in doubt, cut.
+
+
 Rules
 -----
 
