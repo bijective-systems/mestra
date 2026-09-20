@@ -102,8 +102,9 @@ int cmd_info(const std::string& path) {
               << " source=" << s.source << "\n";
   }
   for (const mestra::CategoryTable& t : d.categories) {
-    std::cout << "categories " << t.name << " entries=" << t.entries.size()
-              << "\n";
+    // `info` opens the file without reading a dataset (section 29), so
+    // the table's entries are not among what it can print.
+    std::cout << "categories " << t.name << "\n";
   }
   for (const mestra::Support& s : d.supports) {
     std::cout << "support " << s.name << " kind=" << s.kind

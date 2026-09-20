@@ -33,8 +33,12 @@ Dataset read(const std::string& path);
 
 // Opens a file and reports what section 29 asks for without reading an
 // array: the row count, the keys with their roles and bounds, the
-// supports with their ids, and every slot with its attributes.  Array
-// data is left empty.
+// supports with their ids, and every slot with its attributes and its
+// shape, having read attributes and dataspaces only.  Nothing that is
+// stored in a dataset comes back: array values, category table
+// entries, cell arrays, /row_support and a callable's dictionary are
+// all empty, and `Support::computed_support_id` is meaningless on the
+// result.  Use `read` for a whole file.
 Dataset read_header(const std::string& path);
 
 // Lazy access.  Reads one slot for the half-open row range

@@ -84,7 +84,6 @@ class Attrs {
     return out;
   }
 
-  const std::vector<RawAttr>& all() const { return raw_; }
 
  private:
   std::vector<RawAttr> raw_;
@@ -217,7 +216,7 @@ Dataset read_impl(const std::string& path, bool with_data) {
     const DsetInfo info = f.dataset_info(p);
     CategoryTable t;
     t.name = m.name;
-    t.entries = f.read_strings(p);
+    if (with_data) t.entries = f.read_strings(p);
     t.string_size = info.type.size;
     d.categories.push_back(std::move(t));
   }
@@ -275,7 +274,7 @@ Dataset read_impl(const std::string& path, bool with_data) {
   }
 
   // --- row_support --------------------------------------------------
-  if (f.is_dataset("/row_support")) {
+  if (with_data && f.is_dataset("/row_support")) {
     const DsetInfo info = f.dataset_info("/row_support");
     std::vector<std::int64_t> values = f.read_i64("/row_support");
     std::vector<std::int32_t> narrow;
@@ -300,15 +299,15 @@ Dataset read_impl(const std::string& path, bool with_data) {
     s.support_id = at.text("support_id").value_or(std::string());
     s.extra = at.unknown(internal::known_support_attribute);
 
-    if (f.is_dataset(sp + "/cell_types")) {
+    if (with_data && f.is_dataset(sp + "/cell_types")) {
       for (const std::int64_t v : f.read_i64(sp + "/cell_types")) {
         s.cell_types.push_back(static_cast<std::uint8_t>(v));
       }
     }
-    if (f.is_dataset(sp + "/cell_offsets")) {
+    if (with_data && f.is_dataset(sp + "/cell_offsets")) {
       s.cell_offsets = f.read_i64(sp + "/cell_offsets");
     }
-    if (f.is_dataset(sp + "/cell_connectivity")) {
+    if (with_data && f.is_dataset(sp + "/cell_connectivity")) {
       s.cell_connectivity = f.read_i64(sp + "/cell_connectivity");
     }
     if (f.is_dataset(sp + "/coordinates")) {
@@ -319,13 +318,14 @@ Dataset read_impl(const std::string& path, bool with_data) {
       c.name = "coordinates";
       c.location = Location::Node;
       fill_slot_attributes(cat, &c);
-      // The axis coordinates are part of an axis support's identity,
-      // so they are read even for a header-only open.
-      c.data = read_array_at(f, p, info);
-      if (!with_data && s.kind != "axis") {
-        c.data.f64.clear();
-        c.data.i64.clear();
-        c.data.str.clear();
+      if (with_data) {
+        c.data = read_array_at(f, p, info);
+      } else {
+        c.data.shape.assign(info.shape.begin(), info.shape.end());
+        c.data.dims = dims_of(info);
+        DType dtype = DType::Float64;
+        internal::dtype_of(info.type, &dtype);
+        c.data.dtype = dtype;
       }
       note_chunk(&d, p, info, c.data.dtype, n_rows);
       s.coordinates = std::move(c);
@@ -385,7 +385,9 @@ Dataset read_impl(const std::string& path, bool with_data) {
     c.id = m.name;
     c.type = at.text("type").value_or(std::string());
     c.repr = at.text("repr");
-    c.dict = internal::read_dict_group(f, p, true);
+    // A callable's dictionary holds no field data; it is what a
+    // reader needs to hand to `from_dict`, so it is read either way.
+    if (with_data) c.dict = internal::read_dict_group(f, p, true);
     d.callables.push_back(std::move(c));
   }
 

@@ -270,6 +270,22 @@ void build_from_vectors() {
     check::equal("pressure at row 1, node 3, component 0",
                  pressure.at_f64({1, 3, 0}), 204.0);
   }
+  // Section 29: opening a file must not read any array.
+  const mestra::Dataset header = mestra::read_header(path);
+  check::equal("a header read still states the row count", header.n_rows,
+               std::int64_t(2));
+  check::equal("a header read still states the support id",
+               header.supports.at(0).support_id, s.support_id);
+  check::is_true("a header read reads no key values",
+                 header.keys.at(0).f64.empty());
+  check::is_true("a header read reads no cell arrays",
+                 header.supports.at(0).cell_types.empty());
+  check::is_true("a header read reads no array values",
+                 header.supports.at(0).node_arrays.at(0).data.f64.empty());
+  check::equal("a header read still states the shape",
+               header.supports.at(0).node_arrays.at(0).data.shape.size(),
+               std::size_t(3));
+
   // Lazy access: one slot, one row, nothing else read.
   const mestra::Array one = mestra::read_slot_rows(
       path, "/supports/s0/node_arrays/pressure", 1, 2);
