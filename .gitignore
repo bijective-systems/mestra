@@ -6,3 +6,7 @@ __pycache__/
 *.h5
 !vectors/**/*.mst
 !vectors/**/*.h5
+
+# C++ build trees
+cpp/build/
+build/
