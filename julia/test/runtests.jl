@@ -712,6 +712,75 @@ end
     @test Mestra.validate(good).errors == String[]
 end
 
+@testset "one finding per rule per object, and a report to read" begin
+    # W02, W03 and W04 could each fire on every row; each fires once,
+    # with the count and the first three rows (section 5)
+    r = Mestra.validate(case_file("warn_w02"))
+    w02 = [f for f in r.findings if f.rule == "W02"]
+    @test length(w02) == 1
+    @test occursin("converged", w02[1].message)
+    @test occursin(r"\d+ rows?", w02[1].message)
+    w03 = [f for f in Mestra.validate(case_file("warn_w03")).findings
+           if f.rule == "W03"]
+    @test !isempty(w03)
+    @test all(f -> occursin("missing floating-point data", f.message), w03)
+    @test length(unique((f.rule, f.path) for f in w03)) == length(w03)
+    bounds = Mestra.validate(case_file("warn_w04"))
+    w04 = [f for f in bounds.findings if f.rule == "W04"]
+    @test length(w04) == 1
+    @test occursin("outside the declared bounds", w04[1].message)
+    @test occursin(r"row", w04[1].message)
+    # no rule says the same thing twice about one object, anywhere
+    for name in case_names()
+        rep = Mestra.validate(case_file(name))
+        @test length(unique((f.rule, f.path) for f in rep.findings)) ==
+              length(rep.findings)
+    end
+    # W01 names the unit it leaked, and why that matters
+    leak = Mestra.validate(case_file("warn_w01"))
+    w01 = [f for f in leak.findings if f.rule == "W01"]
+    @test length(w01) == 1
+    @test occursin("generalisation test", w01[1].message)
+
+    # the printed report: `<id> <path>: <message>` and a summary line
+    io = IOBuffer()
+    Mestra.report(Mestra.validate(case_file("warn_w01")); io = io)
+    text = String(take!(io))
+    @test occursin("W01 /keys/split: ", text)
+    @test occursin("0 error(s), 1 warning(s)", split(text, '\n')[end - 1])
+    io = IOBuffer()
+    Mestra.report(case_file("mesh_two_rows"); io = io)
+    @test strip(String(take!(io))) == "0 error(s), 0 warning(s)"
+end
+
+@testset "info prints what the file declares (section 5)" begin
+    io = IOBuffer()
+    Mestra.info(case_file("mesh_two_rows"); io = io)
+    text = String(take!(io))
+    @test occursin("mestra/0, 2 row(s), aligned", text)
+    # every key with its role, units, bounds and category
+    @test occursin("mach", text) && occursin("condition", text)
+    @test occursin("units 1", text) && occursin("bounds [", text)
+    @test occursin("category member", text)
+    # the support with its kind, counts and id
+    @test occursin("mesh", text) && occursin("6 node(s), 2 cell(s)", text)
+    @test occursin("96df395d", text)
+    # every slot with named axes, shape, units and source
+    @test occursin("/supports/s0/node_arrays/pressure", text)
+    @test occursin("(row, node, component) 2x6x1", text)
+    @test occursin("units Pa", text)
+    @test occursin("data", text)
+    # a callable slot names its callable and its output
+    io = IOBuffer()
+    Mestra.info(case_file("affine_zero_rows"); io = io)
+    model = String(take!(io))
+    @test occursin("callable m1 -> ", model)
+    # a file with no support says so rather than claiming alignment
+    io = IOBuffer()
+    Mestra.info(case_file("scalars_only"); io = io)
+    @test occursin("no support", String(take!(io)))
+end
+
 @testset "mistakes name the rule they break" begin
     ds = Mestra.Dataset()
     @test_throws Mestra.MestraError Mestra.add_key!(ds, "x", [1.0];

@@ -34,22 +34,47 @@ end
 
 Base.isvalid(r::ValidationReport) = isempty(r.errors)
 
+n_errors(r::ValidationReport) = count(f -> startswith(f.rule, "E"), r.findings)
+n_warnings(r::ValidationReport) = count(f -> startswith(f.rule, "W"),
+                                        r.findings)
+
+"""The line a run ends on, which is the same line in every language
+(`docs/api-conventions.md` section 5)."""
+summary_line(r::ValidationReport) =
+    "$(n_errors(r)) error(s), $(n_warnings(r)) warning(s)"
+
 function Base.show(io::IO, ::MIME"text/plain", r::ValidationReport)
-    if isempty(r.findings)
-        print(io, "mestra: valid, no warnings")
-        return
-    end
-    println(io, "mestra: ", length(r.errors), " error id(s), ",
-            length(r.warnings), " warning id(s)")
     for f in r.findings
-        println(io, "  ", f.rule, "  ", f.path, ": ", f.message)
+        println(io, f)
     end
+    print(io, summary_line(r))
 end
+
+"""
+    report(r::ValidationReport; io = stdout)
+    report(path; io = stdout)
+
+Print a report to read: one line per finding, `<id> <path>: <message>`,
+and then `<n> error(s), <m> warning(s)`.  That is the output every
+language's command line prints, so two languages' reports on one file
+can be compared line for line.  Gives back the report.
+"""
+function report(r::ValidationReport; io::IO = stdout)
+    for f in r.findings
+        println(io, f)
+    end
+    println(io, summary_line(r))
+    return r
+end
+
+report(path::AbstractString; io::IO = stdout, kwargs...) =
+    report(validate(path; kwargs...); io = io)
 
 mutable struct Validator
     f::HDF5.File
     idx::ScaleIndex
     findings::Vector{Finding}
+    seen::Set{Tuple{String,String}}
     nrows::Int
     supports::Vector{String}
     row_support::Vector{Int}
@@ -63,8 +88,25 @@ mutable struct Validator
     max_elements::Int
 end
 
-report!(v::Validator, rule, path, msg) =
-    push!(v.findings, Finding(rule, String(path), String(msg)))
+"""One finding per rule per object (`docs/api-conventions.md` section
+5): the second time a rule has something to say about an object, the
+first finding already said it."""
+function report!(v::Validator, rule, path, msg)
+    key = (String(rule), String(path))
+    key in v.seen && return v.findings
+    push!(v.seen, key)
+    return push!(v.findings, Finding(key[1], key[2], String(msg)))
+end
+
+"""How a rule that could fire on every row says how many rows it is
+about: the count, and the first three of them.  Row indices count from
+zero, as the file's own do."""
+function rows_tail(rows::Vector{Int}, n::Int = length(rows))
+    n == 0 && return ""
+    n <= 3 && return "; $(n) row" * (n == 1 ? "" : "s") * ": " *
+                     join(rows[1:min(n, end)], ", ")
+    return "; $(n) rows, the first three: " * join(rows[1:3], ", ")
+end
 
 """Run one object's checks, and turn anything thrown into E41 against
 that object rather than into the end of the pass."""
@@ -156,7 +198,8 @@ function validate(path::AbstractString;
                      first(sprint(showerror, e), 200))])
     end
     try
-        v = Validator(f, ScaleIndex(collect_scales(f)), Finding[], 0,
+        v = Validator(f, ScaleIndex(collect_scales(f)), Finding[],
+                      Set{Tuple{String,String}}(), 0,
                       String[], Int[], true, Dict{String,Vector{String}}(),
                       Dict{String,String}(), Dict{String,Any}(),
                       Dict{String,String}(), nothing, false,
@@ -607,9 +650,19 @@ function check_key_bounds!(v::Validator, path, name, a)
     vals === nothing && return v
     nums = Float64[x for x in vals if x isa Real && isfinite(x)]
     isempty(nums) && return v
-    outside = any(x -> x < lo || x > hi, nums)
-    if outside
-        report!(v, "W04", path, "a value lies outside [$(lo), $(hi)]")
+    # W04 could fire on every row, so it fires once, with the count
+    # and the first three rows (`docs/api-conventions.md` section 5).
+    bad = Int[]
+    nbad = 0
+    for (i, x) in pairs(vals)
+        (x isa Real && isfinite(x) && (x < lo || x > hi)) || continue
+        nbad += 1
+        length(bad) < 3 && push!(bad, i - 1)
+    end
+    if nbad > 0
+        report!(v, "W04", path,
+                "a value outside the declared bounds [$(lo), $(hi)]" *
+                rows_tail(bad, nbad))
         return v
     end
     observed = maximum(nums) - minimum(nums)
@@ -669,12 +722,28 @@ function check_split!(v::Validator)
         i <= length(sv) || break
         push!(get!(bag, u, Set{Any}()), sv[i])
     end
-    for (u, s) in bag
-        length(s) > 1 && report!(v, "W01", "/keys/$(splits[1])",
-            "the split places rows of generalisation unit $(u) on both " *
-            "sides")
-    end
+    # One finding for the rule, naming the first unit it leaked and how
+    # many there are, and saying why that matters (section 5).
+    leaked = sort([u for (u, s) in bag if length(s) > 1], by = string)
+    isempty(leaked) && return v
+    report!(v, "W01", "/keys/$(splits[1])",
+            "the rows of $(v.gen_group) $(unit_name(v, leaked[1])) are on " *
+            "both sides of the split, so this is not a generalisation " *
+            "test" * (length(leaked) == 1 ? "" :
+                      "; $(length(leaked)) units leak"))
     return v
+end
+
+"""A generalisation unit as the file names it: the entry of its
+category table where it has one, and the value itself where it has
+none."""
+function unit_name(v::Validator, u)
+    v.gen_group === nothing && return string(u)
+    table = get(v.keycat, v.gen_group, nothing)
+    table === nothing && return string(u)
+    entries = get(v.categories, table, String[])
+    return (u isa Integer && 0 <= u < length(entries)) ?
+           "`" * entries[u + 1] * "`" : string(u)
 end
 
 function check_status!(v::Validator)
@@ -684,14 +753,23 @@ function check_status!(v::Validator)
     table = get(v.keycat, name, nothing)
     table === nothing && return v
     entries = get(v.categories, table, String[])
-    for x in get(v.keyvals, name, [])
+    bad = Int[]
+    nbad = 0
+    first_status = ""
+    for (i, x) in pairs(get(v.keyvals, name, []))
         x isa Integer || continue
         (0 <= x < length(entries)) || continue
         entries[x + 1] == "converged" && continue
-        report!(v, "W02", "/keys/$(name)",
-                "a row has status `$(entries[x + 1])`")
-        break
+        nbad += 1
+        if length(bad) < 3
+            push!(bad, i - 1)
+            isempty(first_status) && (first_status = entries[x + 1])
+        end
     end
+    nbad == 0 && return v
+    report!(v, "W02", "/keys/$(name)",
+            "a status other than converged, the first `$(first_status)`" *
+            rows_tail(bad, nbad))
     return v
 end
 
@@ -731,8 +809,7 @@ function check_scalars!(v::Validator)
             if ti.class === :float && ti.size == 8
                 guard!(v, path) do
                     x = vec(safe_read(obj; max_elements = v.max_elements))
-                    any(y -> !isfinite(y), x) && report!(v, "W03", path,
-                        "a non-finite value")
+                    report_nonfinite!(v, path, x, true)
                 end
             end
         end
@@ -1170,11 +1247,35 @@ function check_array_shape!(v::Validator, spath, d, a, role, loc, sname,
     if (role == "field" || role == "derived") && ti.class === :float &&
        ti.size == 8
         guard!(v, spath) do
-            any(x -> !isfinite(x),
-                safe_read(d; max_elements = v.max_elements)) &&
-                report!(v, "W03", spath, "a non-finite value")
+            report_nonfinite!(v, spath,
+                              safe_read(d; max_elements = v.max_elements),
+                              lead == "row")
         end
     end
+    return v
+end
+
+"""W03 over a whole array, reported once.  The array arrives with its
+axes reversed from the file's, so the file's leading axis is Julia's
+last, and when that axis is `row` the message names the rows."""
+function report_nonfinite!(v::Validator, path, a::AbstractArray,
+                           leads_with_row::Bool)
+    isempty(a) && return v
+    axis = ndims(a)
+    rows = Int[]
+    nrow, nval = 0, 0
+    for r in axes(a, axis)
+        c = count(!isfinite, selectdim(a, axis, r))
+        c == 0 && continue
+        nval += c
+        nrow += 1
+        length(rows) < 3 && push!(rows, r - 1)
+    end
+    nval == 0 && return v
+    report!(v, "W03", path, "a non-finite value, which is how this " *
+            "format spells missing floating-point data" *
+            (leads_with_row ? rows_tail(rows, nrow) :
+             "; $(nval) value" * (nval == 1 ? "" : "s")))
     return v
 end
 
