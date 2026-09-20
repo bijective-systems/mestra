@@ -530,23 +530,58 @@ function support_slots(s::Support)
     return out
 end
 
+"""Write back a group this format does not own -- `/notes`, `/private`
+or a group a later version added -- exactly as it was read.
+
+Sections 12 and 29: a producer's private part is copied and never
+interpreted, so its dtypes, its filters, its chunking and any
+dimension scale of its own come back unchanged, and section 30's
+structural equality holds across a round trip.  The datasets are all
+made first and the scales attached afterwards, because a scale may sit
+in a subgroup of the dataset that uses it or the other way about."""
 function restore_group(parent, g::RawGroupCopy)
+    made = Dict{String,HDF5.Dataset}()
+    pending = Tuple{HDF5.Dataset,String,Int}[]
+    h = restore_into!(parent, g, "", made, pending)
+    for (d, rel, axis) in pending
+        sc = get(made, rel, nothing)
+        sc === nothing && continue
+        attach_scale!(d, sc, axis)
+    end
+    return h
+end
+
+function restore_into!(parent, g::RawGroupCopy, base::String, made, pending)
     h = create_group(parent, g.name)
     for a in g.attrs
         write_raw_attr(h, a)
     end
     for d in g.datasets
-        dt = d.ti.class === :string ? fixed_string_type(d.ti.size) :
-             hdf5_type(julia_eltype(d.ti) === Int8 && !d.ti.signed ?
-                       UInt8 : julia_eltype(d.ti))
-        ds_ = create_raw_dataset(h, d.name, dt, d.cdims, d.cmax, d.raw;
-                                 chunk = d.chunk)
+        rel = isempty(base) ? d.name : base * "/" * d.name
+        ds_ = create_raw_dataset(h, d.name, raw_datatype(d.ti), d.cdims,
+                                 d.cmax, d.raw; chunk = d.chunk,
+                                 deflate = d.deflate, shuffle = d.shuffle,
+                                 attr_order = d.attr_order)
+        made[rel] = ds_
+        if d.scale_name !== nothing
+            # H5DSset_scale writes CLASS and NAME together, and a
+            # scale that carried no NAME is copied back with none
+            # rather than with an empty one.
+            isempty(d.scale_name) ?
+                write_string_attr(ds_, "CLASS", "DIMENSION_SCALE") :
+                HDF5.API.h5ds_set_scale(ds_, d.scale_name)
+        end
+        for (axis, target) in pairs(d.attached)
+            target === nothing && continue
+            push!(pending, (ds_, target, axis - 1))
+        end
         for a in d.attrs
             write_raw_attr(ds_, a)
         end
     end
     for sub in g.groups
-        restore_group(h, sub)
+        restore_into!(h, sub, isempty(base) ? sub.name : base * "/" * sub.name,
+                      made, pending)
     end
     return h
 end

@@ -271,6 +271,52 @@ function uint8_eltype(ti::TypeInfo)
     return julia_eltype(ti)
 end
 
+"""
+    raw_datatype(ti) -> HDF5.Datatype
+
+The on-disk datatype a `TypeInfo` describes, rebuilt exactly: byte
+order, sign, size, character set and padding all as they were.  This
+is how a group this format does not own is copied back out (sections
+12 and 29).  The public tree never needs it, because section 19 names
+one dtype per role; a producer's private part may hold any of them,
+float32 included, and a copy that widened one would not be a copy."""
+function raw_datatype(ti::TypeInfo)
+    if ti.class === :string
+        ti.vlen && throw(MestraError("E41",
+            "a variable-length string is not one this writer can copy"))
+        t = HDF5.API.h5t_copy(HDF5.API.H5T_C_S1)
+        HDF5.API.h5t_set_size(t, max(1, ti.size))
+        HDF5.API.h5t_set_cset(t, ti.cset)
+        HDF5.API.h5t_set_strpad(t, ti.strpad)
+        return HDF5.Datatype(t)
+    elseif ti.class === :int
+        base = ti.size == 1 ? (ti.signed ?
+                               (HDF5.API.H5T_STD_I8LE, HDF5.API.H5T_STD_I8LE) :
+                               (HDF5.API.H5T_STD_U8LE, HDF5.API.H5T_STD_U8LE)) :
+               ti.size == 2 ? (ti.signed ?
+                               (HDF5.API.H5T_STD_I16LE, HDF5.API.H5T_STD_I16BE) :
+                               (HDF5.API.H5T_STD_U16LE, HDF5.API.H5T_STD_U16BE)) :
+               ti.size == 4 ? (ti.signed ?
+                               (HDF5.API.H5T_STD_I32LE, HDF5.API.H5T_STD_I32BE) :
+                               (HDF5.API.H5T_STD_U32LE, HDF5.API.H5T_STD_U32BE)) :
+               ti.size == 8 ? (ti.signed ?
+                               (HDF5.API.H5T_STD_I64LE, HDF5.API.H5T_STD_I64BE) :
+                               (HDF5.API.H5T_STD_U64LE, HDF5.API.H5T_STD_U64BE)) :
+               nothing
+        base === nothing && throw(MestraError("E41",
+            "an integer of $(ti.size) bytes is not one this writer can copy"))
+        return le(ti.little ? base[1] : base[2])
+    elseif ti.class === :float
+        ti.size == 4 && return le(ti.little ? HDF5.API.H5T_IEEE_F32LE :
+                                  HDF5.API.H5T_IEEE_F32BE)
+        ti.size == 8 && return le(ti.little ? HDF5.API.H5T_IEEE_F64LE :
+                                  HDF5.API.H5T_IEEE_F64BE)
+        throw(MestraError("E41",
+            "a float of $(ti.size) bytes is not one this writer can copy"))
+    end
+    throw(MestraError("E41", "a datatype this writer cannot copy"))
+end
+
 # -------------------------------------------------------- attributes
 
 """An attribute exactly as it is stored, so that E19 and E26 can be
@@ -659,13 +705,23 @@ function safe_read(d::HDF5.Dataset;
     end
 end
 
-"""Create a dataset with object times off, as section 30 requires."""
-function make_dcpl(; chunk = nothing, deflate = nothing, shuffle = false)
+"""Create a dataset with object times off, as section 30 requires.
+
+`attr_order` is section 21's rule for a dimension scale and for
+nothing else: attribute creation order tracked and indexed, which is
+what gives the scale a version 2 object header and so lets its
+REFERENCE_LIST live in the file's heap rather than in an object header
+message, where an attribute may not exceed 64 KiB."""
+function make_dcpl(; chunk = nothing, deflate = nothing, shuffle = false,
+                   attr_order::Bool = false)
     dcpl = HDF5.DatasetCreateProperties()
     # Section 30: object time tracking off, so that two runs of a
     # writer produce the same bytes.  HDF5.jl initialises the property
     # list on the first set, so this must come before the raw calls.
     dcpl.obj_track_times = false
+    if attr_order
+        HDF5.API.h5p_set_attr_creation_order(dcpl, SCALE_ATTR_ORDER)
+    end
     if chunk !== nothing
         # The raw API is C order throughout, which is the order every
         # shape in the specification is written in.
@@ -695,9 +751,10 @@ function create_raw_dataset(parent, name::AbstractString,
                             dt::HDF5.Datatype, cdims::Vector{Int},
                             cmax::Vector{Int}, raw::Vector{UInt8};
                             chunk = nothing, deflate = nothing,
-                            shuffle = false)
+                            shuffle = false, attr_order::Bool = false)
     dcpl = make_dcpl(chunk = chunk === nothing ? nothing : Vector{Int}(chunk),
-                     deflate = deflate, shuffle = shuffle)
+                     deflate = deflate, shuffle = shuffle,
+                     attr_order = attr_order)
     sp = make_space(cdims, cmax)
     d = HDF5.create_dataset(parent, String(name), dt, sp; dcpl = dcpl)
     if prod(cdims) > 0 && !isempty(raw)
@@ -716,6 +773,36 @@ function create_group(parent, name::AbstractString)
 end
 
 # ---------------------------------------------------- dimension scales
+
+"""The creation-order flags section 21 requires on the dataset
+creation property list of every dimension scale, and E42 checks for.
+It is what netCDF-C sets on every object it creates."""
+const SCALE_ATTR_ORDER = HDF5.API.H5P_CRT_ORDER_TRACKED |
+                         HDF5.API.H5P_CRT_ORDER_INDEXED
+
+"""
+    scale_attr_order(d) -> Union{Nothing,UInt32}
+
+The attribute creation-order flags `d` was created with, or `nothing`
+when the library would not say.  This is the one property list this
+format requires to be other than the default (sections 21 and 23),
+and it is what E42 is decided from.
+"""
+function scale_attr_order(d::HDF5.Dataset)
+    try
+        dcpl = HDF5.get_create_properties(d)
+        return UInt32(HDF5.API.h5p_get_attr_creation_order(dcpl))
+    catch
+        return nothing
+    end
+end
+
+"""True when `d` was created with attribute creation order tracked and
+indexed, which is what section 21 requires of a dimension scale and
+what E42 reports the absence of."""
+scale_order_tracked(d::HDF5.Dataset) =
+    (f = scale_attr_order(d); f !== nothing && (f & SCALE_ATTR_ORDER) ==
+                                               SCALE_ATTR_ORDER)
 
 """Create a dimension scale exactly as netCDF-C writes one (21)."""
 function create_scale(parent, name::AbstractString, length_::Integer;
@@ -785,18 +872,21 @@ function axis_refs(dl, axis::Integer)
     return dl[i]
 end
 
-"""Every dimension scale in the file, as (link name, dataset, object
-reference), nearest group first so that a support-local `row` is found
-before the file one.  The reference is what a dataset's DIMENSION_LIST
-holds, so it is the key a scale is found by."""
+"""Every dimension scale in the file, as (link name, path, dataset,
+object reference), nearest group first so that a support-local `row`
+is found before the file one.  The reference is what a dataset's
+DIMENSION_LIST holds, so it is the key a scale is found by; the path
+is this walk's own and is never asked of the library, which would
+search the group hierarchy for it and run off the stack on a deep
+file (section 21)."""
 function collect_scales(f::HDF5.File)
-    out = Tuple{String,HDF5.Dataset,Union{Nothing,HDF5.Reference}}[]
+    out = Tuple{String,String,HDF5.Dataset,Union{Nothing,HDF5.Reference}}[]
     # An explicit stack, not the call stack: a file chooses how deep
     # its groups go and thirty thousand levels would overflow one.
-    stack = Tuple{Any,Int}[(f, 0)]
+    stack = Tuple{Any,String,Int}[(f, "", 0)]
     visited = 0
     while !isempty(stack)
-        g, depth = pop!(stack)
+        g, base, depth = pop!(stack)
         depth >= MAX_DEPTH && continue
         for (name, kind) in child_links(g)
             kind === :hard || continue
@@ -804,6 +894,7 @@ function collect_scales(f::HDF5.File)
             visited > MAX_OBJECTS && return out
             obj = hard_child(g, name)
             obj === nothing && continue
+            path = base * "/" * String(name)
             if obj isa HDF5.Dataset
                 ok = try
                     haskey(HDF5.attributes(obj), "CLASS") && is_scale(obj)
@@ -816,10 +907,10 @@ function collect_scales(f::HDF5.File)
                     catch
                         nothing
                     end
-                    push!(out, (String(name), obj, ref))
+                    push!(out, (String(name), path, obj, ref))
                 end
             elseif obj isa HDF5.Group
-                push!(stack, (obj, depth + 1))
+                push!(stack, (obj, path, depth + 1))
             end
         end
     end
