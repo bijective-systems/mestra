@@ -451,6 +451,35 @@ def first_difference(got, want):
     return "(no difference)"
 
 
+# ------------------------------------------------------------- cost
+
+# One case is large enough for a cost to be a number rather than
+# noise: `wide_keys`, whose 4200 row-dimensioned datasets all attach
+# to the one `row` scale, and which could not be written at all before
+# section 21 fixed how a scale is created.  The three costs section 29
+# is about are printed beside the counts, each the library call alone,
+# so that a change which makes an open or a validation cost the square
+# of the dataset count is seen where the corpus is run rather than in
+# a study a year later.  They are reported and never asserted on: the
+# machine running this decides the seconds.
+COST_CASE = "wide_keys"
+COST_SLOT = "/scalars/s2100"
+
+
+def cost_line(tool, directory):
+    mes = os.path.join(directory, COST_CASE, "case.mes")
+    if not os.path.exists(mes):
+        return "%s: not generated (vectors/generate.py --wide)" % COST_CASE
+    seconds = {}
+    for line in tool.run("cost", mes, COST_SLOT).splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            seconds[parts[0]] = parts[1]
+    return ("%s   open %s s   validate %s s   one lazy slot read %s s"
+            % (COST_CASE, seconds.get("open", "?"),
+               seconds.get("validate", "?"), seconds.get("rows", "?")))
+
+
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cli", required=True,
@@ -502,6 +531,10 @@ def main(argv):
     if totals["roundtrip_skipped"]:
         print("                       %d skipped: h5py is not importable"
               % totals["roundtrip_skipped"])
+    try:
+        print("cost                   " + cost_line(tool, directory))
+    except Exception as error:                         # noqa: BLE001
+        problems.append("cost of %s: %s" % (COST_CASE, error))
     if problems:
         print("\n%d problems:" % len(problems))
         for problem in problems:
