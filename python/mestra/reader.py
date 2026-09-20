@@ -19,6 +19,7 @@ from inside the library. What it could not copy is named in
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import h5py
@@ -183,7 +184,12 @@ def _read(f: h5py.File, lazy: bool) -> Dataset:
     found = root.get("row_support")
     if found is not None and isinstance(found.obj, h5py.Dataset):
         ds._row_support = _source(f, "/row_support", found.obj, lazy)
-    _read_supports(f, ds, root, lazy)
+    # One scale index for the whole open, built from the handle this
+    # reader holds. Section 21 asks for a map from each scale's
+    # address to its link name, built during the reader's own
+    # bounded walk; building one per dataset instead is what made an
+    # open cost the square of the number of datasets.
+    _read_supports(f, ds, root, lazy, h5safe.scale_index(f))
     _read_callables(f, ds, root)
     notes = root.get("notes")
     if notes is not None and isinstance(notes.obj, h5py.Group):
@@ -292,8 +298,8 @@ def _storage(dset: h5py.Dataset) -> Storage:
                    shuffle=shuffle, contiguous=chunks is None)
 
 
-def _dims(dset: h5py.Dataset, fallback: tuple[str, ...]
-          ) -> tuple[str, ...]:
+def _dims(dset: h5py.Dataset, fallback: tuple[str, ...],
+          scales: Mapping[int, str]) -> tuple[str, ...]:
     """The logical dimension names, taken from the scales.
 
     A reader takes a dimension's name from the scale's link name and
@@ -301,7 +307,7 @@ def _dims(dset: h5py.Dataset, fallback: tuple[str, ...]
     no scale or more than one, which is a broken file (E25), the
     names the slot's own attributes imply are used instead.
     """
-    names = h5safe.scale_names(dset)
+    names = h5safe.scale_names(dset, scales)
     if not names or any(len(axis) != 1 for axis in names):
         return fallback
     return tuple(logical_dimension(axis[0]) for axis in names)
@@ -423,7 +429,8 @@ def _read_scalars(f: h5py.File, ds: Dataset,
 
 
 def _read_supports(f: h5py.File, ds: Dataset,
-                   root: dict[str, h5safe.Member], lazy: bool) -> None:
+                   root: dict[str, h5safe.Member], lazy: bool,
+                   scales: Mapping[int, str]) -> None:
     group = _group_of(ds, root, "supports")
     if group is None:
         return
@@ -439,11 +446,12 @@ def _read_supports(f: h5py.File, ds: Dataset,
                                 "dataset")
             continue
         ds.supports[member.name] = _read_support(
-            f, ds, member.name, member.obj, lazy)
+            f, ds, member.name, member.obj, lazy, scales)
 
 
 def _read_support(f: h5py.File, ds: Dataset, name: str,
-                  group: h5py.Group, lazy: bool) -> Support:
+                  group: h5py.Group, lazy: bool,
+                  scales: Mapping[int, str]) -> Support:
     attrs = h5safe.attr_names(group)
     n_nodes = read_attr(group, "n_nodes") if "n_nodes" in attrs else 0
     n_cells = read_attr(group, "n_cells") if "n_cells" in attrs else 0
@@ -474,7 +482,7 @@ def _read_support(f: h5py.File, ds: Dataset, name: str,
         if found.usable:
             support.coordinates = _read_array(
                 f, support, "coordinates", found.obj,
-                base + "/coordinates", "node", lazy)
+                base + "/coordinates", "node", lazy, scales)
         else:
             _problem(ds, base + "/coordinates",
                      found.problem or "unreadable",
@@ -500,7 +508,7 @@ def _read_support(f: h5py.File, ds: Dataset, name: str,
                 continue
             into[member.name] = _read_array(
                 f, support, member.name, member.obj, where, location,
-                lazy)
+                lazy, scales)
     for member in h5safe.members(group):
         if member.name in _SUPPORT_MEMBERS:
             continue
@@ -517,7 +525,8 @@ def _read_support(f: h5py.File, ds: Dataset, name: str,
 
 
 def _read_array(f: h5py.File, support: Support, name: str, member: Any,
-                path: str, location: str, lazy: bool) -> ArraySlot:
+                path: str, location: str, lazy: bool,
+                scales: Mapping[int, str]) -> ArraySlot:
     got = _slot_attrs(member)
     components = got.get("components", 1)
     slot = ArraySlot(
@@ -534,7 +543,7 @@ def _read_array(f: h5py.File, support: Support, name: str, member: Any,
     if isinstance(member, h5py.Dataset):
         slot.data = _source(f, path, member, lazy)
         slot.storage = _storage(member)
-        slot.dims = _dims(member, slot.dims)
+        slot.dims = _dims(member, slot.dims, scales)
     return slot
 
 

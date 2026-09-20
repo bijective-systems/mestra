@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -292,7 +293,7 @@ def is_scale(dset: Any) -> bool:
 UNNAMED = "?"
 
 
-def scale_index(f: Any) -> dict[int, str]:
+def scale_index(f: h5py.File) -> dict[int, str]:
     """Every dimension scale in a file, by its address.
 
     A scale reached through a dataset's DIMENSION_LIST is an object
@@ -304,7 +305,17 @@ def scale_index(f: Any) -> dict[int, str]:
     a reference is matched to one by its address, which is a header
     read and not a search.
 
-    The index is built once per open file and kept on it.
+    Building it walks the whole file, so one pass builds one index
+    and hands it to `scale_names` for every dataset it looks at; a
+    pass that built one per dataset would cost the square of the
+    number of datasets, which is what section 29's requirement on
+    the cost of an open is about.
+
+    The index is cached on the `h5py.File` this is given, which is
+    why it must be given the handle the caller opened and holds.
+    `dataset.file` is not that handle: it builds a fresh wrapper
+    around the same file every time it is read, and a cache kept on
+    one of those is thrown away with it.
     """
     cached = getattr(f, "_mestra_scale_index", None)
     if cached is not None:
@@ -341,8 +352,14 @@ def _address(obj: Any) -> int | None:
         return None
 
 
-def scale_names(dset: h5py.Dataset) -> list[tuple[str, ...]]:
+def scale_names(dset: h5py.Dataset,
+                index: Mapping[int, str]) -> list[tuple[str, ...]]:
     """The link name of every scale attached to each axis.
+
+    `index` is the pass's scale index, from `scale_index` on the
+    file handle the caller holds. It is a parameter and not
+    something this call looks up, because looking it up per dataset
+    is what made an open quadratic.
 
     An axis may carry none or several; both are E25 and neither is
     an error here. The name is the scale's link name and never its
@@ -353,7 +370,6 @@ def scale_names(dset: h5py.Dataset) -> list[tuple[str, ...]]:
     out: list[tuple[str, ...]] = []
     try:
         dims = dset.dims
-        index = scale_index(dset.file)
     except Exception:                                   # pragma: no cover
         return out
     for dim in dims:

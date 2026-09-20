@@ -12,7 +12,7 @@ W09 were retired on 2026-09-20 and this validator never emits them.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -178,6 +178,7 @@ class _FileValidator:
     def __init__(self, f: h5py.File) -> None:
         self.f = f
         self.report = Report()
+        self._scales: dict[int, str] | None = None
         self.visited = 0
         self.limit = limits.MAX_CHECK_ELEMENTS
         self.too_large: list[str] = []
@@ -188,6 +189,20 @@ class _FileValidator:
         self.categories: dict[str, list[str]] = {}
         self.keys: dict[str, h5py.Dataset] = {}
         self.group_keys: list[str] = []
+
+    @property
+    def scales(self) -> dict[int, str]:
+        """Section 21's map from a scale's address to its link name.
+
+        Built once, on first use, from the handle this pass holds,
+        and handed to every `scale_names` call the pass makes.
+        Building one per dataset instead is what made an open cost
+        the square of the number of row-dimensioned datasets, which
+        is the cost section 29 puts a requirement on.
+        """
+        if self._scales is None:
+            self._scales = h5safe.scale_index(self.f)
+        return self._scales
 
     # -- collecting findings
 
@@ -916,7 +931,7 @@ class _FileValidator:
         if not isinstance(member, h5py.Dataset):
             return role
         self._array_dtype(member, where, role)
-        dims = _logical(member)
+        dims = _logical(member, self.scales)
         wanted = 1 + (1 if varies != "none" else 0) \
             + (1 if _attr(member, "statistic") == "draw" else 0) + 1
         if member.ndim != wanted:
@@ -1274,7 +1289,8 @@ class _FileValidator:
                 self.error("E27", path, "row is an unlimited dimension "
                                         "in every file")
             return
-        for axis, names in enumerate(h5safe.scale_names(dset)):
+        for axis, names in enumerate(
+                h5safe.scale_names(dset, self.scales)):
             if len(names) != 1:
                 self.error("E25", path, "axis %d carries %d dimension "
                                         "scales, and every axis "
@@ -1282,7 +1298,7 @@ class _FileValidator:
                            % (axis, len(names)))
         self._scale_names(dset, path)
         self._filters(dset, path)
-        dims = _logical(dset)
+        dims = _logical(dset, self.scales)
         if dims[:1] == ("row",):
             if dset.chunks is None:
                 self.error("E27", path, "a row-dimensioned dataset is "
@@ -1325,7 +1341,7 @@ class _FileValidator:
         if wanted is None:
             return
         got = [names[0] if len(names) == 1 else None
-               for names in h5safe.scale_names(dset)]
+               for names in h5safe.scale_names(dset, self.scales)]
         for axis, (have, allowed) in enumerate(zip(got, wanted)):
             if have is None or allowed is None:
                 continue
@@ -1337,7 +1353,7 @@ class _FileValidator:
 
     def _chunk(self, dset: h5py.Dataset, path: str) -> None:
         """W12: a chunk shape that is not the default of section 23."""
-        rows = _row_length(dset)
+        rows = _row_length(dset, self.scales)
         default = (default_chunk_rows(dset.dtype.itemsize,
                                       dset.shape[1:], rows),) \
             + tuple(dset.shape[1:])
@@ -1453,7 +1469,7 @@ class _FileValidator:
         bad = ~np.isfinite(values)
         if not bad.any():
             return
-        leading = _logical(dset)
+        leading = _logical(dset, self.scales)
         said = w03(values, leading[0] if leading else "index")
         if said:
             self.warn("W03", where, said)
@@ -1586,24 +1602,25 @@ def _strings(dset: h5py.Dataset) -> list[str]:
             if isinstance(v, bytes) else str(v) for v in dset[()]]
 
 
-def _logical(dset: h5py.Dataset) -> tuple[str, ...]:
+def _logical(dset: h5py.Dataset,
+             scales: Mapping[int, str]) -> tuple[str, ...]:
     """The logical dimension names of a dataset, from its scales."""
     from .names import logical_dimension
     out = []
-    for names in h5safe.scale_names(dset):
+    for names in h5safe.scale_names(dset, scales):
         out.append(logical_dimension(names[0]) if len(names) == 1
                    else "")
     return tuple(out)
 
 
-def _row_length(dset: h5py.Dataset) -> int:
+def _row_length(dset: h5py.Dataset, scales: Mapping[int, str]) -> int:
     """The length of the row dimension a dataset is written over.
 
     In an unaligned file a support-local `row` shadows the file's
     one (section 21), and the chunk default follows the dimension
     the dataset actually uses.
     """
-    names = h5safe.scale_names(dset)
+    names = h5safe.scale_names(dset, scales)
     if names and len(names[0]) == 1:
         scale = dset.dims[0][0]
         return int(scale.shape[0])
