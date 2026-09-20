@@ -10,7 +10,17 @@ would.
     python3 run_corpus.py --cli ../build/mestra-cli --vectors ../../vectors
 
 It needs h5py only for the read-write comparison of section 30, which
-it skips with a note when h5py is not importable.
+it skips with a note when h5py is not importable.  That comparison is
+structural and never byte-for-byte: section 30 says byte identity with
+the corpus files must not be tested, because the HDF5 library decides
+the superblock, the object header layout and where the global heap
+objects the dimension-scale machinery uses are allocated.
+
+The driver also prints what the largest case costs -- a metadata open,
+a validation and one lazy slot read of `wide_keys`, each the library
+call alone.  Nothing asserts on the seconds; the line is there so that
+an open or a validation which became the square of the dataset count
+would show.
 """
 
 import argparse

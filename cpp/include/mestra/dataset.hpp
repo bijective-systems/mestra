@@ -148,6 +148,18 @@ struct Support {
   // The digest of section 24, computed from the arrays above rather
   // than read from `support_id`.
   std::string computed_support_id() const;
+
+  // One array by name, or nullptr when the support carries none of
+  // that name at that location; the same lookup `Dataset::key`,
+  // `scalar` and `support` give, because a slot is met by name
+  // everywhere else in this library and a caller should not have to
+  // search a vector for it.  Adding an array keeps the vector sorted
+  // and so invalidates the pointer: fetch again by name rather than
+  // hold one across an `add_`.
+  const ArraySlot* node_array(const std::string& wanted) const;
+  const ArraySlot* cell_array(const std::string& wanted) const;
+  ArraySlot* node_array(const std::string& wanted);
+  ArraySlot* cell_array(const std::string& wanted);
 };
 
 // A category table under /categories.  `string_size` is the declared

@@ -1,5 +1,45 @@
 // Reading and writing `.mes` files, and the lazy access SPEC.md
 // section 29 requires of a reader.
+//
+// A file is untrusted input.  A reader of an open format opens files
+// it did not write, and a file is a program's input and not its
+// instructions, so this one is written to answer a crafted file rather
+// than crash on it, and every limit is a stated number and not
+// whatever the stack happened to allow.  What it refuses, and says so:
+//
+//   - an attribute whose dataspace declares more elements than the
+//     encoding of section 18 implies.  Every buffer is sized from the
+//     count the file declares, never from the encoding, and a count
+//     past a stated maximum is left unread and reported;
+//   - a dictionary, a group tree or a dump nested deeper than
+//     `kMaxDictDepth` (64).  A stack overflow cannot be caught, so the
+//     limit is enforced before the descent, and a dictionary accounts
+//     its own nesting as values go in (value.hpp), which makes a
+//     deeper one impossible to hold rather than merely unsafe to walk;
+//   - an element count or a byte length whose product overflows, or
+//     passes the stated maximum of 2^31 elements for an eager read.  A
+//     dataset that declares a trillion elements and stores none is
+//     refused before anything is allocated.  `read_slot_rows` and the
+//     other lazy paths are not subject to that maximum, because they
+//     never materialise the whole dataset, so the same file can be
+//     readable one way and E41 the other (section 29);
+//   - a link in the public tree that is not a hard link: a soft link,
+//     whether it resolves, dangles or loops, and an external link,
+//     which is never opened, because following one would let a file
+//     name another file on the machine and have this reader open it.
+//     The link's own type is read before anything is opened, so
+//     nothing under a link of either kind is ever asked about.  That
+//     is E40;
+//   - a member of a container group that is neither the kind that
+//     belongs there, a nesting past the cap, a malformed object, or an
+//     eager read above the maximum element count.  Each is E41,
+//     reported with its path while the pass goes on, so that one
+//     broken object does not hide the rest of the file.
+//
+// `/private` is copied whole and so is held whole: one nested deeper
+// than 64, holding more than 65,536 objects or more than one gibibyte
+// is E41 rather than a silent truncation or an allocation without
+// bound.
 #ifndef MESTRA_IO_HPP
 #define MESTRA_IO_HPP
 

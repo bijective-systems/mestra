@@ -1,7 +1,17 @@
-// Pure C++ checks: the SHA-256 known vectors and the worked digests of
-// SPEC.md section 24, the units parser W10 is driven by, the
-// dictionary codec's value types, and the affine callable's worked
-// example.
+// Pure C++ checks: the SHA-256 known vectors and the three worked
+// digests of SPEC.md section 24, the units parser W10 is driven by,
+// the dictionary codec's value types, the affine callable's worked
+// example of section 27, one dataset built from plain vectors and
+// validated, and the conventions of docs/api-conventions.md one rule
+// at a time -- the argument order, the bounds default, `dims` deriving
+// `varies` and `components`, the permutation into stored order, the
+// refusals a builder makes and the identifiers they carry, `write`
+// refusing a slot whose `varies` was assigned after the fact, the cell
+// measures against shapes whose measure is known by hand, the lumped
+// node weights adding up to the area, the default weight rule, the
+// statistics of a field with a missing value in it, and a zero-row
+// callable file written, validated and evaluated, whose evaluated form
+// keeps no callable and no `/callables` group.
 #include <cmath>
 #include <cstdio>
 #include <fstream>

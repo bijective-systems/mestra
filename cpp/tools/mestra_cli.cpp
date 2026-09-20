@@ -27,9 +27,18 @@ int usage() {
       "                                   --ids prints the identifiers alone,\n"
       "                                   --metadata decides from what a\n"
       "                                   metadata open reads and no slot\n"
-      "  info FILE                        what the file holds\n"
-      "  integrate FILE SLOT [WEIGHT]     one slot integrated over its support\n"
-      "  stats FILE SLOT [BY]             one slot summarised, grouped by a label\n"
+      "  info FILE                        what the file holds, in the fields\n"
+      "                                   docs/api-conventions.md section 5\n"
+      "                                   lists; it checks the file first and\n"
+      "                                   past that reads attributes and\n"
+      "                                   dataspaces only, so it opens a large\n"
+      "                                   file as fast as a small one\n"
+      "  integrate FILE SLOT [WEIGHT]     one slot integrated over its support;\n"
+      "                                   it says which weight array it used and\n"
+      "                                   whether it had to compute one\n"
+      "  stats FILE SLOT [BY]             one slot summarised, grouped by a\n"
+      "                                   label; the grouping column is headed\n"
+      "                                   with the label's own name\n"
       "  probe FILE SLOT ROW NODE COMPONENT [DRAW]\n"
       "                                   one stored value\n"
       "  support-id FILE SUPPORT          the digest of section 24\n"
@@ -48,7 +57,13 @@ int usage() {
       "instance, draw, node, cell, cell_plus_one, component or index.\n"
       "A float64 slot\n"
       "prints its value in the C format \"%.17e\" and an integer slot\n"
-      "in plain decimal, which is what section 30 asks a probe for.\n";
+      "in plain decimal, which is what section 30 asks a probe for.\n"
+      "\n"
+      "A command exits 1 when the file is rejected and 0 otherwise, so a\n"
+      "warning alone still exits 0.  A fault that no rule of section 14\n"
+      "covers carries no identifier and is printed as \"! <path>: <why>\",\n"
+      "so a file is never reported clean because the thing wrong with it\n"
+      "has no name.\n";
   return 2;
 }
 

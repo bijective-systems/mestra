@@ -2,6 +2,18 @@
 // identifier and nothing else identifies it: the identifiers are
 // stable within a major version, a rule is never renumbered, and a
 // retired identifier (E07, W09) is never emitted.
+//
+// There is one finding per rule per object, and a rule that could fire
+// once per row -- W02, W03, W04 -- reports once with the count and the
+// first three row indices in its message (conventions section 5).
+//
+// The pass reports rather than fails.  One object it cannot read is
+// recorded against its path and the rest of the file is still checked,
+// because a validator that stops at the first fault tells a caller
+// almost nothing; and a fault that no rule of section 14 covers is
+// still reported, so that a file is never called clean because the
+// thing wrong with it has no identifier.  `mestra-cli validate` prints
+// such a fault as `! <path>: <why>`.
 #ifndef MESTRA_VALIDATE_HPP
 #define MESTRA_VALIDATE_HPP
 

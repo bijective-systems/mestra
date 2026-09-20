@@ -214,9 +214,24 @@ class Dict {
 };
 
 // The dictionary written out as one line per leaf, for tests and for
-// `mestra-cli dict-dump`.  The form is documented in cpp/README.md;
-// it exists so that the conformance driver can compare a dictionary
-// without any JSON code in C++.
+// `mestra-cli dict-dump`.  It exists so that the conformance driver
+// can compare a dictionary without any JSON code in C++.  The first
+// field is the kind, the second the path from `.`, and the rest the
+// value:
+//
+//     D .                      a nested dictionary
+//     N ./x                    null
+//     B ./x 1                  a boolean
+//     I ./x 42                 an int64
+//     F ./x 2.50000000000000000e+00      a float64
+//     S ./x hello              a string
+//     A ./x float64 2 6 2 ...  an array: dtype, rank, extents, elements
+//     T ./x 1 2 mach alpha     a string array: rank, extents, elements
+//
+// Anything outside printable ASCII, and `%` itself, is written `%XX`;
+// a lone `%` is the empty string.  Keys come out in ascending order of
+// their UTF-8 bytes, which is the order section 25 tells a writer to
+// visit them in.
 std::string dump_dict(const Dict& d);
 
 }  // namespace mestra
