@@ -227,3 +227,21 @@ def test_a_lazy_open_leaves_a_dictionary_until_it_is_asked_for(
             lambda: dataset.callables[held[0]].to_dict(), monkeypatch)
         assert any(p.startswith("/callables/%s/" % held[0])
                    for p in read)
+
+
+def test_an_unread_callable_is_never_handed_out_as_a_placeholder():
+    """An id whose dictionary has not been read is held under its
+    own name, so that listing the ids costs nothing. Every way of
+    getting the values out must read them first."""
+    path = corpus.case_path("callable_two_slots")
+    for take in (dict, lambda c: c.copy(), lambda c: {**c},
+                 lambda c: dict(c.items()),
+                 lambda c: dict(zip(sorted(c), c.values()))):
+        with mestra.read(path) as dataset:
+            held = take(dataset.callables)
+            assert held, take
+            for name, obj in held.items():
+                assert obj is not None, (take, name)
+                assert hasattr(obj, "to_dict"), (take, name)
+    with mestra.read(path) as dataset:
+        assert "None" not in repr(dataset.callables)

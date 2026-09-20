@@ -987,6 +987,27 @@ class Callables(dict):
         self.read_all()
         return dict.items(self)
 
+    def copy(self) -> dict[str, Any]:
+        self.read_all()
+        return dict(dict.items(self))
+
+    def __repr__(self) -> str:
+        self.read_all()
+        return dict.__repr__(self)
+
+    # An unread callable is held as None under its id, so that the
+    # ids cost nothing to list. Defining these two in Python is what
+    # keeps that private: it makes `dict(callables)` and
+    # `{**callables}` go through `keys()` and `__getitem__` instead
+    # of copying the underlying dictionary, which would hand out the
+    # placeholders.
+
+    def __iter__(self) -> Any:
+        return dict.__iter__(self)
+
+    def keys(self) -> Any:
+        return dict.keys(self)
+
     def read_all(self) -> None:
         """Read every dictionary still in the file. An eager read
         calls this while the file is open."""
