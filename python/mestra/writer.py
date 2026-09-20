@@ -61,6 +61,13 @@ def write(dataset: Dataset, path: str, check: bool = True) -> None:
     not copy is refused rather than written short: rewriting it
     would drop them silently.
     """
+    # A lazy read leaves a callable's dictionary in the file until
+    # something asks for it (section 7 of the conventions), and
+    # writing asks. It happens before the check below, because what
+    # could not be read is what that check is about.
+    read_all = getattr(dataset.callables, "read_all", None)
+    if read_all is not None:
+        read_all()
     if dataset.lossy:
         raise MestraError(
             "E41", "this dataset was read from a file with parts "

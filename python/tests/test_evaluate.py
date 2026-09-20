@@ -97,3 +97,40 @@ def test_the_keys_keep_their_roles_and_bounds():
     assert out.keys["mach"].role == "condition"
     assert (out.keys["mach"].lower, out.keys["mach"].upper) == (0.1, 0.9)
     assert out.keys["alpha"].units == "degree"
+
+
+@pytest.mark.parametrize("name", ["affine_zero_rows",
+                                  "affine_with_rows",
+                                  "callable_two_slots"])
+def test_an_evaluated_file_has_no_callables_group_at_all(tmp_path, name):
+    """Section 7 of docs/api-conventions.md.
+
+    "Evaluating a file turns every callable slot into a stored slot,
+    so the result has no callable to keep: the `/callables` group is
+    absent from an evaluated file, not present and empty."
+
+    Finding 7 of the Phase 3 report found three answers to this in
+    four implementations, one of them a group present and empty. The
+    difference is invisible in the values and visible under section
+    30's structural equality, so it is asserted on the file and not
+    on the dataset.
+    """
+    import h5py
+
+    source = corpus.case_path(name)
+    entries = corpus.expected(name)["evaluation"]
+    table = {key: np.array([corpus.as_float(v) for v in values])
+             for key, values in entries[0]["keys"].items()}
+    written = str(tmp_path / "evaluated.mes")
+    with mestra.read(source) as ds:
+        out = mestra.evaluate(ds, table)
+    mestra.write(out, written)
+
+    assert out.callables == {}
+    with h5py.File(source, "r") as f:
+        assert "callables" in f          # the case has one to lose
+    with h5py.File(written, "r") as f:
+        assert "callables" not in f
+    for slot in out.slots().values():
+        assert slot.source == "data", slot.name
+    assert mestra.validate(written).errors == []

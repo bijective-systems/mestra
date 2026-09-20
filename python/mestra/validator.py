@@ -138,16 +138,24 @@ class Report:
         return "\n".join(lines)
 
 
-def scan(f: h5py.File, limit: int | None = None) -> Report:
+def scan(f: h5py.File, limit: int | None = None,
+         tables_only: bool = False) -> Report:
     """Validate an open file, reading no more than `limit` elements
     of any one dataset.
 
-    `read` uses it with a small limit to decide whether it can vouch
-    for what it would return; `validate` uses the ordinary one.
+    With `tables_only`, the pass reads a category table and nothing
+    else, which is what section 7 of docs/api-conventions.md allows
+    a metadata open: "attributes, dataspaces, link types, and
+    dimension-scale structure, and ... a category table in full",
+    and "never a slot's data and never a dataset inside a callable's
+    dictionary". `read` uses it that way to decide whether it can
+    vouch for what it would return; `validate` reads what a rule
+    asks for.
     """
     checker = _FileValidator(f)
     if limit is not None:
         checker.limit = limit
+    checker.tables_only = tables_only
     return checker.run()
 
 
@@ -179,6 +187,12 @@ class _FileValidator:
         self.f = f
         self.report = Report()
         self._scales: dict[int, str] | None = None
+        self._listed: dict[int, list[Any]] = {}
+        #: True for a metadata open: read a category table and
+        #: nothing else (section 7 of docs/api-conventions.md).
+        self.tables_only = False
+        #: Datasets a rule wanted and this pass would not read.
+        self.unread: list[str] = []
         self.visited = 0
         self.limit = limits.MAX_CHECK_ELEMENTS
         self.too_large: list[str] = []
@@ -259,8 +273,17 @@ class _FileValidator:
 
         Everything a rule needs to look inside a dataset comes
         through here, so that a hostile size or a type the library
-        will not convert costs one finding and not the pass.
+        will not convert costs one finding and not the pass, and so
+        that a pass that may not read a dataset has one place to say
+        so.
         """
+        if self.tables_only and not where.startswith("/categories/"):
+            # A metadata open. The rule that wanted these values is
+            # left unchecked, which is not a finding: the nine
+            # structural rules of section 2 of the conventions do not
+            # need them, and everything else waits for the read.
+            self.unread.append(where)
+            return None
         try:
             return np.asarray(h5safe.read_values(dset, where,
                                                  limit=self.limit))
@@ -278,9 +301,22 @@ class _FileValidator:
 
     def members(self, group: h5py.Group, where: str) -> list[Any]:
         """The members of a group, reporting the ones it will not
-        follow."""
+        follow.
+
+        Read once per group and kept for the pass. Several rules ask
+        a group for its members, and opening every member again for
+        each of them is a constant factor on the cost of a file with
+        many of them. A finding is recorded once per rule per object
+        however many times a rule looks, so the report is the same.
+        """
+        at = h5safe.address(group)
+        listed = self._listed.get(at) if at is not None else None
+        if listed is None:
+            listed = h5safe.members(group)
+            if at is not None:
+                self._listed[at] = listed
         out = []
-        for member in h5safe.members(group):
+        for member in listed:
             if member.usable:
                 out.append(member)
             else:
@@ -319,7 +355,7 @@ class _FileValidator:
     # -- what the rest of the checks need
 
     def _collect(self) -> None:
-        self.root = {m.name: m for m in h5safe.members(self.f)}
+        self.root = {m.name: m for m in self.members(self.f, "/")}
         found = self.root.get("row")
         if found is not None and isinstance(found.obj, h5py.Dataset):
             shape = found.obj.shape
@@ -344,14 +380,21 @@ class _FileValidator:
                  if isinstance(m.obj, h5py.Group)),
                 key=lambda n: n.encode("utf-8"))
         found = self.root.get("row_support")
-        if found is not None and isinstance(found.obj, h5py.Dataset):
-            self.row_support = self.values(found.obj, "/row_support")
+        column = (found.obj if found is not None
+                  and isinstance(found.obj, h5py.Dataset) else None)
+        if column is not None:
+            self.row_support = self.values(column, "/row_support")
         for at, name in enumerate(self.support_names):
-            if self.row_support is None:
+            if column is None:
+                # An aligned file: every row is on the one support.
                 self.rows_on[name] = np.arange(self.n_rows)
-            else:
+            elif self.row_support is not None:
                 self.rows_on[name] = np.flatnonzero(
                     self.row_support == at)
+            # Otherwise the file carries the column and this pass did
+            # not read it, which is a metadata open. `rows_on` stays
+            # empty and the row count of a row-varying array comes
+            # from the support's own `row` scale instead.
 
     def _root_group(self, name: str) -> Any:
         """One of the root groups, when it is a group and opened."""
@@ -960,9 +1003,8 @@ class _FileValidator:
                                      "component dimension is %d long"
                        % (int(components), member.shape[-1]))
         if varies == "row":
-            rows = self.rows_on.get(support_name,
-                                    np.arange(self.n_rows))
-            self._rows(member, where, len(rows))
+            self._rows(member, where,
+                       self._rows_of(member, support_name))
         if varies.startswith("group:"):
             key = varies[len("group:"):]
             table = None
@@ -1050,11 +1092,15 @@ class _FileValidator:
         column = self.root.get("row_support")
         if has_column and column is not None and isinstance(
                 column.obj, h5py.Dataset):
-            values = np.asarray(self.row_support)
             if column.obj.dtype != np.dtype("<i4"):
                 self.error("E20", "/row_support", "/row_support is "
                                                   "little-endian int32")
             self._rows(column.obj, "/row_support", self.n_rows)
+        if has_column and self.row_support is not None:
+            # The rules below are about the values in the column. A
+            # pass that did not read them - a metadata open - checks
+            # its dtype and its length above and stops here.
+            values = np.asarray(self.row_support)
             outside = values[(values < 0) | (values >= max(count, 1))]
             if outside.size:
                 self.error("E06", "/row_support", "a row references "
@@ -1212,7 +1258,10 @@ class _FileValidator:
         attr = obj.attrs.get_id(name)
         kind = _ATTR_KIND.get(name)
         htype = attr.get_type()
-        shape = h5safe.attr_shape(obj, name)
+        # From the identifier already in hand: asking h5safe would
+        # open the attribute a second time, once per attribute of
+        # every object in the file.
+        shape = tuple(attr.shape)
         if shape:
             # Section 18 gives every attribute it names a scalar
             # dataspace; an array is an encoding this format does
@@ -1309,16 +1358,20 @@ class _FileValidator:
                 self.error("E27", path, "row is an unlimited dimension "
                                         "in every file")
             return
-        for axis, names in enumerate(
-                h5safe.scale_names(dset, self.scales)):
+        # Once per dataset. Every axis name below comes from this
+        # one call: reading them again for each check meant
+        # dereferencing every attached scale three more times, which
+        # is a constant factor on the cost section 29 bounds.
+        attached = h5safe.scale_names(dset, self.scales)
+        for axis, names in enumerate(attached):
             if len(names) != 1:
                 self.error("E25", path, "axis %d carries %d dimension "
                                         "scales, and every axis "
                                         "carries exactly one"
                            % (axis, len(names)))
-        self._scale_names(dset, path)
+        self._scale_names(dset, path, attached)
         self._filters(dset, path)
-        dims = _logical(dset, self.scales)
+        dims = _logical_of(attached)
         if dims[:1] == ("row",):
             if dset.chunks is None:
                 self.error("E27", path, "a row-dimensioned dataset is "
@@ -1355,13 +1408,14 @@ class _FileValidator:
                                     "the two portable filters"
                        % (code, name or "unnamed", len(values)))
 
-    def _scale_names(self, dset: h5py.Dataset, path: str) -> None:
+    def _scale_names(self, dset: h5py.Dataset, path: str,
+                     attached: list[tuple[str, ...]]) -> None:
         """E25: the name section 21 requires for each axis."""
         wanted = _wanted_dims(path, dset)
         if wanted is None:
             return
         got = [names[0] if len(names) == 1 else None
-               for names in h5safe.scale_names(dset, self.scales)]
+               for names in attached]
         for axis, (have, allowed) in enumerate(zip(got, wanted)):
             if have is None or allowed is None:
                 continue
@@ -1465,6 +1519,25 @@ class _FileValidator:
                                      "this is %s" % (what, dset.dtype))
             return False
         return True
+
+    def _rows_of(self, member: h5py.Dataset, support_name: str) -> int:
+        """The row count a row-varying array on a support must have.
+
+        Section 14, E16: the file's row count, "except for a
+        row-varying array on a support in an unaligned file, where it
+        is the number of rows referencing that support". Section 21
+        puts that same number in the file as the length of the
+        support's own `row` scale, so a pass that did not read
+        `/row_support` -- a metadata open, by section 7 of the
+        conventions -- takes it from there. The two agree in a
+        conforming file; where they do not, only a pass that read the
+        column can say so, and that is `validate`.
+        """
+        rows = self.rows_on.get(support_name)
+        if rows is not None:
+            return len(rows)
+        length = _leading_scale_length(member, self.scales)
+        return self.n_rows if length is None else length
 
     def _rows(self, dset: h5py.Dataset, where: str, rows: int,
               one_dimensional: bool = False) -> None:
@@ -1646,12 +1719,27 @@ def _unknown_group(prefix: str, name: str) -> bool:
 def _logical(dset: h5py.Dataset,
              scales: Mapping[int, str]) -> tuple[str, ...]:
     """The logical dimension names of a dataset, from its scales."""
+    return _logical_of(h5safe.scale_names(dset, scales))
+
+
+def _logical_of(attached: list[tuple[str, ...]]) -> tuple[str, ...]:
+    """The same, from names a caller has already read once."""
     from .names import logical_dimension
-    out = []
-    for names in h5safe.scale_names(dset, scales):
-        out.append(logical_dimension(names[0]) if len(names) == 1
-                   else "")
-    return tuple(out)
+    return tuple(logical_dimension(names[0]) if len(names) == 1 else ""
+                 for names in attached)
+
+
+def _leading_scale_length(dset: h5py.Dataset,
+                          scales: Mapping[int, str]) -> int | None:
+    """The length of the dimension the leading axis is attached to,
+    or None when the axis does not carry exactly one scale."""
+    names = h5safe.scale_names(dset, scales)
+    if not names or len(names[0]) != 1:
+        return None
+    try:
+        return int(dset.dims[0][0].shape[0])
+    except Exception:                                   # pragma: no cover
+        return None
 
 
 def _row_length(dset: h5py.Dataset, scales: Mapping[int, str]) -> int:

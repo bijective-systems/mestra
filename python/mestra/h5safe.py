@@ -52,6 +52,7 @@ __all__ = [
     "filters_of",
     "scale_names",
     "scale_index",
+    "address",
     "is_scale",
     "open_file",
     "decode_bytes",
@@ -336,16 +337,20 @@ def scale_index(f: h5py.File) -> dict[int, str]:
                 continue
             if not is_scale(member.obj):
                 continue
-            address = _address(member.obj)
-            if address is not None and address not in index:
-                index[address] = member.name
+            at = address(member.obj)
+            if at is not None and at not in index:
+                index[at] = member.name
     with contextlib.suppress(Exception):
         f._mestra_scale_index = index
     return index
 
 
-def _address(obj: Any) -> int | None:
-    """An object's address in the file, or None."""
+def address(obj: Any) -> int | None:
+    """An object's address in the file, or None.
+
+    A header read, and never a search of the hierarchy for a path to
+    the object, which is the trap section 21 describes.
+    """
     try:
         return int(h5py.h5o.get_info(obj.id).addr)
     except Exception:                                   # pragma: no cover
@@ -376,9 +381,9 @@ def scale_names(dset: h5py.Dataset,
         axis: list[str] = []
         try:
             for at in range(len(dim)):
-                address = _address(dim[at])
-                axis.append(index.get(address, UNNAMED)
-                            if address is not None else UNNAMED)
+                where = address(dim[at])
+                axis.append(index.get(where, UNNAMED)
+                            if where is not None else UNNAMED)
         except Exception:
             axis.append(UNNAMED)
         out.append(tuple(axis))

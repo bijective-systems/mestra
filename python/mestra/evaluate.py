@@ -22,6 +22,10 @@ at all: the result is a plain data file with the same keys, the same
 supports and the same slot attributes, and every slot's `source` is
 `data`.
 
+Section 7 of docs/api-conventions.md settled it for the four
+implementations in the same words: "the `/callables` group is absent
+from an evaluated file, not present and empty".
+
 Section 13's rule that "a writer reproducing a file it read keeps
 whichever of the two it found" is about a round trip and not about
 this: evaluation does not reproduce the file it read, it produces a

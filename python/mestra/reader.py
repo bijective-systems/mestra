@@ -121,6 +121,9 @@ def read(path: str, lazy: bool = True, strict: bool = True) -> Dataset:
     if lazy:
         dataset._file = handle
     else:
+        # An eager read reads everything, the callables' dictionaries
+        # with it, and it must do so before the file is closed.
+        dataset.callables.read_all()
         handle.close()
     return dataset
 
@@ -128,11 +131,19 @@ def read(path: str, lazy: bool = True, strict: bool = True) -> Dataset:
 def _refuse(handle: h5py.File, path: str) -> None:
     """Refuse a file this reader cannot vouch for (section 29).
 
-    The pass reads no more than `limits.MAX_OPEN_ELEMENTS` of any
-    one dataset, so opening a file costs a check and not a read.
+    Section 7 of docs/api-conventions.md fixes what this pass may
+    look at: "attributes, dataspaces, link types, and dimension-scale
+    structure, and ... a category table in full", and "never a slot's
+    data and never a dataset inside a callable's dictionary". The
+    nine rules of `REFUSED` are decided from exactly that, which is
+    why an open and a read name the same rule for the same file, and
+    why opening a file costs a check and not a read. The element cap
+    stands beside it for the tables, which are small by construction
+    but are still somebody else's number.
     """
     from .validator import scan
-    report = scan(handle, limit=limits.MAX_OPEN_ELEMENTS)
+    report = scan(handle, limit=limits.MAX_OPEN_ELEMENTS,
+                  tables_only=True)
     bad = [f for f in report.errors if f.rule in REFUSED]
     if bad:
         handle.close()
@@ -583,20 +594,34 @@ def _read_callables(f: h5py.File, ds: Dataset,
         attrs = h5safe.attr_names(member.obj)
         kind = read_attr(member.obj, "type") if "type" in attrs else ""
         line = read_attr(member.obj, "repr") if "repr" in attrs else None
+        # The id, the type and the repr line are a link name and two
+        # attributes, so an open has them. The dictionary is datasets
+        # and section 7 of docs/api-conventions.md says an open never
+        # reads one, so it waits until something asks for the
+        # callable.
+        ds.callables.defer(member.name, _build_callable(
+            ds, where, member.obj,
+            kind if isinstance(kind, str) else "",
+            line if isinstance(line, str) else None))
+
+
+def _build_callable(ds: Dataset, where: str, group: h5py.Group,
+                    kind: str, line: str | None) -> Any:
+    """What `Dataset.callables` runs the first time it is asked for
+    this callable: decode the dictionary and hand it to its type."""
+    def build() -> Any:
         trouble: list[Finding] = []
-        body = decode_dict(member.obj, problems=trouble)
+        body = decode_dict(group, problems=trouble)
         if trouble:
             ds.problems.extend(trouble)
             ds.lossy.append(where)
         try:
-            ds.callables[member.name] = callable_from_dict(
-                kind if isinstance(kind, str) else "", body,
-                line if isinstance(line, str) else None)
+            return callable_from_dict(kind, body, line)
         except MestraError as exc:
             _problem(ds, where, "this callable's dictionary does not "
                                 "fit its type: %s" % exc.message)
-            ds.callables[member.name] = callable_from_dict("", body,
-                                                           None)
+            return callable_from_dict("", body, None)
+    return build
 
 
 def _read_unknown_groups(ds: Dataset,
