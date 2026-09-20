@@ -25,6 +25,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CORPUS = os.path.join(HERE, "..", "..", "..", "vectors", "cases")
 BASE = os.path.join(CORPUS, "mesh_two_rows", "case.mes")
 
+# Section 21: the NAME attribute of a dimension scale, before the
+# dimension's length in ten columns.
+DIM_NAME = "This is a netCDF dimension but not a netCDF variable."
+
 # Deeper than the limit a reader walks a dictionary to, and no deeper:
 # the file grows by about a kilobyte a level and the point is the
 # limit, not the size.  A file that overflowed the stack of the
@@ -178,9 +182,44 @@ def shape_enormous(out):
     return path
 
 
+def category_above_cap(out):
+    """A category table declaring 2^31 + 5 entries and storing none.
+    Section 29 makes the eager read of it E41; a reader that read it
+    as an empty table would instead say E10 of every category id in
+    the file, which is the downstream consequence and not the fault."""
+    path = os.path.join(out, "category_above_cap.mes")
+    shutil.copy(os.path.join(CORPUS, "derived_displacement", "case.mes"),
+                path)
+    entries = 2 ** 31 + 5
+    with h5py.File(path, "r+") as f:
+        table = f["/categories/member"]
+        kept = {name: (table.attrs[name],
+                       h5py.h5a.open(table.id, name.encode("utf-8")).dtype)
+                for name in table.attrs
+                if name not in ("DIMENSION_LIST", "REFERENCE_LIST")}
+        dtype = table.dtype
+        del f["/categories/member"]
+        del f["/category_member"]
+        scale = f.create_dataset("category_member", shape=(entries,),
+                                 dtype=">f4", chunks=(4096,),
+                                 track_times=False)
+        for name, text in (("CLASS", b"DIMENSION_SCALE"),
+                           ("NAME", (DIM_NAME + "%10d" % entries).encode())):
+            scale.attrs.create(name, text, dtype=h5py.string_dtype(
+                encoding="utf-8", length=len(text)))
+        fresh_table = f.create_dataset("/categories/member",
+                                       shape=(entries,), dtype=dtype,
+                                       chunks=(4096,), track_times=False)
+        for name, (value, kind) in kept.items():
+            fresh_table.attrs.create(name, value, dtype=kind)
+        fresh_table.dims[0].attach_scale(scale)
+    return path
+
+
 CASES = [attr_array_int, attr_array_float, attr_array_named,
          attr_array_vlen, dict_deep, link_soft_dangling, link_external,
-         filter_unknown, member_named_type, shape_enormous]
+         filter_unknown, member_named_type, shape_enormous,
+         category_above_cap]
 
 
 def main(argv):

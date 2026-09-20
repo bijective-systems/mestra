@@ -118,6 +118,19 @@ class PerRow {
   std::vector<std::size_t> first_;
 };
 
+// An Error's message without the identifier it carries.  A finding is
+// printed as "<id> <path>: <message>" (conventions section 5), so the
+// identifier belongs in the first field and not twice.
+std::string without_id(const Error& e) {
+  const std::string text = e.what();
+  const std::string prefix = e.rule() + ": ";
+  if (!e.rule().empty() && text.size() >= prefix.size() &&
+      text.compare(0, prefix.size(), prefix) == 0) {
+    return text.substr(prefix.size());
+  }
+  return text;
+}
+
 // What a slot's axes look like, taken from the dimension scales.
 struct Axes {
   std::vector<std::string> logical;   // one per axis, "" when unknown
@@ -152,7 +165,7 @@ class Validator {
       body();
     } catch (const Error& e) {
       error(e.rule().empty() ? std::string("E41") : e.rule(), path,
-            e.what());
+            without_id(e));
     } catch (const std::exception& e) {
       error("E41", path, e.what());
     }
@@ -195,38 +208,65 @@ class Validator {
   std::vector<std::int64_t> row_support_;
   bool has_row_support_ = false;
   bool has_group_key_ = false;
+  // Objects whose eager read this reader refused because the file
+  // declares more of them than the stated maximum (section 29).  What
+  // such an object holds was never seen, so no later rule is decided
+  // from it.
+  std::set<std::string> unread_;
 
   // The validator reports a fault rather than failing on one, so a
   // read that the library refuses -- a dtype the rule above has
   // already reported, a dataset HDF5 will not convert -- comes back
   // empty and the walk goes on.
-  std::vector<double> reals(const std::string& path) {
+  //
+  // One refusal is not like those.  Section 29: "An eager read refuses
+  // a dataset whose declared element count is above a maximum the
+  // reader states, with E41."  That is a rule about this object and
+  // not about what it holds, so it is reported here against the path
+  // it happened at, and the object is remembered, because everything
+  // downstream of it would otherwise be decided from contents this
+  // reader never saw: a category table above the maximum read as an
+  // empty table puts every category id outside it, which is E10 said
+  // of a file whose fault is E41.
+  template <typename Read>
+  auto refusable(const std::string& path, Read read) -> decltype(read()) {
     try {
-      return f_.read_f64(path);
+      return read();
+    } catch (const Error& e) {
+      // One finding per rule per object, however often the pass asks
+      // this object for its contents.
+      if (e.rule() == "E41" && unread_.insert(path).second) {
+        error("E41", path,
+              "this object declares more than an eager read of this reader "
+              "takes, which is " +
+                  internal::format_i64(static_cast<std::int64_t>(
+                      internal::kMaxDatasetElements)) +
+                  " elements (section 29); nothing of it was read, so no "
+                  "rule below is decided from what it holds. A row-range "
+                  "read of it is not subject to that maximum");
+      }
+      return {};
     } catch (const std::exception&) {
       return {};
     }
+  }
+  // True when the object at `path` is one of those: no rule may be
+  // decided from what it holds.
+  bool unread(const std::string& path) const {
+    return unread_.count(path) != 0;
+  }
+
+  std::vector<double> reals(const std::string& path) {
+    return refusable(path, [&] { return f_.read_f64(path); });
   }
   std::vector<std::int64_t> integers(const std::string& path) {
-    try {
-      return f_.read_i64(path);
-    } catch (const std::exception&) {
-      return {};
-    }
+    return refusable(path, [&] { return f_.read_i64(path); });
   }
   std::vector<std::string> texts(const std::string& path) {
-    try {
-      return f_.read_strings(path);
-    } catch (const std::exception&) {
-      return {};
-    }
+    return refusable(path, [&] { return f_.read_strings(path); });
   }
   std::vector<std::string> raw_texts(const std::string& path) {
-    try {
-      return f_.read_strings_raw(path);
-    } catch (const std::exception&) {
-      return {};
-    }
+    return refusable(path, [&] { return f_.read_strings_raw(path); });
   }
 
   Axes axes_of(const std::string& path, const DsetInfo& info,
@@ -799,6 +839,9 @@ void Validator::keys() {
         error("E39", p,
               "the category table \"" + k.category +
                   "\" is not in the file");
+      } else if (unread("/categories/" + k.category)) {
+        // The table is E41 and its entries were never read, so
+        // nothing here can be said about the ids in this column.
       } else {
         const std::int64_t n = static_cast<std::int64_t>(it->second.size());
         bool outside = false;
@@ -878,7 +921,8 @@ void Validator::keys() {
     }
   }
 
-  if (status_key != nullptr && !status_key->category.empty()) {
+  if (status_key != nullptr && !status_key->category.empty() &&
+      !unread("/categories/" + status_key->category)) {
     const auto it = category_tables_.find(status_key->category);
     if (it != category_tables_.end()) {
       std::int64_t converged = -1;
@@ -1528,7 +1572,8 @@ void Validator::slot(const std::string& path,
     }
     const std::string table = text_of(key_attrs, "category");
     const auto it = category_tables_.find(table);
-    if (it != category_tables_.end() && axes.extent[0] != it->second.size()) {
+    if (it != category_tables_.end() && !unread("/categories/" + table) &&
+        axes.extent[0] != it->second.size()) {
       error("E34", path,
             "the leading dimension differs from the number of categories of "
             "the group key");
@@ -1583,6 +1628,8 @@ void Validator::slot(const std::string& path,
       if (it == category_tables_.end()) {
         error("E39", path,
               "the category table \"" + table + "\" is not in the file");
+      } else if (unread("/categories/" + table)) {
+        // E41 on the table; nothing here is decidable from it.
       } else {
         const std::int64_t n = static_cast<std::int64_t>(it->second.size());
         for (const std::int64_t v : integers(path)) {

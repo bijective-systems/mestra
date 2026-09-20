@@ -482,14 +482,14 @@ std::size_t checked_product(const std::string& path,
   for (const hsize_t raw : shape) {
     const std::size_t e = static_cast<std::size_t>(raw);
     if (e != 0 && n > limit / e) {
-      throw Error("", "\"" + path + "\" declares more elements than this "
-                                     "reader will read");
+      throw Error("E41", "\"" + path + "\" declares more elements than this "
+                                        "reader will read");
     }
     n *= e;
   }
   if (n > limit) {
-    throw Error("", "\"" + path + "\" declares more elements than this "
-                                   "reader will read");
+    throw Error("E41", "\"" + path + "\" declares more elements than this "
+                                      "reader will read");
   }
   return n;
 }
@@ -550,8 +550,8 @@ std::vector<std::string> File::read_strings_raw(
   // Both factors come out of the file, so the product is checked
   // before it sizes the buffer the library then writes into.
   if (item != 0 && count > kMaxDatasetBytes / item) {
-    throw Error("", "\"" + path + "\" declares more bytes than this reader "
-                                   "will read");
+    throw Error("E41", "\"" + path + "\" declares more bytes than this "
+                                     "reader will read");
   }
   std::string buffer(item * count, '\0');
   need(H5Dread(dset.get(), type.get(), H5S_ALL, H5S_ALL, H5P_DEFAULT,
