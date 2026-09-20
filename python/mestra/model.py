@@ -268,7 +268,7 @@ class FileSource(_Source):
         self.reads += 1
         if not self._file:
             raise MestraError(
-                "reader", "the file has been closed; read it with "
+                "E41", "the file has been closed; read it with "
                 "lazy=False to keep the values", self.path)
         values = h5safe.read_values(self._file[self.path], self.path,
                                     rows)

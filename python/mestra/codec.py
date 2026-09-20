@@ -213,7 +213,7 @@ def decode_dict(group: h5py.Group, top_level: bool = True,
     out: dict[str, Any] = {}
     if depth > limits.MAX_DEPTH:
         _trouble(problems, group.name, MestraError(
-            "reader", "this dictionary nests more than %d groups deep, "
+            "E41", "this dictionary nests more than %d groups deep, "
             "which this reader does not follow" % limits.MAX_DEPTH,
             group.name))
         return out
@@ -230,7 +230,7 @@ def decode_dict(group: h5py.Group, top_level: bool = True,
         path = "%s/%s" % (group.name.rstrip("/"), name)
         if not member.usable:
             _trouble(problems, path, MestraError(
-                "reader", member.problem or "this member cannot be "
+                member.rule, member.problem or "this member cannot be "
                                             "read", path))
             continue
         if isinstance(member.obj, h5py.Group):

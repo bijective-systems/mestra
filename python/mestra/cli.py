@@ -60,11 +60,10 @@ def _validate(paths: Sequence[str], quiet: bool) -> int:
         if not quiet:
             for finding in report.findings:
                 print("  %s" % finding)
-        if report.errors or report.unclassified:
+        if report.errors:
             status = 1
-            print("%s: %d error(s), %d warning(s), %d unclassified: %s"
+            print("%s: %d error(s), %d warning(s): %s"
                   % (path, len(report.errors), len(report.warnings),
-                     len(report.unclassified),
                      " ".join(report.error_ids + report.warning_ids)))
         elif report.warnings:
             print("%s: valid, %d warning(s): %s"

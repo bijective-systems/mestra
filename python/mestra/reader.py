@@ -23,7 +23,7 @@ from typing import Any
 
 import h5py
 
-from . import h5safe, opaque
+from . import h5safe, limits, opaque
 from .callables import callable_from_dict
 from .codec import decode_dict
 from .encoding import (
@@ -46,7 +46,15 @@ from .model import (
 )
 from .names import logical_dimension
 
-__all__ = ["read", "support_ids"]
+__all__ = ["read", "support_ids", "REFUSED"]
+
+#: The rules under which this reader cannot vouch for what it would
+#: return, so `read` refuses a file that breaks one of them rather
+#: than hand back values it does not trust. Everything else - a role
+#: it does not know, missing units, a cardinality - is the file
+#: describing itself badly, and the values still mean what they say.
+REFUSED = ("E01", "E16", "E19", "E25", "E26", "E29", "E30", "E40",
+           "E41")
 
 _ROOT_ATTRS = ("format", "writer", "created", "aligned",
                "generalisation_group")
@@ -63,7 +71,7 @@ _SUPPORT_MEMBERS = ("node", "cell", "cell_plus_one", "index", "row",
                     "coordinates", "node_arrays", "cell_arrays")
 
 
-def read(path: str, lazy: bool = True) -> Dataset:
+def read(path: str, lazy: bool = True, strict: bool = True) -> Dataset:
     """Open a mestra file and return the dataset it holds.
 
     With `lazy` true, which is the default, no array is read until
@@ -71,11 +79,16 @@ def read(path: str, lazy: bool = True) -> Dataset:
     `dataset.close()` or use the dataset as a context manager.
 
     Refusals are `MestraError` naming the rule: E01 for a file that
-    is not mestra/0 or not HDF5 at all, and `reader` for one this
-    reader will not take on, such as an eager read past the element
-    limit.
+    is not mestra/0 or not HDF5 at all, E40 for a link this reader
+    does not follow, E41 for an object it could not read or an eager
+    read past the element limit, and the other rules of `REFUSED`
+    for a file whose storage it cannot vouch for. Pass
+    `strict=False` to take whatever could be read anyway, with the
+    findings on `dataset.problems`.
     """
     handle = h5safe.open_file(str(path))
+    if strict:
+        _refuse(handle, str(path))
     try:
         dataset = _read(handle, lazy)
     except MestraError:
@@ -84,7 +97,7 @@ def read(path: str, lazy: bool = True) -> Dataset:
     except Exception as exc:
         handle.close()
         raise MestraError(
-            "reader", "this file could not be read: %s"
+            "E41", "this file could not be read: %s"
             % h5safe._brief(exc), str(path)) from None
     dataset.path = str(path)
     if lazy:
@@ -92,6 +105,25 @@ def read(path: str, lazy: bool = True) -> Dataset:
     else:
         handle.close()
     return dataset
+
+
+def _refuse(handle: h5py.File, path: str) -> None:
+    """Refuse a file this reader cannot vouch for (section 29).
+
+    The pass reads no more than `limits.MAX_OPEN_ELEMENTS` of any
+    one dataset, so opening a file costs a check and not a read.
+    """
+    from .validator import scan
+    report = scan(handle, limit=limits.MAX_OPEN_ELEMENTS)
+    bad = [f for f in report.errors if f.rule in REFUSED]
+    if bad:
+        handle.close()
+        raise MestraError(
+            bad[0].rule, "%s. This file breaks %s, so this reader "
+            "cannot vouch for what it would return; read it with "
+            "strict=False to take what there is"
+            % (bad[0].message, ", ".join(sorted({f.rule for f in bad}))),
+            bad[0].where or path)
 
 
 def support_ids(path: str) -> dict[str, str]:
@@ -170,8 +202,8 @@ def _by_name(group: h5py.Group) -> dict[str, h5safe.Member]:
 
 
 def _problem(ds: Dataset, where: str, message: str,
-             lossy: bool = False) -> None:
-    ds.problems.append(Finding("reader", where, message))
+             lossy: bool = False, rule: str = "E41") -> None:
+    ds.problems.append(Finding(rule, where, message))
     if lossy:
         ds.lossy.append(where)
 
@@ -208,7 +240,8 @@ def _read_root(f: h5py.File, ds: Dataset,
     for name, member in root.items():
         if not member.usable and member.problem:
             _problem(ds, "/" + name, member.problem,
-                     lossy=member.kind == h5safe.EXTERNAL)
+                     lossy=member.kind == h5safe.EXTERNAL,
+                     rule=member.rule)
 
 
 def _major(text: Any) -> int | None:
@@ -304,7 +337,8 @@ def _read_categories(f: h5py.File, ds: Dataset,
         where = "/categories/" + member.name
         if not member.usable:
             _problem(ds, where, member.problem or "unreadable",
-                     lossy=member.kind == h5safe.EXTERNAL)
+                     lossy=member.kind == h5safe.EXTERNAL,
+                     rule=member.rule)
             continue
         if not isinstance(member.obj, h5py.Dataset):
             _problem(ds, where, "a category table is a dataset, and "
@@ -330,7 +364,8 @@ def _read_keys(f: h5py.File, ds: Dataset,
         where = "/keys/" + member.name
         if not member.usable:
             _problem(ds, where, member.problem or "unreadable",
-                     lossy=member.kind == h5safe.EXTERNAL)
+                     lossy=member.kind == h5safe.EXTERNAL,
+                     rule=member.rule)
             continue
         dset = member.obj
         if not isinstance(dset, h5py.Dataset):
@@ -372,7 +407,8 @@ def _read_scalars(f: h5py.File, ds: Dataset,
         where = "/scalars/" + member.name
         if not member.usable:
             _problem(ds, where, member.problem or "unreadable",
-                     lossy=member.kind == h5safe.EXTERNAL)
+                     lossy=member.kind == h5safe.EXTERNAL,
+                     rule=member.rule)
             continue
         got = _slot_attrs(member.obj)
         slot = ScalarSlot(
@@ -395,7 +431,8 @@ def _read_supports(f: h5py.File, ds: Dataset,
         where = "/supports/" + member.name
         if not member.usable:
             _problem(ds, where, member.problem or "unreadable",
-                     lossy=member.kind == h5safe.EXTERNAL)
+                     lossy=member.kind == h5safe.EXTERNAL,
+                     rule=member.rule)
             continue
         if not isinstance(member.obj, h5py.Group):
             _problem(ds, where, "a support is a group, and this is a "
@@ -427,7 +464,8 @@ def _read_support(f: h5py.File, ds: Dataset, name: str,
             continue
         if not found.usable or not isinstance(found.obj, h5py.Dataset):
             _problem(ds, "%s/%s" % (base, which),
-                     found.problem or "this is not a dataset")
+                     found.problem or "this is not a dataset",
+                     rule=found.rule)
             continue
         support._cells[which] = _source(f, base + "/" + which, found.obj,
                                         lazy)
@@ -440,7 +478,8 @@ def _read_support(f: h5py.File, ds: Dataset, name: str,
         else:
             _problem(ds, base + "/coordinates",
                      found.problem or "unreadable",
-                     lossy=found.kind == h5safe.EXTERNAL)
+                     lossy=found.kind == h5safe.EXTERNAL,
+                     rule=found.rule)
     for which, location, into in (
             ("node_arrays", "node", support.node_arrays),
             ("cell_arrays", "cell", support.cell_arrays)):
@@ -449,7 +488,8 @@ def _read_support(f: h5py.File, ds: Dataset, name: str,
             continue
         if not holder.usable or not isinstance(holder.obj, h5py.Group):
             _problem(ds, "%s/%s" % (base, which),
-                     holder.problem or "this is not a group")
+                     holder.problem or "this is not a group",
+                     rule=holder.rule)
             continue
         support.present.add(which)
         for member in h5safe.members(holder.obj):
@@ -467,7 +507,8 @@ def _read_support(f: h5py.File, ds: Dataset, name: str,
         where = "%s/%s" % (base, member.name)
         if not member.usable:
             _problem(ds, where, member.problem or "unreadable",
-                     lossy=member.kind == h5safe.EXTERNAL)
+                     lossy=member.kind == h5safe.EXTERNAL,
+                     rule=member.rule)
             continue
         if isinstance(member.obj, h5py.Group):
             support.opaque[member.name] = opaque.capture(
@@ -506,7 +547,8 @@ def _read_callables(f: h5py.File, ds: Dataset,
         where = "/callables/" + member.name
         if not member.usable:
             _problem(ds, where, member.problem or "unreadable",
-                     lossy=member.kind == h5safe.EXTERNAL)
+                     lossy=member.kind == h5safe.EXTERNAL,
+                     rule=member.rule)
             continue
         if not isinstance(member.obj, h5py.Group):
             _problem(ds, where, "a callable is a group, and this is a "

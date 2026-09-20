@@ -31,6 +31,10 @@ MAKER = os.path.join(HOSTILE, "make_hostile.py")
 #: Every call must finish in this long, for any file.
 TIMEOUT = 60
 
+#: The identifiers a refusal may name (sections 14 and 29).
+RULES = ("E01", "E16", "E19", "E25", "E26", "E29", "E30", "E40",
+         "E41")
+
 #: What the driver runs against one file.
 DRIVER = r"""
 import json, sys
@@ -102,7 +106,11 @@ def test_every_entry_point_survives(name):
                            "validate"]
     for label, answer in got.items():
         if answer[0] == "MestraError":
-            assert answer[1] in ("E01", "reader"), (name, label, answer)
+            assert answer[1] in RULES, (name, label, answer)
+    # Opening one of these must refuse rather than hand back
+    # something this reader cannot vouch for (section 30).
+    assert got["read"][0] == "MestraError", name
+    assert got["read_eager"][0] == "MestraError", name
 
 
 @pytest.mark.parametrize("name", CASES)
@@ -119,8 +127,14 @@ def validate(name):
     return mestra.validate(os.path.join(HOSTILE, name))
 
 
-def read(name, lazy=True):
-    return mestra.read(os.path.join(HOSTILE, name), lazy=lazy)
+def read(name, lazy=True, strict=False):
+    """Open one anyway, to look at what came back.
+
+    `strict=False` because `read` refuses these files by default;
+    that refusal is what test_every_entry_point_survives checks.
+    """
+    return mestra.read(os.path.join(HOSTILE, name), lazy=lazy,
+                       strict=strict)
 
 
 @pytest.mark.parametrize("name", CASES)
@@ -161,13 +175,13 @@ def test_deep_groups_stop_at_the_limit():
         assert ds.lossy, "a group too deep to copy is not rewritable"
         with pytest.raises(mestra.MestraError) as caught:
             mestra.write(ds, os.devnull)
-        assert caught.value.rule == "reader"
+        assert caught.value.rule == "E41"
 
 
 def test_a_group_that_is_its_own_ancestor():
     report = validate("cyclic_groups.mes")
-    assert report.unclassified
-    assert all(f.rule == "reader" for f in report.unclassified)
+    assert "E40" in report.error_ids
+    assert all(f.rule in ("E40", "E41") for f in report.unclassified)
     with read("cyclic_groups.mes") as ds:
         assert any("soft link" in f.message for f in ds.problems)
 
@@ -198,20 +212,20 @@ def test_members_of_the_wrong_kind():
 
 def test_an_enormous_declared_shape():
     """Lazy reading does not touch it; eager reading refuses."""
-    with read("enormous_shape.mes") as ds:
+    with read("enormous_shape.mes", strict=False) as ds:
         slot = ds.supports["s0"].node_arrays["enormous"]
         assert slot.data.shape == (1000000, 1000000)
         assert slot.data.reads == 0
         with pytest.raises(mestra.MestraError) as caught:
             slot.read()
-        assert caught.value.rule == "reader"
+        assert caught.value.rule == "E41"
         assert str(limits.MAX_READ_ELEMENTS) in str(caught.value)
         # A row range of it is a normal read.
         part = slot.read(slice(0, 1))
         assert part.shape == (1, 1000000)
     with pytest.raises(mestra.MestraError) as caught:
-        read("enormous_shape.mes", lazy=False)
-    assert caught.value.rule == "reader"
+        read("enormous_shape.mes", lazy=False, strict=False)
+    assert caught.value.rule == "E41"
 
 
 def test_strings_that_are_not_utf8():
@@ -278,7 +292,7 @@ def test_thirty_thousand_levels(tmp_path):
     assert os.path.exists(path)
     got = drive(path, timeout=300)
     assert got["validate"][0] == "report"
-    assert got["read"][0] == "problems"
+    assert got["read"] == ["MestraError", "E41"]
     report = mestra.validate(path)
     assert any("nests more than" in f.message
                for f in report.unclassified)

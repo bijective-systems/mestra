@@ -28,7 +28,7 @@ from .encoding import (
     string_length,
     support_digest,
 )
-from .errors import Finding, MestraError
+from .errors import Finding, MestraError, TooLarge
 from .model import ARRAY_ROLES, KEY_ROLES, STATISTICS, Dataset
 from .names import MACHINERY, RESERVED_PREFIX, is_legal_name
 from .units import is_parseable
@@ -88,24 +88,27 @@ _FILTER_SHUFFLE = 2
 class Report:
     """What the validator found, by rule identifier.
 
-    `errors` and `warnings` carry the rules of section 14.
-    `unclassified` carries what this reader met and the
-    specification has no identifier for: a link it will not follow,
-    a member of the wrong kind, an object the library itself will
-    not read, a limit reached. Each of those has the rule `reader`
-    and names the path it is about. A file with one is not accepted,
-    because something in it could not be checked.
+    `errors` and `warnings` carry the rules of section 14. A link
+    this reader will not follow is E40 and an object it could not
+    read is E41; both are errors like any other, and `unclassified`
+    is the pair of them, for a caller that wants to tell what the
+    file says from what the reader could not do with it.
     """
 
     errors: list[Finding] = field(default_factory=list)
     warnings: list[Finding] = field(default_factory=list)
-    unclassified: list[Finding] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        """True when the file is accepted: nothing was rejected and
-        nothing went unchecked."""
-        return not self.errors and not self.unclassified
+        """True when the file is accepted: no error."""
+        return not self.errors
+
+    @property
+    def unclassified(self) -> list[Finding]:
+        """The findings about the reader rather than the format:
+        E40, a link it does not follow, and E41, an object it could
+        not read (section 14)."""
+        return [f for f in self.errors if f.rule in ("E40", "E41")]
 
     @property
     def error_ids(self) -> list[str]:
@@ -119,14 +122,27 @@ class Report:
 
     @property
     def findings(self) -> list[Finding]:
-        """Everything found, errors first and the unclassified last."""
-        return self.errors + self.warnings + self.unclassified
+        """Everything found, errors first."""
+        return self.errors + self.warnings
 
     def __str__(self) -> str:
         lines = [str(f) for f in self.findings]
         if not lines:
             return "no error and no warning"
         return "\n".join(lines)
+
+
+def scan(f: h5py.File, limit: int | None = None) -> Report:
+    """Validate an open file, reading no more than `limit` elements
+    of any one dataset.
+
+    `read` uses it with a small limit to decide whether it can vouch
+    for what it would return; `validate` uses the ordinary one.
+    """
+    checker = _FileValidator(f)
+    if limit is not None:
+        checker.limit = limit
+    return checker.run()
 
 
 def validate(target: Any) -> Report:
@@ -157,6 +173,8 @@ class _FileValidator:
         self.f = f
         self.report = Report()
         self.visited = 0
+        self.limit = limits.MAX_CHECK_ELEMENTS
+        self.too_large: list[str] = []
         self.n_rows = 0
         self.support_names: list[str] = []
         self.rows_on: dict[str, np.ndarray] = {}
@@ -173,10 +191,10 @@ class _FileValidator:
     def warn(self, rule: str, where: str, message: str) -> None:
         self.report.warnings.append(Finding(rule, where, message))
 
-    def note(self, where: str, message: str) -> None:
-        """Something the specification has no identifier for."""
-        self.report.unclassified.append(Finding("reader", where,
-                                                message))
+    def note(self, where: str, message: str, rule: str = "E41") -> None:
+        """An object this reader could not read (E41), or a link it
+        will not follow (E40)."""
+        self.error(rule, where, message)
 
     def guarded(self, where: str, step: Any, *args: Any) -> Any:
         """Run one step, and keep going when it fails.
@@ -188,7 +206,8 @@ class _FileValidator:
         try:
             return step(*args)
         except MestraError as exc:
-            self.note(exc.where or where, exc.message)
+            self.note(exc.where or where, exc.message,
+                      exc.rule if exc.rule in ("E40", "E41") else "E41")
         except RecursionError:
             self.note(where, "this object nests deeper than this "
                              "reader will follow")
@@ -222,7 +241,13 @@ class _FileValidator:
         will not convert costs one finding and not the pass.
         """
         try:
-            return np.asarray(h5safe.read_values(dset, where))
+            return np.asarray(h5safe.read_values(dset, where,
+                                                 limit=self.limit))
+        except TooLarge:
+            # Section 14 reserves the size case for an eager read, so
+            # the rules that need these values go unchecked rather
+            # than this becoming E41.
+            self.too_large.append(where)
         except MestraError as exc:
             self.note(where, exc.message)
         except Exception as exc:
@@ -240,7 +265,7 @@ class _FileValidator:
             else:
                 self.note("%s/%s" % (where.rstrip("/"), member.name),
                           member.problem or "this member cannot be "
-                                            "read")
+                                            "read", member.rule)
         return out
 
     def child(self, group: h5py.Group, where: str,
@@ -456,7 +481,7 @@ class _FileValidator:
                 self.error("E39", where, "the time key names its "
                                          "trajectory_group")
             self._key_dtype(dset, where, role)
-            self._rows(dset, where, self.n_rows)
+            self._rows(dset, where, self.n_rows, one_dimensional=True)
             self._categories_of(dset, where, role)
             self._bounds(dset, where, role)
         self._cardinality(roles)
@@ -642,7 +667,8 @@ class _FileValidator:
             self._statistic(member, where)
             if isinstance(member, h5py.Dataset):
                 self._float64(member, where, "a scalar")
-                self._rows(member, where, self.n_rows)
+                self._rows(member, where, self.n_rows,
+                           one_dimensional=True)
                 self._finite(member, where)
             elif "components" in attrs:
                 self.warn("W11", where, "components is not used on a "
@@ -916,6 +942,10 @@ class _FileValidator:
             if key in self.keys:
                 table = self.categories.get(
                     _attr(self.keys[key], "category") or "")
+            else:
+                self.error("E04", where, "varies names the group key "
+                                         "%r, which the file does not "
+                                         "declare" % key)
             if table is not None and member.ndim and \
                     member.shape[0] != len(table):
                 self.error("E34", where, "the group key %s has %d "
@@ -1219,6 +1249,14 @@ class _FileValidator:
 
     def _dataset(self, dset: h5py.Dataset, path: str) -> None:
         if h5safe.is_scale(dset):
+            # Section 21: a scale carries CLASS and NAME, and NAME is
+            # the sentence with the dimension's length. Half a scale
+            # is not one, and a reader that took the name from NAME
+            # would have nothing to take.
+            if "NAME" not in dset.attrs:
+                self.error("E25", path, "this dimension scale carries "
+                                        "CLASS and no NAME, which is "
+                                        "half of what makes a scale")
             if (path.rsplit("/", 1)[-1] == "row"
                     and dset.maxshape and dset.maxshape[0] is not None):
                 self.error("E27", path, "row is an unlimited dimension "
@@ -1380,8 +1418,14 @@ class _FileValidator:
             return False
         return True
 
-    def _rows(self, dset: h5py.Dataset, where: str, rows: int) -> None:
+    def _rows(self, dset: h5py.Dataset, where: str, rows: int,
+              one_dimensional: bool = False) -> None:
         """E16: the leading dimension against the row count."""
+        if one_dimensional and dset.ndim != 1:
+            self.error("E16", where, "a dataset under /keys or "
+                                     "/scalars has exactly one "
+                                     "dimension, and this has %d"
+                       % dset.ndim)
         if dset.ndim and dset.shape[0] != rows:
             self.error("E16", where, "this holds %d rows where the "
                                      "file has %d"
