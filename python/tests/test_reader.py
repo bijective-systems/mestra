@@ -145,3 +145,30 @@ def test_to_xarray():
                                              "component_2")
     assert converted["mach"].attrs["role"] == "condition"
     assert converted.attrs["format"] == "mestra/0"
+
+
+def test_what_a_reader_must_not_judge(tmp_path):
+    """Sections 12, 28 and 29: opaque means opaque.
+
+    A producer may keep its own records under /private in whatever
+    representation it chooses, and a version may add a group this
+    reader does not know. Neither is validated, both survive a
+    rewrite, and the unknown group is reported.
+    """
+    import shutil
+    path = str(tmp_path / "opaque.mes")
+    shutil.copy(corpus.case_path("mesh_two_rows"), path)
+    with h5py.File(path, "a") as f:
+        private = f.create_group("private")
+        private.attrs.create("note", "anything at all")
+        private.create_dataset("fitted_state",
+                               data=np.zeros((3, 3), dtype="float32"))
+        f.create_group("extras").create_dataset(
+            "whatever", data=np.arange(4, dtype="uint16"))
+    report = mestra.validate(path)
+    assert report.error_ids == []
+    assert report.warning_ids == ["W11"]
+    again = str(tmp_path / "again.mes")
+    with mestra.read(path) as ds:
+        mestra.write(ds, again)
+    assert corpus.structural_diff(path, again) == []

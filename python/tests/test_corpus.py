@@ -21,6 +21,7 @@ VALID = corpus.valid_case_names()
 def test_the_corpus_is_where_it_should_be():
     assert len(CASES) == 69
     assert len(VALID) == 30
+    assert len(WITH_CODEC) == 5
 
 
 @pytest.mark.parametrize("name", CASES)
@@ -68,12 +69,18 @@ def test_probes(name):
                 assert str(int(got)) == probe["value"], probe
 
 
-@pytest.mark.parametrize("name", VALID)
+WITH_CODEC = [n for n in CASES if corpus.expected(n)["codec"]]
+
+
+@pytest.mark.parametrize("name", WITH_CODEC)
 def test_codec_round_trip(name):
-    """Sections 17 and 25: the dictionary, out and back."""
+    """Sections 17 and 25: the dictionary, out and back.
+
+    Two files that break a rule elsewhere still state a round trip,
+    so this runs on every case that has one and not only on the
+    valid ones.
+    """
     want = corpus.expected(name)["codec"]
-    if not want:
-        return
     with mestra.read(corpus.case_path(name)) as ds:
         for identifier, tagged in want.items():
             got = corpus.tagged(ds.callables[identifier].to_dict())

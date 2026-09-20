@@ -887,13 +887,27 @@ class _FileValidator:
     # -- the byte-level sweep
 
     def _bytes(self) -> None:
-        """E19, E25, E26, E27, E29, E33 and W12 over every object."""
+        """E19, E25, E26, E27, E29, E33 and W12 over every object.
+
+        /private is left alone, because section 12 lets a producer
+        keep its own records there in whatever representation it
+        chooses and section 29 forbids a reader to interpret them.
+        A group this version does not know is left alone too:
+        section 28 says to ignore it and report it, which is the W11
+        the root check already made.
+        """
         self._object(self.f, "/")
         stack = [(self.f, "")]
         while stack:
             group, prefix = stack.pop()
             for name, member in group.items():
                 path = "%s/%s" % (prefix, name)
+                if not prefix and name not in _ROOT_GROUPS \
+                        and name != "row_support" \
+                        and isinstance(member, h5py.Group):
+                    continue
+                if path == "/private":
+                    continue
                 self._object(member, path)
                 if isinstance(member, h5py.Group):
                     stack.append((member, path))
