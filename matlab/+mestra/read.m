@@ -1,4 +1,4 @@
-function d = read(path)
+function d = read(path, varargin)
 %MESTRA.READ  Read a mestra file into a mestra.Dataset.
 %
 %   D = MESTRA.READ(PATH) reads everything: the keys with their roles
@@ -29,9 +29,18 @@ function d = read(path)
 %       p = mestra.permute(a.values, a.dims, {'row', 'node', 'component'});
 %       p(2, 4, 1)                      % 204
 %
-%   A file whose `format` names another major version is refused
-%   outright, with the identifier mestra:E01; it is never read
-%   partially.  An attribute or a group this version does not know is
+%   UNTRUSTED INPUT.  A file this package did not write is not
+%   trusted.  A link that is not a hard link is never followed, an
+%   object that cannot be read is never guessed at, nesting is
+%   bounded, and an eager read refuses a dataset above
+%   mestra.limits('maxElements').  By default such a file is REFUSED
+%   rather than half read: the identifier is mestra:E40 for a link,
+%   mestra:E41 for anything else, mestra:E01 for another major
+%   version, and mestra:reader for a file that will not open at all.
+%
+%   D = MESTRA.READ(PATH, 'Strict', false) returns what could be read
+%   instead, with one line in D.skipped for everything passed over.
+%   An attribute or a group this version does not know is always
 %   ignored, kept, and reported by MESTRA.VALIDATE as W11.
 %
 %   MESTRA.OPEN reads the same file without reading any array, which
@@ -41,5 +50,6 @@ function d = read(path)
 %   See also mestra.open, mestra.write, mestra.validate,
 %   mestra.evaluate, mestra.permute, mestra.Dataset.
 
-    d = mestra.internal.Reader.load(path, true);
+    strict = mestra.internal.Reader.strictOption(varargin);
+    d = mestra.internal.Reader.load(path, true, strict);
 end

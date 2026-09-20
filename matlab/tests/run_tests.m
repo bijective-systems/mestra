@@ -22,7 +22,8 @@ import matlab.unittest.plugins.TestRunProgressPlugin
 
 suite = [TestSuite.fromClass(?CorpusTest), ...
          TestSuite.fromClass(?PackageTest), ...
-         TestSuite.fromClass(?HostileTest)];
+         TestSuite.fromClass(?HostileTest), ...
+         TestSuite.fromClass(?HostileSubsetTest)];
 
 runner = TestRunner.withNoPlugins();
 runner.addPlugin(TestRunProgressPlugin.withVerbosity(1));
@@ -43,7 +44,8 @@ fprintf('support ids         : %d\n', counts.supportIds);
 fprintf('codec round trips   : %d\n', counts.dictionaries);
 fprintf('evaluation probes   : %d\n', counts.evaluationProbes);
 fprintf('read-write-compare  : %d\n', counts.valid);
-fprintf('hostile files       : %d\n', numel(HostileTest.allCases()));
+fprintf('hostile files       : %d own, %d shared subset\n', ...
+        numel(HostileTest.allCases()), numel(HostileSubsetTest.allCases()));
 fprintf('tests run           : %d\n', numel(result));
 fprintf('passed              : %d\n', passed);
 fprintf('failed              : %d\n', failed);

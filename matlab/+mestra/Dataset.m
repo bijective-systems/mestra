@@ -262,13 +262,14 @@ classdef Dataset < handle
             did = mestra.Dataset.openSlot(fid, slotPath);
             closeSlot = onCleanup(@() H5D.close(did)); %#ok<NASGU>
             info = mestra.internal.H5.dsetInfo(did);
+            map = mestra.internal.H5.scaleMap(fid);
             names = cell(1, numel(info.dims));
             for axis = 1:numel(info.dims)
-                found = mestra.internal.H5.scaleNames(did, axis - 1);
-                if isempty(found)
+                found = mestra.internal.H5.scaleNames(did, axis - 1, map);
+                if isempty(found) || isempty(found(1).name)
                     names{axis} = sprintf('axis%d', axis - 1);
                 else
-                    names{axis} = mestra.Dataset.logicalDim(found{1});
+                    names{axis} = mestra.Dataset.logicalDim(found(1).name);
                 end
             end
             if isempty(info.dims) || ~strcmp(names{1}, 'row')

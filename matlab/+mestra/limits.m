@@ -14,17 +14,17 @@ function previous = limits(varargin)
 %   its string sizes are numbers someone else chose. These are the
 %   numbers this package will not go past, whatever a file asks for.
 %
-%       maxElements    134217728  elements in one read, a gibibyte of
-%                                 float64
+%       maxElements    2147483648 elements in one eager read, which is
+%                                 the 2^31 specification section 29
+%                                 says a reader should state
 %       maxDepth       64         levels of group nesting a walk
 %                                 follows
 %       maxObjects     200000     objects a walk visits in one file
 %       maxStringSize  65536      bytes in one fixed-length string
 %
-%   Going past one raises mestra:reader in MESTRA.READ, MESTRA.OPEN
-%   and the dataset's readRows method, and records an unclassified
-%   finding (U03) in MESTRA.VALIDATE, which carries on with the rest
-%   of the file.
+%   Going past one raises mestra:E41 in MESTRA.READ, MESTRA.OPEN and
+%   the dataset's readRows method, and is the error E41 in
+%   MESTRA.VALIDATE, which carries on with the rest of the file.
 %
 %   Example
 %

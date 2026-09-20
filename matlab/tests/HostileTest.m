@@ -10,13 +10,14 @@ classdef HostileTest < matlab.unittest.TestCase
 %
 %     * mestra.read, mestra.open, mestra.validate and the dataset's
 %       readRows method either return, or raise an error whose
-%       identifier is mestra:E01 or mestra:reader.  No library stack
-%       trace reaches the caller, nothing recurses until the stack
-%       gives out, and nothing tries to allocate more memory than
-%       mestra.limits allows;
+%       identifier is mestra: followed by the rule of section 14 that
+%       the file breaks, or mestra:reader when the file will not open
+%       at all.  No library stack trace reaches the caller, nothing
+%       recurses until the stack gives out, and nothing tries to
+%       allocate more memory than mestra.limits allows;
 %     * mestra.validate always returns.  An object it cannot read is
-%       an unclassified finding with that object's path, and the pass
-%       carries on to the end of the file;
+%       E41 with that object's path, a link it will not follow is
+%       E40, and the pass carries on to the end of the file;
 %     * no file is ever opened that the caller did not name.
 %
 %   A per-file time budget stands in for a timeout.  MATLAB cannot
@@ -37,8 +38,12 @@ classdef HostileTest < matlab.unittest.TestCase
         % points.  Generous: the slowest is a few hundred milliseconds.
         BUDGET = 30
 
-        % The identifiers a caller may ever see from these files.
-        ALLOWED = {'mestra:E01', 'mestra:reader'}
+        % The identifiers a caller may ever see from these files: a
+        % rule of section 14, or mestra:reader for a file that will
+        % not open at all.
+        ALLOWED = {'mestra:E01', 'mestra:reader', 'mestra:E19', ...
+                   'mestra:E25', 'mestra:E26', 'mestra:E29', ...
+                   'mestra:E40', 'mestra:E41'}
     end
 
     properties (TestParameter)
@@ -96,7 +101,7 @@ classdef HostileTest < matlab.unittest.TestCase
             if ~isempty(outcome)
                 testCase.verifyTrue(iscell(outcome.errors));
                 testCase.verifyTrue(iscell(outcome.warnings));
-                testCase.verifyTrue(iscell(outcome.unclassified));
+                testCase.verifyTrue(iscell(outcome.errors));
                 for i = 1:numel(outcome.findings)
                     f = outcome.findings(i);
                     testCase.verifyNotEmpty(f.path, ...
@@ -110,7 +115,7 @@ classdef HostileTest < matlab.unittest.TestCase
             % ---- open and read ------------------------------------
             for fn = {@mestra.open, @mestra.read}
                 try
-                    d = fn{1}(path);
+                    d = fn{1}(path, 'Strict', false);
                     testCase.verifyClass(d, 'mestra.Dataset');
                     testCase.verifyTrue(iscell(d.skipped));
                 catch err
@@ -123,7 +128,7 @@ classdef HostileTest < matlab.unittest.TestCase
 
             % ---- readRows over every slot the file offers ---------
             try
-                d = mestra.open(path);
+                d = mestra.open(path, 'Strict', false);
                 slots = d.slots();
                 for i = 1:numel(slots)
                     try
@@ -155,7 +160,9 @@ classdef HostileTest < matlab.unittest.TestCase
         %   reader that followed the link would report them as this
         %   file's; this one reports the link and reads neither.
             path = HostileTest.caseFile('link_external');
-            d = mestra.read(path);
+            testCase.verifyError(@() mestra.read(path), 'mestra:E40', ...
+                'a strict read refuses a file with an external link');
+            d = mestra.read(path, 'Strict', false);
             testCase.verifyEqual(numel(d.supports), 1, ...
                 'only the support this file holds itself');
             testCase.verifyEqual(numel(d.callables), 0, ...
@@ -166,8 +173,8 @@ classdef HostileTest < matlab.unittest.TestCase
                 testCase.verifySubstring(d.skipped{i}, 'not followed');
             end
             r = mestra.validate(path);
-            testCase.verifyTrue(ismember('U02', r.unclassified), ...
-                'the links are reported as U02');
+            testCase.verifyTrue(ismember('E40', r.errors), ...
+                'the links are reported as E40');
             for i = 1:numel(r.findings)
                 testCase.verifyEmpty( ...
                     strfind(r.findings(i).path, 'external_target'), ...
@@ -179,9 +186,9 @@ classdef HostileTest < matlab.unittest.TestCase
         %softLinksAreReportedNotFollowed  Dangling and cyclic alike.
             for name = {'link_soft_dangling', 'link_soft_cycle'}
                 r = mestra.validate(HostileTest.caseFile(name{1}));
-                testCase.verifyTrue(ismember('U02', r.unclassified), ...
+                testCase.verifyTrue(ismember('E40', r.errors), ...
                     sprintf('%s: the links are reported', name{1}));
-                d = mestra.read(HostileTest.caseFile(name{1}));
+                d = mestra.read(HostileTest.caseFile(name{1}), 'Strict', false);
                 testCase.verifyGreaterThanOrEqual(numel(d.skipped), 4, ...
                     sprintf('%s: four links, four notes', name{1}));
             end
@@ -194,11 +201,11 @@ classdef HostileTest < matlab.unittest.TestCase
         %   rather than by whatever the machine happens to have.
             path = HostileTest.caseFile('huge_shape');
             started = tic;
-            d = mestra.open(path);
+            d = mestra.open(path, 'Strict', false);
             testCase.verifyLessThan(toc(started), 5, ...
                 'opening must not touch the data');
 
-            testCase.verifyError(@() mestra.read(path), 'mestra:reader');
+            testCase.verifyError(@() mestra.read(path), 'mestra:E41');
 
             one = d.readRows('/supports/s0/node_arrays/enormous', [1 1]);
             testCase.verifyEqual(numel(one.values), 1e6, ...
@@ -206,11 +213,11 @@ classdef HostileTest < matlab.unittest.TestCase
 
             testCase.verifyError( ...
                 @() d.readRows('/supports/s0/node_arrays/wide_row', [1 1]), ...
-                'mestra:reader', ...
+                'mestra:E41', ...
                 'a single row larger than the limit is refused too');
 
             r = mestra.validate(path);
-            testCase.verifyTrue(ismember('U01', r.unclassified), ...
+            testCase.verifyTrue(ismember('E41', r.errors), ...
                 'the validator records what it could not read');
         end
 
@@ -223,12 +230,12 @@ classdef HostileTest < matlab.unittest.TestCase
             r = mestra.validate(HostileTest.caseFile('read_fails_midway'));
             testCase.verifyTrue(ismember('E39', r.errors), ...
                 'the finding after the unreadable object is still found');
-            testCase.verifyTrue(ismember('U01', r.unclassified), ...
+            testCase.verifyTrue(ismember('E41', r.errors), ...
                 'and the unreadable object is recorded');
             found = false;
             for i = 1:numel(r.findings)
                 hit = strfind(r.findings(i).path, 'aaa_broken');
-                if strcmp(r.findings(i).id, 'U01') && ~isempty(hit)
+                if strcmp(r.findings(i).id, 'E41') && ~isempty(hit)
                     found = true;
                 end
             end
@@ -243,7 +250,7 @@ classdef HostileTest < matlab.unittest.TestCase
         %   for is built here instead of committed, because it is four
         %   megabytes of object headers and nothing else.
             for name = {'deep_callables', 'deep_root'}
-                d = mestra.read(HostileTest.caseFile(name{1}));
+                d = mestra.read(HostileTest.caseFile(name{1}), 'Strict', false);
                 testCase.verifyNotEmpty(d.skipped, ...
                     sprintf('%s: the bound is reported', name{1}));
             end
@@ -252,13 +259,13 @@ classdef HostileTest < matlab.unittest.TestCase
             cleanup = onCleanup(@() HostileTest.removeIfPresent(path));
             HostileTest.buildDeepFile(path, 30000);
             started = tic;
-            d = mestra.read(path);
+            d = mestra.read(path, 'Strict', false);
             r = mestra.validate(path);
             testCase.verifyLessThan(toc(started), HostileTest.BUDGET, ...
                 'thirty thousand levels finished inside the budget');
             testCase.verifyNotEmpty(d.skipped, ...
                 'the reader says it stopped');
-            testCase.verifyTrue(ismember('U03', r.unclassified) || ...
+            testCase.verifyTrue(ismember('E41', r.errors) || ...
                                 ismember('W11', r.warnings), ...
                 'and the validator reports it');
         end
@@ -267,7 +274,7 @@ classdef HostileTest < matlab.unittest.TestCase
         %hardLinkCycleTerminates  Two groups, one link, infinite depth.
             path = HostileTest.caseFile('hard_link_cycle');
             started = tic;
-            d = mestra.read(path);
+            d = mestra.read(path, 'Strict', false);
             testCase.verifyLessThan(toc(started), HostileTest.BUDGET);
             testCase.verifyNotEmpty(d.skipped, ...
                 'the walk says where it stopped');
@@ -282,7 +289,7 @@ classdef HostileTest < matlab.unittest.TestCase
                 testCase.verifyTrue(ismember('E19', r.errors), ...
                     sprintf('%s: a named attribute that is not a scalar', ...
                             name{1}));
-                d = mestra.read(path);
+                d = mestra.read(path, 'Strict', false);
                 testCase.verifyTrue(ischar(d.format));
                 testCase.verifyTrue(isscalar(d.aligned) || ...
                                     islogical(d.aligned));
@@ -310,7 +317,7 @@ classdef HostileTest < matlab.unittest.TestCase
         function wrongKindIsPassedOverNotOpened(testCase)
         %wrongKindIsPassedOverNotOpened  A key that is a group, and so on.
             path = HostileTest.caseFile('kind_swap');
-            d = mestra.read(path);
+            d = mestra.read(path, 'Strict', false);
             testCase.verifyGreaterThanOrEqual(numel(d.skipped), 3);
             names = {d.keys.name};
             testCase.verifyFalse(ismember('regime', names), ...
