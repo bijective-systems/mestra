@@ -798,6 +798,87 @@ void conventions_post() {
                  }));
 }
 
+void conventions_callables() {
+  // Conventions section 1: add_callable(id, callable), and then a
+  // callable slot with the array builders' argument order, the values
+  // dropped and the callable and its output added.
+  mestra::AffineOutput cl;
+  cl.A = {2.0, 0.1};
+  cl.b = {0.05};
+  cl.shape = {};
+  mestra::AffineOutput pressure;
+  pressure.A = {1.0, 0.0, 2.0, 0.0, 3.0, 0.5, 4.0, 0.5};
+  pressure.b = {0.0, 0.1, 0.2, 0.3};
+  pressure.shape = {4, 1};
+  std::map<std::string, mestra::AffineOutput, mestra::BytesLess> outputs;
+  outputs["cl"] = cl;
+  outputs["pressure"] = pressure;
+  const mestra::Affine model({"alpha", "mach"}, outputs,
+                             "affine(alpha, mach -> cl, pressure)");
+
+  mestra::Dataset d;
+  d.writer = "mestra unit tests";
+  d.created = "2026-09-20T00:00:00Z";
+  mestra::Key& alpha = d.add_key("alpha", {}, "condition", "degree");
+  alpha.lower = 0.0;
+  alpha.upper = 10.0;
+  mestra::Key* mach = &d.add_key("mach", {}, "condition", "1");
+  mach->lower = 0.2;
+  mach->upper = 0.9;
+
+  const mestra::StoredCallable& stored = d.add_callable("m1", model);
+  check::equal("add_callable takes the type from the callable",
+               stored.type, std::string("affine"));
+  check::is_true("and the one-line repr when it has one",
+                 stored.repr.has_value() &&
+                     stored.repr->find("affine(") == 0);
+  check::is_true("and the dictionary", stored.dict.has("keys"));
+
+  d.add_mesh_support("s0", 4, {5, 5}, {0, 3, 6}, {0, 1, 2, 0, 2, 3});
+  mestra::Support* s = d.support("s0");
+  mestra::set_coordinates(*s, {0, 0, 1, 0, 1, 1, 0, 1}, "m",
+                          {"node", {"component", 2}});
+  const mestra::ArraySlot& slot = mestra::add_callable_node_array(
+      *s, "pressure", "Pa", {"row", "node", {"component", 1}}, "m1",
+      "pressure");
+  check::equal("a callable slot names its callable", slot.source,
+               std::string("callable:m1"));
+  check::equal("and its output", slot.output.value_or(""),
+               std::string("pressure"));
+  check::equal("and takes varies from dims", slot.varies,
+               std::string("row"));
+  mestra::add_callable_scalar(d, "cl", "1", "m1", "cl");
+
+  // A callable slot stores nothing, so a component axis has no values
+  // to give it a length and has to be told one.
+  check::equal("a callable slot's component axis needs a length",
+               rule_of([s] {
+                 mestra::add_callable_node_array(*s, "drag", "Pa",
+                                                 {"row", "node",
+                                                  "component"},
+                                                 "m1", "pressure");
+               }),
+               std::string("E31"));
+
+  const std::string path = "mestra_unit_callable.mes";
+  std::remove(path.c_str());
+  mestra::write(d, path);
+  check::is_true("a zero-row callable file validates",
+                 mestra::validate(path).ok());
+
+  // Evaluating it on a keys table fills the slots.
+  mestra::KeysTable table;
+  table.add_column("alpha", {4.0});
+  table.add_column("mach", {0.5});
+  const mestra::Dataset out = mestra::evaluate(d, table);
+  check::equal("evaluation gives the table's rows", out.n_rows,
+               std::int64_t(1));
+  const mestra::Scalar* got = out.scalar("cl");
+  check::is_true("and the scalar holds data",
+                 got != nullptr && got->source == "data");
+  std::remove(path.c_str());
+}
+
 // The value types and the hash, at the edges a corpus file never
 // reaches.
 void hardened_value_types() {
@@ -881,6 +962,7 @@ int main() {
   conventions_write();
   conventions_weights();
   conventions_post();
+  conventions_callables();
   hardened_value_types();
   bytes_order();
   return check::finish("mestra unit tests");

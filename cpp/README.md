@@ -519,7 +519,7 @@ sanitizers to the whole suite.
 What this build has been checked against
 ----------------------------------------
 
-169 unit checks, including the conventions of
+179 unit checks, including the conventions of
 `docs/api-conventions.md` one rule at a time: the argument order, the
 bounds default, `dims` deriving `varies` and `components`, the
 permutation into stored order, the refusals a builder makes and the
@@ -527,7 +527,9 @@ identifiers they carry, `write` refusing a slot whose `varies` was
 assigned after the fact, the cell measures against shapes whose
 measure is known by hand, the lumped node weights adding up to the
 area, the default weight rule, and the statistics of a field with a
-missing value in it.
+missing value in it, and a zero-row callable file built with
+`add_callable(id, callable)` and a callable slot, written, validated
+and evaluated.
 
 All 70 corpus cases: the validator outcome and the shape of the
 validator's own output, every support id, every probe, every codec

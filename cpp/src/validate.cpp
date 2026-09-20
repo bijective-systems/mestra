@@ -911,13 +911,38 @@ void Validator::keys() {
       for (std::size_t i = 0; i < n; ++i) {
         sides[unit->i64[i]].insert(split_key->i64[i]);
       }
-      for (const auto& entry : sides) {
-        if (entry.second.size() > 1) {
-          warn("W01", "/keys/" + split_key->name,
-               "the split places rows of one generalisation unit on both "
-               "sides");
-          break;
+      // Name the leaked unit and then say why it matters, which is
+      // what turns a warning into something a user acts on
+      // (conventions section 6, modelled on Python's W01).
+      const auto table = category_tables_.find(unit->category);
+      auto name_of = [&table, this](std::int64_t id) {
+        if (table != category_tables_.end() && id >= 0 &&
+            static_cast<std::size_t>(id) < table->second.size()) {
+          return "\"" + table->second[static_cast<std::size_t>(id)] + "\"";
         }
+        return internal::format_i64(id);
+      };
+      std::vector<std::int64_t> leaked;
+      for (const auto& entry : sides) {
+        if (entry.second.size() > 1) leaked.push_back(entry.first);
+      }
+      if (!leaked.empty()) {
+        std::string message = "the rows of " + unit->name + " ";
+        for (std::size_t i = 0; i < leaked.size() && i < 3; ++i) {
+          if (i != 0) message += ", ";
+          message += name_of(leaked[i]);
+        }
+        if (leaked.size() > 3) {
+          message += " and " +
+                     internal::format_i64(
+                         static_cast<std::int64_t>(leaked.size() - 3)) +
+                     " more";
+        }
+        message += leaked.size() == 1 ? " are" : " are each";
+        message +=
+            " on both sides of the split, so this is not a "
+            "generalisation test";
+        warn("W01", "/keys/" + split_key->name, message);
       }
     }
   }
