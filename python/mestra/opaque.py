@@ -7,10 +7,17 @@ that rewrites a file should not silently drop them. This module
 copies such a group into memory as it stands and puts it back
 unchanged.
 
-Nothing here interprets what it copies. Dimension scales inside a
-copied group are copied as plain datasets, and attachments between
-them are not preserved, because a reader that does not know the
-group does not know which of its datasets are scales either.
+Nothing here interprets what it copies, and nothing here trusts it
+either: the walk follows no link, goes no deeper than
+`limits.MAX_DEPTH`, and copies no dataset larger than
+`limits.MAX_READ_ELEMENTS`. What it could not copy is reported as a
+finding and named in the dataset's `lossy` list, and `write` refuses
+while any remain rather than writing the file short.
+
+Dimension scales inside a copied group are copied as plain datasets,
+and attachments between them are not preserved, because a reader
+that does not know the group does not know which of its datasets are
+scales either.
 """
 
 from __future__ import annotations
@@ -20,33 +27,64 @@ from typing import Any
 import h5py
 import numpy as np
 
-from .names import MACHINERY
+from . import h5safe, limits
+from .errors import Finding, MestraError
 
 __all__ = ["capture", "restore"]
 
+#: What a member is replaced by when it could not be copied.
+LOST = "mestra.opaque.lost"
 
-def capture(group: h5py.Group) -> dict[str, Any]:
+
+def capture(group: h5py.Group, path: str = "", depth: int = 0,
+            problems: list[Finding] | None = None,
+            lossy: list[str] | None = None) -> dict[str, Any]:
     """Copy a group, its attributes and its members, into memory."""
+    path = path or group.name
     out: dict[str, Any] = {"attrs": _attrs(group), "members": {}}
-    for name, member in group.items():
-        if isinstance(member, h5py.Group):
-            out["members"][name] = ("group", capture(member))
-        else:
-            out["members"][name] = ("dataset", _dataset(member))
+    if depth > limits.MAX_DEPTH:
+        _lost(problems, lossy, path,
+              "this group nests more than %d levels deep, which this "
+              "reader does not follow" % limits.MAX_DEPTH)
+        return out
+    for member in h5safe.members(group):
+        where = "%s/%s" % (path.rstrip("/"), member.name)
+        if not member.usable:
+            _lost(problems, lossy, where,
+                  member.problem or "this member cannot be read")
+            continue
+        if isinstance(member.obj, h5py.Group):
+            out["members"][member.name] = (
+                "group", capture(member.obj, where, depth + 1,
+                                 problems, lossy))
+            continue
+        body = _dataset(member.obj, where, problems, lossy)
+        out["members"][member.name] = ("dataset", body)
     return out
+
+
+def _lost(problems: list[Finding] | None, lossy: list[str] | None,
+          where: str, message: str) -> None:
+    if problems is not None:
+        problems.append(Finding("reader", where, message))
+    if lossy is not None:
+        lossy.append(where)
 
 
 def _attrs(obj: Any) -> dict[str, tuple[Any, Any]]:
     out = {}
-    for name in obj.attrs:
-        if name in MACHINERY:
+    for name in h5safe.attr_names(obj):
+        try:
+            out[name] = (obj.attrs[name], obj.attrs.get_id(name).dtype)
+        except Exception:
             continue
-        out[name] = (obj.attrs[name], obj.attrs.get_id(name).dtype)
     return out
 
 
-def _dataset(dset: h5py.Dataset) -> dict[str, Any]:
-    return {
+def _dataset(dset: h5py.Dataset, where: str,
+             problems: list[Finding] | None,
+             lossy: list[str] | None) -> dict[str, Any]:
+    body: dict[str, Any] = {
         "attrs": _attrs(dset),
         "dtype": dset.dtype,
         "shape": dset.shape,
@@ -56,9 +94,18 @@ def _dataset(dset: h5py.Dataset) -> dict[str, Any]:
         "compression_opts": dset.compression_opts,
         "shuffle": dset.shuffle,
         "fletcher32": dset.fletcher32,
-        "data": dset[()] if dset.size else np.zeros(dset.shape,
-                                                    dset.dtype),
+        "data": None,
     }
+    try:
+        body["data"] = (h5safe.read_values(dset, where) if dset.size
+                        else np.zeros(dset.shape, dset.dtype))
+    except MestraError as exc:
+        body["data"] = LOST
+        _lost(problems, lossy, where, exc.message)
+    except Exception:
+        body["data"] = LOST
+        _lost(problems, lossy, where, "this dataset cannot be copied")
+    return body
 
 
 def restore(parent: h5py.Group, name: str,
@@ -81,6 +128,10 @@ def _put_attrs(obj: Any, attrs: dict[str, tuple[Any, Any]]) -> None:
 
 def _put_dataset(group: h5py.Group, name: str,
                  body: dict[str, Any]) -> None:
+    if isinstance(body["data"], str) and body["data"] == LOST:
+        raise MestraError(
+            "reader", "this dataset could not be copied when the file "
+            "was read, so it cannot be written back", name)
     kw: dict[str, Any] = {}
     if body["chunks"] is not None:
         kw["chunks"] = body["chunks"]

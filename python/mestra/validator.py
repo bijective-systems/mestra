@@ -19,16 +19,16 @@ from typing import Any
 import h5py
 import numpy as np
 
+from . import h5safe, limits
 from .encoding import (
     NULL_SENTINEL,
     default_chunk_rows,
     is_fixed_string,
     read_attr,
-    scale_names,
     string_length,
     support_digest,
 )
-from .errors import Finding
+from .errors import Finding, MestraError
 from .model import ARRAY_ROLES, KEY_ROLES, STATISTICS, Dataset
 from .names import MACHINERY, RESERVED_PREFIX, is_legal_name
 from .units import is_parseable
@@ -79,18 +79,33 @@ _MISSING_PUBLIC = ("E02", "E11", "E13", "E15", "E17", "E31", "E39")
 #: W08: bounds wider than the observed range by more than this.
 _STALE_BOUNDS_FACTOR = 4.0
 
+#: The two portable filters of section 23, by their HDF5 identifier.
+_FILTER_DEFLATE = 1
+_FILTER_SHUFFLE = 2
+
 
 @dataclass
 class Report:
-    """What the validator found, by rule identifier."""
+    """What the validator found, by rule identifier.
+
+    `errors` and `warnings` carry the rules of section 14.
+    `unclassified` carries what this reader met and the
+    specification has no identifier for: a link it will not follow,
+    a member of the wrong kind, an object the library itself will
+    not read, a limit reached. Each of those has the rule `reader`
+    and names the path it is about. A file with one is not accepted,
+    because something in it could not be checked.
+    """
 
     errors: list[Finding] = field(default_factory=list)
     warnings: list[Finding] = field(default_factory=list)
+    unclassified: list[Finding] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        """True when the file is accepted: no error."""
-        return not self.errors
+        """True when the file is accepted: nothing was rejected and
+        nothing went unchecked."""
+        return not self.errors and not self.unclassified
 
     @property
     def error_ids(self) -> list[str]:
@@ -102,20 +117,35 @@ class Report:
         """The warning identifiers, sorted and without duplicates."""
         return sorted({f.rule for f in self.warnings})
 
+    @property
+    def findings(self) -> list[Finding]:
+        """Everything found, errors first and the unclassified last."""
+        return self.errors + self.warnings + self.unclassified
+
     def __str__(self) -> str:
-        lines = [str(f) for f in self.errors]
-        lines += [str(f) for f in self.warnings]
+        lines = [str(f) for f in self.findings]
         if not lines:
             return "no error and no warning"
         return "\n".join(lines)
 
 
 def validate(target: Any) -> Report:
-    """Validate a file by path, or a dataset already in memory."""
+    """Validate a file by path, or a dataset already in memory.
+
+    A file this reader cannot open at all comes back as a report
+    saying so (E01) rather than as an exception, so that a caller
+    can validate a directory of strangers in one pass.
+    """
     if isinstance(target, Dataset):
         return _validate_dataset(target)
-    with h5py.File(str(target), "r") as f:
+    try:
+        f = h5safe.open_file(str(target))
+    except MestraError as exc:
+        return Report(errors=[Finding(exc.rule, exc.where, exc.message)])
+    try:
         return _FileValidator(f).run()
+    finally:
+        f.close()
 
 
 # --------------------------------------------------------------- a file
@@ -126,6 +156,7 @@ class _FileValidator:
     def __init__(self, f: h5py.File) -> None:
         self.f = f
         self.report = Report()
+        self.visited = 0
         self.n_rows = 0
         self.support_names: list[str] = []
         self.rows_on: dict[str, np.ndarray] = {}
@@ -142,20 +173,83 @@ class _FileValidator:
     def warn(self, rule: str, where: str, message: str) -> None:
         self.report.warnings.append(Finding(rule, where, message))
 
+    def note(self, where: str, message: str) -> None:
+        """Something the specification has no identifier for."""
+        self.report.unclassified.append(Finding("reader", where,
+                                                message))
+
+    def guarded(self, where: str, step: Any, *args: Any) -> Any:
+        """Run one step, and keep going when it fails.
+
+        A file may hold an object the library will not read. That is
+        the file's problem and this reader's finding; it is not a
+        reason to abandon everything after it.
+        """
+        try:
+            return step(*args)
+        except MestraError as exc:
+            self.note(exc.where or where, exc.message)
+        except RecursionError:
+            self.note(where, "this object nests deeper than this "
+                             "reader will follow")
+        except Exception as exc:
+            self.note(where, "this object could not be checked: %s"
+                             % h5safe._brief(exc))
+        return None
+
     def run(self) -> Report:
-        if not self._version():
+        if not self.guarded("/", self._version):
             return self.report
-        self._collect()
-        self._root()
-        self._categories()
-        self._keys()
-        self._scalars()
-        self._supports()
-        self._alignment()
-        self._callables()
-        self._bytes()
-        self._private()
+        for where, step in (("/", self._collect), ("/", self._root),
+                            ("/categories", self._categories),
+                            ("/keys", self._keys),
+                            ("/scalars", self._scalars),
+                            ("/supports", self._supports),
+                            ("/", self._alignment),
+                            ("/callables", self._callables),
+                            ("/", self._bytes),
+                            ("/private", self._private)):
+            self.guarded(where, step)
         return self.report
+
+    # -- reading a value, or saying why not
+
+    def values(self, dset: h5py.Dataset, where: str) -> Any:
+        """A dataset's values, or None and a finding.
+
+        Everything a rule needs to look inside a dataset comes
+        through here, so that a hostile size or a type the library
+        will not convert costs one finding and not the pass.
+        """
+        try:
+            return np.asarray(h5safe.read_values(dset, where))
+        except MestraError as exc:
+            self.note(where, exc.message)
+        except Exception as exc:
+            self.note(where, "this dataset could not be read: %s"
+                             % h5safe._brief(exc))
+        return None
+
+    def members(self, group: h5py.Group, where: str) -> list[Any]:
+        """The members of a group, reporting the ones it will not
+        follow."""
+        out = []
+        for member in h5safe.members(group):
+            if member.usable:
+                out.append(member)
+            else:
+                self.note("%s/%s" % (where.rstrip("/"), member.name),
+                          member.problem or "this member cannot be "
+                                            "read")
+        return out
+
+    def child(self, group: h5py.Group, where: str,
+              name: str) -> Any:
+        """One member by name, or None."""
+        for member in self.members(group, where):
+            if member.name == name:
+                return member.obj
+        return None
 
     # -- section 28: the version decides whether to read at all
 
@@ -179,32 +273,56 @@ class _FileValidator:
     # -- what the rest of the checks need
 
     def _collect(self) -> None:
-        if "row" in self.f and isinstance(self.f["row"], h5py.Dataset):
-            self.n_rows = int(self.f["row"].shape[0])
-        if "categories" in self.f:
-            for name, dset in self.f["categories"].items():
-                if isinstance(dset, h5py.Dataset):
-                    self.categories[name] = _strings(dset)
-        if "keys" in self.f:
-            for name, dset in self.f["keys"].items():
-                if isinstance(dset, h5py.Dataset):
-                    self.keys[name] = dset
-                    if _attr(dset, "role") == "group":
-                        self.group_keys.append(name)
-        if "supports" in self.f:
+        self.root = {m.name: m for m in h5safe.members(self.f)}
+        found = self.root.get("row")
+        if found is not None and isinstance(found.obj, h5py.Dataset):
+            shape = found.obj.shape
+            self.n_rows = int(shape[0]) if shape else 0
+        group = self._root_group("categories")
+        if group is not None:
+            for member in self.members(group, "/categories"):
+                if isinstance(member.obj, h5py.Dataset):
+                    self.categories[member.name] = self._strings_in(
+                        member.obj, "/categories/" + member.name)
+        group = self._root_group("keys")
+        if group is not None:
+            for member in self.members(group, "/keys"):
+                if isinstance(member.obj, h5py.Dataset):
+                    self.keys[member.name] = member.obj
+                    if _attr(member.obj, "role") == "group":
+                        self.group_keys.append(member.name)
+        group = self._root_group("supports")
+        if group is not None:
             self.support_names = sorted(
-                (n for n, m in self.f["supports"].items()
-                 if isinstance(m, h5py.Group)),
+                (m.name for m in self.members(group, "/supports")
+                 if isinstance(m.obj, h5py.Group)),
                 key=lambda n: n.encode("utf-8"))
-        if ("row_support" in self.f
-                and isinstance(self.f["row_support"], h5py.Dataset)):
-            self.row_support = np.asarray(self.f["row_support"][()])
+        found = self.root.get("row_support")
+        if found is not None and isinstance(found.obj, h5py.Dataset):
+            self.row_support = self.values(found.obj, "/row_support")
         for at, name in enumerate(self.support_names):
             if self.row_support is None:
                 self.rows_on[name] = np.arange(self.n_rows)
             else:
                 self.rows_on[name] = np.flatnonzero(
                     self.row_support == at)
+
+    def _root_group(self, name: str) -> Any:
+        """One of the root groups, when it is a group and opened."""
+        found = getattr(self, "root", {}).get(name)
+        if found is None or not found.usable:
+            return None
+        if not isinstance(found.obj, h5py.Group):
+            return None
+        return found.obj
+
+    def _strings_in(self, dset: h5py.Dataset, where: str) -> list[str]:
+        """A fixed-length string dataset as text, leniently."""
+        values = self.values(dset, where)
+        if values is None:
+            return []
+        return [h5safe.decode_bytes(v) if isinstance(v, bytes)
+                else str(v) for v in values.reshape(-1)]
 
     # -- the root group
 
@@ -231,11 +349,13 @@ class _FileValidator:
                 self.warn("W11", "/", "this reader does not know the "
                                       "attribute %s, and ignores it"
                           % name)
-        for name, member in self.f.items():
+        for name, member in self.root.items():
             if name in _ROOT_GROUPS or name == "row_support":
                 continue
-            if isinstance(member, h5py.Dataset):
+            if member.usable and isinstance(member.obj, h5py.Dataset):
                 continue                    # a dimension scale at root
+            if not member.usable:
+                continue                    # reported where it is met
             self.warn("W11", "/" + name, "this reader does not know "
                                          "this group, and ignores it")
 
@@ -246,7 +366,7 @@ class _FileValidator:
         it can say is that public information is missing from a file
         that carries one.
         """
-        if "private" not in self.f:
+        if "private" not in getattr(self, "root", {}):
             return
         missing = [f for f in self.report.errors
                    if f.rule in _MISSING_PUBLIC]
@@ -260,11 +380,15 @@ class _FileValidator:
     # -- category tables
 
     def _categories(self) -> None:
-        if "categories" not in self.f:
+        group = self._root_group("categories")
+        if group is None:
             return
-        for name, dset in self.f["categories"].items():
+        for member in self.members(group, "/categories"):
+            name, dset = member.name, member.obj
             where = "/categories/" + name
             if not isinstance(dset, h5py.Dataset):
+                self.note(where, "a category table is a dataset, and "
+                                 "this is a group")
                 continue
             if not is_fixed_string(dset.dtype):
                 self.error("E20", where, "a category table is a "
@@ -278,7 +402,10 @@ class _FileValidator:
         """E26: valid UTF-8, and no NUL outside the padding."""
         size = string_length(dset.dtype) or 1
         longest = 0
-        for raw in np.asarray(dset[()]).reshape(-1):
+        values = self.values(dset, where)
+        if values is None:
+            return
+        for raw in values.reshape(-1):
             if not isinstance(raw, bytes):
                 continue
             body = raw.rstrip(b"\x00")
@@ -365,7 +492,9 @@ class _FileValidator:
             self.error("E10", where, "there is no category table "
                                      "called %r" % table_name)
             return
-        values = np.asarray(dset[()])
+        values = self.values(dset, where)
+        if values is None:
+            return
         if values.size and values.dtype.kind in "iu":
             outside = values[(values < 0) | (values >= len(table))]
             if outside.size:
@@ -388,7 +517,15 @@ class _FileValidator:
         upper = read_attr(dset, "upper") if "upper" in attrs else None
         if lower is None and upper is None:
             return
-        values = np.asarray(dset[()])
+        if not isinstance(lower, (int, float)) or not isinstance(
+                upper, (int, float)):
+            lower = lower if isinstance(lower, (int, float)) else None
+            upper = upper if isinstance(upper, (int, float)) else None
+        if lower is None and upper is None:
+            return
+        values = self.values(dset, where)
+        if values is None:
+            return
         if values.dtype.kind not in "fiu" or not values.size:
             return
         finite = values[np.isfinite(values)] if values.dtype.kind == "f" \
@@ -429,11 +566,14 @@ class _FileValidator:
         """E09: time strictly increasing within each trajectory."""
         for name in roles.get("time", []):
             dset = self.keys[name]
-            values = np.asarray(dset[()])
+            values = self.values(dset, "/keys/" + name)
+            if values is None or values.dtype.kind not in "fiu":
+                continue
             group = _attr(dset, "trajectory_group")
+            labels: Any = None
             if group and group in self.keys:
-                labels = np.asarray(self.keys[group][()])
-            else:
+                labels = self.values(self.keys[group], "/keys/" + group)
+            if labels is None:
                 labels = np.zeros(len(values), dtype="i8")
             if len(labels) != len(values):
                 continue
@@ -452,7 +592,9 @@ class _FileValidator:
             table = self.categories.get(_attr(dset, "category") or "")
             if not table:
                 continue
-            values = np.asarray(dset[()])
+            values = self.values(dset, "/keys/" + name)
+            if values is None or values.dtype.kind not in "iu":
+                continue
             for row, value in enumerate(values):
                 at = int(value)
                 if 0 <= at < len(table) and table[at] != "converged":
@@ -467,10 +609,12 @@ class _FileValidator:
         unit = read_attr(self.f, "generalisation_group")
         if unit not in self.keys:
             return
-        units = np.asarray(self.keys[unit][()])
+        units = self.values(self.keys[unit], "/keys/" + unit)
+        if units is None:
+            return
         for name in roles.get("split", []):
-            split = np.asarray(self.keys[name][()])
-            if len(split) != len(units):
+            split = self.values(self.keys[name], "/keys/" + name)
+            if split is None or len(split) != len(units):
                 continue
             for one in np.unique(units):
                 if len(np.unique(split[units == one])) > 1:
@@ -482,9 +626,11 @@ class _FileValidator:
     # -- scalars
 
     def _scalars(self) -> None:
-        if "scalars" not in self.f:
+        group = self._root_group("scalars")
+        if group is None:
             return
-        for name, member in self.f["scalars"].items():
+        for found in self.members(group, "/scalars"):
+            name, member = found.name, found.obj
             where = "/scalars/" + name
             self._name(name, where)
             self._unknown_attrs(member, where, _SCALAR_ATTRS)
@@ -505,10 +651,16 @@ class _FileValidator:
     # -- supports
 
     def _supports(self) -> None:
-        if "supports" not in self.f:
+        group = self._root_group("supports")
+        if group is None:
             return
-        for name in self.support_names:
-            self._support(name, self.f["supports"][name])
+        for found in self.members(group, "/supports"):
+            if not isinstance(found.obj, h5py.Group):
+                self.note("/supports/" + found.name,
+                          "a support is a group, and this is a dataset")
+                continue
+            self.guarded("/supports/" + found.name, self._support,
+                         found.name, found.obj)
 
     def _support(self, name: str, group: h5py.Group) -> None:
         where = "/supports/" + name
@@ -520,39 +672,51 @@ class _FileValidator:
                 self.error("E39", where, "a support carries %s"
                            % required)
         kind = _attr(group, "kind") or "mesh"
-        n_nodes = _attr(group, "n_nodes") or 0
-        cells = {which: group[which]
+        n_nodes = _attr(group, "n_nodes")
+        n_nodes = int(n_nodes) if isinstance(n_nodes, int) else 0
+        n_cells = _attr(group, "n_cells")
+        n_cells = int(n_cells) if isinstance(n_cells, int) else 0
+        inside = {m.name: m.obj for m in self.members(group, where)}
+        cells = {which: inside[which]
                  for which in ("cell_types", "cell_offsets",
                                "cell_connectivity")
-                 if which in group}
+                 if isinstance(inside.get(which), h5py.Dataset)}
         if kind == "mesh" and len(cells) != 3:
             self.error("E38", where, "a mesh support carries "
                                      "cell_types, cell_offsets and "
                                      "cell_connectivity")
-        if kind in ("axis", "none") and (cells or "cell" in group):
+        if kind in ("axis", "none") and (cells or "cell" in inside):
             self.error("E38", where, "a support of kind %s carries no "
                                      "cell datasets and no cell "
                                      "dimension" % kind)
-        self._cells(where, cells, int(n_nodes))
-        self._support_id(where, group, kind, int(n_nodes), cells)
+        self.guarded(where, self._cells, where, cells, n_nodes)
+        self.guarded(where, self._support_id, where, group, kind,
+                     n_nodes, cells, inside)
 
         arrays = []
-        if "coordinates" in group:
-            arrays.append(("coordinates", group["coordinates"], "node"))
+        if "coordinates" in inside:
+            arrays.append(("coordinates", inside["coordinates"], "node"))
         for which, location in (("node_arrays", "node"),
                                 ("cell_arrays", "cell")):
-            if which in group:
-                for slot_name, member in group[which].items():
-                    arrays.append(("%s/%s" % (which, slot_name), member,
-                                   location))
-        if kind in ("mesh", "axis") and "coordinates" not in group:
+            holder = inside.get(which)
+            if holder is None:
+                continue
+            if not isinstance(holder, h5py.Group):
+                self.note("%s/%s" % (where, which),
+                          "this is a dataset where the format has a "
+                          "group of slots")
+                continue
+            for member in self.members(holder, "%s/%s" % (where, which)):
+                arrays.append(("%s/%s" % (which, member.name),
+                               member.obj, location))
+        if kind in ("mesh", "axis") and "coordinates" not in inside:
             self.error("E03", where, "a %s support has exactly one "
                                      "coordinates array" % kind)
         roles: dict[str, list[str]] = {}
         for slot_name, member, location in arrays:
-            role = self._array(where, name, slot_name, member, location,
-                               kind, int(n_nodes),
-                               int(_attr(group, "n_cells") or 0))
+            role = self.guarded(
+                "%s/%s" % (where, slot_name), self._array, where, name,
+                slot_name, member, location, kind, n_nodes, n_cells)
             if role is not None:
                 roles.setdefault(
                     role if role != "coordinates" else "coordinates",
@@ -562,7 +726,7 @@ class _FileValidator:
                 self.error("E03", where, "a support has at most %d "
                                          "array with the role %s"
                            % (limit, role))
-        for member_name, member in group.items():
+        for member_name, member in inside.items():
             if member_name in _SUPPORT_MEMBERS:
                 continue
             if isinstance(member, h5py.Group):
@@ -575,9 +739,16 @@ class _FileValidator:
         """E21 to E24: the cell arrays against section 20."""
         if len(cells) != 3:
             return
-        types = np.asarray(cells["cell_types"][()])
-        offsets = np.asarray(cells["cell_offsets"][()])
-        connectivity = np.asarray(cells["cell_connectivity"][()])
+        types = self.values(cells["cell_types"], where + "/cell_types")
+        offsets = self.values(cells["cell_offsets"],
+                              where + "/cell_offsets")
+        connectivity = self.values(cells["cell_connectivity"],
+                                   where + "/cell_connectivity")
+        if types is None or offsets is None or connectivity is None:
+            return
+        if (types.dtype.kind not in "iu" or offsets.dtype.kind not in "iu"
+                or connectivity.dtype.kind not in "iu"):
+            return
         if cells["cell_types"].dtype != np.dtype("u1"):
             self.error("E20", where + "/cell_types", "cell_types is "
                                                      "uint8")
@@ -626,29 +797,37 @@ class _FileValidator:
                            % (int(outside[0]), n_nodes))
 
     def _support_id(self, where: str, group: h5py.Group, kind: str,
-                    n_nodes: int, cells: dict[str, Any]) -> None:
+                    n_nodes: int, cells: dict[str, Any],
+                    inside: dict[str, Any]) -> None:
         """E08: the digest against the stored arrays (section 24)."""
         if "support_id" not in _names(group):
             return
         axis_coordinates = None
-        if kind == "axis" and "coordinates" in group:
+        if kind == "axis" and isinstance(inside.get("coordinates"),
+                                         h5py.Dataset):
             # Section 24, decision 27: the digest of an axis support
             # is over the coordinates as they are stored, so that a
             # file whose axis coordinates wrongly vary breaks E35 and
             # nothing else.
-            axis_coordinates = np.asarray(group["coordinates"][()])
+            axis_coordinates = self.values(inside["coordinates"],
+                                           where + "/coordinates")
+            if axis_coordinates is None:
+                return
         if kind != "mesh":
             # A support of kind axis or none has no cell arrays, so
             # steps 2 to 4 contribute no bytes at all for it.
             cells = {}
-        digest = support_digest(
-            n_nodes,
-            cells["cell_types"][()] if "cell_types" in cells else None,
-            cells["cell_offsets"][()] if "cell_offsets" in cells
-            else None,
-            cells["cell_connectivity"][()]
-            if "cell_connectivity" in cells else None,
-            axis_coordinates)
+        parts: list[Any] = []
+        for which in ("cell_types", "cell_offsets", "cell_connectivity"):
+            if which not in cells:
+                parts.append(None)
+                continue
+            values = self.values(cells[which], "%s/%s" % (where, which))
+            if values is None:
+                return
+            parts.append(values)
+        digest = support_digest(n_nodes, parts[0], parts[1], parts[2],
+                                axis_coordinates)
         stored = _attr(group, "support_id")
         if stored != digest:
             self.error("E08", where, "the stored support_id does not "
@@ -771,7 +950,9 @@ class _FileValidator:
             self.error("E10", where, "there is no category table "
                                      "called %r" % table_name)
             return
-        values = np.asarray(dset[()])
+        values = self.values(dset, where)
+        if values is None:
+            return
         if values.size and values.dtype.kind in "iu":
             outside = values[(values < 0) | (values >= len(table))]
             if outside.size:
@@ -787,7 +968,9 @@ class _FileValidator:
         aligned = None
         if "aligned" in _names(self.f):
             aligned = bool(read_attr(self.f, "aligned"))
-        has_column = self.row_support is not None
+        has_column = self.root.get("row_support") is not None and \
+            isinstance(getattr(self.root.get("row_support"), "obj", None),
+                       h5py.Dataset)
         if aligned is not None:
             if aligned and count > 1:
                 self.error("E37", "/", "aligned is true and the file "
@@ -807,13 +990,14 @@ class _FileValidator:
                                           "supports, so index-aligned "
                                           "operations are not "
                                           "available" % count)
-        if has_column:
+        column = self.root.get("row_support")
+        if has_column and column is not None and isinstance(
+                column.obj, h5py.Dataset):
             values = np.asarray(self.row_support)
-            if self.f["row_support"].dtype != np.dtype("<i4"):
+            if column.obj.dtype != np.dtype("<i4"):
                 self.error("E20", "/row_support", "/row_support is "
                                                   "little-endian int32")
-            self._rows(self.f["row_support"], "/row_support",
-                       self.n_rows)
+            self._rows(column.obj, "/row_support", self.n_rows)
             outside = values[(values < 0) | (values >= max(count, 1))]
             if outside.size:
                 self.error("E06", "/row_support", "a row references "
@@ -830,23 +1014,34 @@ class _FileValidator:
     # -- callables
 
     def _callables(self) -> None:
-        if "callables" not in self.f:
+        group = self._root_group("callables")
+        if group is None:
             return
-        for name, group in self.f["callables"].items():
+        for found in self.members(group, "/callables"):
+            name, obj = found.name, found.obj
             where = "/callables/" + name
             self._name(name, where)
-            if not isinstance(group, h5py.Group):
+            if not isinstance(obj, h5py.Group):
                 self.error("E15", where, "a callable is a group")
                 continue
-            if "type" not in _names(group):
-                self.error("E15", where, "a callable carries a type "
-                                         "string")
-            self._dictionary(group, where, top_level=True)
+            self.guarded(where, self._dictionary_of, obj, where)
+
+    def _dictionary_of(self, group: h5py.Group, where: str) -> None:
+        if "type" not in _names(group):
+            self.error("E15", where, "a callable carries a type "
+                                     "string")
+        self._dictionary(group, where, top_level=True)
 
     def _dictionary(self, group: h5py.Group, where: str,
-                    top_level: bool) -> None:
+                    top_level: bool, depth: int = 0) -> None:
         """E32 and E33 over one dictionary group (section 25)."""
-        for name, member in group.items():
+        if depth > limits.MAX_DEPTH:
+            self.note(where, "this dictionary nests more than %d "
+                             "groups deep, and is not checked further"
+                      % limits.MAX_DEPTH)
+            return
+        for found in self.members(group, where):
+            name, member = found.name, found.obj
             if name.startswith(RESERVED_PREFIX):
                 continue
             path = "%s/%s" % (where, name)
@@ -859,9 +1054,10 @@ class _FileValidator:
                 self.error("E33", path, "a dictionary key is a legal "
                                         "netCDF-4 name")
             if isinstance(member, h5py.Group):
-                self._dictionary(member, path, top_level=False)
+                self._dictionary(member, path, top_level=False,
+                                 depth=depth + 1)
                 continue
-            if member.attrs.get("CLASS", b"") == b"DIMENSION_SCALE":
+            if h5safe.is_scale(member):
                 continue
             if member.ndim == 0:
                 self.error("E32", path, "a zero-dimensional array is "
@@ -897,37 +1093,57 @@ class _FileValidator:
         the root check already made.
         """
         self._object(self.f, "/")
-        stack = [(self.f, "")]
+        stack = [(self.f, "", 0)]
         while stack:
-            group, prefix = stack.pop()
-            for name, member in group.items():
+            group, prefix, depth = stack.pop()
+            if depth > limits.MAX_DEPTH:
+                self.note(prefix or "/", "this group nests more than "
+                                         "%d levels deep, and is not "
+                                         "checked further"
+                          % limits.MAX_DEPTH)
+                continue
+            for member in self.members(group, prefix or "/"):
+                name, obj = member.name, member.obj
                 path = "%s/%s" % (prefix, name)
                 if not prefix and name not in _ROOT_GROUPS \
                         and name != "row_support" \
-                        and isinstance(member, h5py.Group):
+                        and isinstance(obj, h5py.Group):
                     continue
                 if path == "/private":
                     continue
-                self._object(member, path)
-                if isinstance(member, h5py.Group):
-                    stack.append((member, path))
+                self.visited += 1
+                if self.visited > limits.MAX_OBJECTS:
+                    self.note(path, "this file holds more than %d "
+                                    "objects, and is not checked "
+                                    "further" % limits.MAX_OBJECTS)
+                    return
+                self.guarded(path, self._object, obj, path)
+                if isinstance(obj, h5py.Group):
+                    stack.append((obj, path, depth + 1))
                 else:
-                    self._dataset(member, path)
+                    self.guarded(path, self._dataset, obj, path)
 
     def _object(self, obj: Any, path: str) -> None:
-        for name in obj.attrs:
-            if name in MACHINERY:
-                continue
+        for name in h5safe.attr_names(obj):
             if not is_legal_name(name):
                 self.error("E33", path, "the attribute name %r is not "
                                         "a legal netCDF-4 name" % name)
-            self._attr_encoding(obj, name, path)
+            self.guarded(path, self._attr_encoding, obj, name, path)
 
     def _attr_encoding(self, obj: Any, name: str, path: str) -> None:
         """E19: the encoding section 18 requires (section 18)."""
         attr = obj.attrs.get_id(name)
         kind = _ATTR_KIND.get(name)
         htype = attr.get_type()
+        shape = h5safe.attr_shape(obj, name)
+        if shape:
+            # Section 18 gives every attribute it names a scalar
+            # dataspace; an array is an encoding this format does
+            # not have.
+            self.error("E19", path, "the attribute %s has the shape "
+                                    "%s, and section 18 gives every "
+                                    "attribute a scalar dataspace"
+                       % (name, tuple(shape)))
         if isinstance(htype, h5py.h5t.TypeStringID):
             if htype.is_variable_str():
                 self.error("E19", path, "the attribute %s is a "
@@ -945,12 +1161,23 @@ class _FileValidator:
                 self.error("E19", path, "the attribute %s is a %s and "
                                         "is stored as a string"
                            % (name, kind))
-            raw = obj.attrs[name]
-            if (isinstance(raw, bytes) and raw != NULL_SENTINEL
-                    and b"\x00" in raw.rstrip(b"\x00")):
-                self.error("E26", path, "the attribute %s holds a NUL "
-                                        "byte outside its trailing "
-                                        "padding" % name)
+            try:
+                raw = obj.attrs[name]
+            except Exception:
+                return
+            if isinstance(raw, np.ndarray) and raw.size:
+                raw = raw.reshape(-1)[0]
+            if isinstance(raw, bytes) and raw != NULL_SENTINEL:
+                body = raw.rstrip(b"\x00")
+                if b"\x00" in body:
+                    self.error("E26", path, "the attribute %s holds a "
+                                            "NUL byte outside its "
+                                            "trailing padding" % name)
+                try:
+                    body.decode("utf-8")
+                except UnicodeDecodeError:
+                    self.error("E26", path, "the attribute %s is not "
+                                            "valid UTF-8" % name)
             return
         dtype = attr.dtype
         if kind == "string":
@@ -991,28 +1218,20 @@ class _FileValidator:
                        % (name, dtype))
 
     def _dataset(self, dset: h5py.Dataset, path: str) -> None:
-        if dset.attrs.get("CLASS", b"") == b"DIMENSION_SCALE":
+        if h5safe.is_scale(dset):
             if (path.rsplit("/", 1)[-1] == "row"
-                    and dset.maxshape[0] is not None):
+                    and dset.maxshape and dset.maxshape[0] is not None):
                 self.error("E27", path, "row is an unlimited dimension "
                                         "in every file")
             return
-        for axis, names in enumerate(scale_names(dset)):
+        for axis, names in enumerate(h5safe.scale_names(dset)):
             if len(names) != 1:
                 self.error("E25", path, "axis %d carries %d dimension "
                                         "scales, and every axis "
                                         "carries exactly one"
                            % (axis, len(names)))
         self._scale_names(dset, path)
-        if dset.fletcher32:
-            self.error("E29", path, "fletcher32 is not one of the two "
-                                    "portable filters")
-        if dset.compression not in (None, "gzip"):
-            self.error("E29", path, "%s is not one of the two portable "
-                                    "filters" % dset.compression)
-        if dset.compression == "gzip" and \
-                not 1 <= int(dset.compression_opts or 0) <= 9:
-            self.error("E29", path, "gzip is allowed at levels 1 to 9")
+        self._filters(dset, path)
         dims = _logical(dset)
         if dims[:1] == ("row",):
             if dset.chunks is None:
@@ -1022,13 +1241,41 @@ class _FileValidator:
             else:
                 self._chunk(dset, path)
 
+    def _filters(self, dset: h5py.Dataset, path: str) -> None:
+        """E29: only gzip at levels 1 to 9, and shuffle (23).
+
+        Read from the creation property list rather than from h5py's
+        own properties, which report only the filters it knows: an
+        identifier no library has, or one with more client-data
+        values than a reader expects, would otherwise look like no
+        filter at all.
+        """
+        for code, _flags, values, name in h5safe.filters_of(dset):
+            if code == _FILTER_SHUFFLE:
+                continue
+            if code == _FILTER_DEFLATE:
+                level = int(values[0]) if values else 0
+                if not 1 <= level <= 9:
+                    self.error("E29", path, "gzip is allowed at levels "
+                                            "1 to 9, and this is %d"
+                               % level)
+                if len(values) > 1:
+                    self.error("E29", path, "gzip takes one client-data "
+                                            "value and this has %d"
+                               % len(values))
+                continue
+            self.error("E29", path, "the filter %d (%s) with %d "
+                                    "client-data value(s) is not one of "
+                                    "the two portable filters"
+                       % (code, name or "unnamed", len(values)))
+
     def _scale_names(self, dset: h5py.Dataset, path: str) -> None:
         """E25: the name section 21 requires for each axis."""
         wanted = _wanted_dims(path, dset)
         if wanted is None:
             return
         got = [names[0] if len(names) == 1 else None
-               for names in scale_names(dset)]
+               for names in h5safe.scale_names(dset)]
         for axis, (have, allowed) in enumerate(zip(got, wanted)):
             if have is None or allowed is None:
                 continue
@@ -1144,7 +1391,9 @@ class _FileValidator:
         """W03: non-finite values in a field or a scalar."""
         if dset.dtype.kind != "f" or not dset.size:
             return
-        values = np.asarray(dset[()])
+        values = self.values(dset, where)
+        if values is None or values.dtype.kind != "f":
+            return
         bad = ~np.isfinite(values)
         if bad.any():
             first = tuple(int(i) for i in np.argwhere(bad)[0])
@@ -1175,7 +1424,7 @@ def _logical(dset: h5py.Dataset) -> tuple[str, ...]:
     """The logical dimension names of a dataset, from its scales."""
     from .names import logical_dimension
     out = []
-    for names in scale_names(dset):
+    for names in h5safe.scale_names(dset):
         out.append(logical_dimension(names[0]) if len(names) == 1
                    else "")
     return tuple(out)
@@ -1188,7 +1437,7 @@ def _row_length(dset: h5py.Dataset) -> int:
     one (section 21), and the chunk default follows the dimension
     the dataset actually uses.
     """
-    names = scale_names(dset)
+    names = h5safe.scale_names(dset)
     if names and len(names[0]) == 1:
         scale = dset.dims[0][0]
         return int(scale.shape[0])
@@ -1269,6 +1518,10 @@ def _validate_dataset(ds: Dataset) -> Report:
     are not checked here; validate the file itself for those.
     """
     report = Report()
+    # What the reader met while opening the file this dataset came
+    # from: a link it would not follow, a member of the wrong kind,
+    # something the library would not read.
+    report.unclassified.extend(ds.problems)
 
     def error(rule: str, where: str, message: str) -> None:
         report.errors.append(Finding(rule, where, message))

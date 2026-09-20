@@ -14,6 +14,7 @@ from typing import Any
 import h5py
 import numpy as np
 
+from . import limits
 from .errors import MestraError
 from .names import MACHINERY
 
@@ -26,6 +27,7 @@ __all__ = [
     "nest",
     "is_fixed_string",
     "decode_string",
+    "normalise_attr",
     "write_string_attr",
     "write_raw_string_attr",
     "write_bool_attr",
@@ -35,7 +37,6 @@ __all__ = [
     "attribute_names",
     "make_scale",
     "attach",
-    "scale_names",
     "default_chunk_rows",
     "default_row_chunk",
     "support_digest",
@@ -73,10 +74,44 @@ def is_fixed_string(dtype: np.dtype) -> bool:
 
 
 def decode_string(raw: bytes | str) -> str:
-    """Strip trailing NUL bytes, then decode UTF-8 (section 18)."""
+    """Strip trailing NUL bytes, then decode UTF-8 (section 18).
+
+    Lenient on purpose: a fixed-length string that is not valid
+    UTF-8 comes back with the bad bytes replaced rather than
+    stopping the read, and the validator reports it (E26). The
+    length cap is there because a file may declare a string of any
+    size at all.
+    """
     if isinstance(raw, str):
         return raw
-    return raw.rstrip(b"\x00").decode("utf-8")
+    body = bytes(raw)[:limits.MAX_STRING_BYTES]
+    return body.rstrip(b"\x00").decode("utf-8", errors="replace")
+
+
+def normalise_attr(raw: Any) -> Any:
+    """One attribute value, whatever shape or type it arrived in.
+
+    Every attribute this specification names has a scalar
+    dataspace; an array one comes back as its first element, and
+    E19 is what reports the difference. Nothing here raises.
+    """
+    if isinstance(raw, np.ndarray):
+        if raw.size == 0:
+            return None
+        raw = raw.reshape(-1)[0]
+    if isinstance(raw, bytes):
+        return decode_string(raw)
+    if isinstance(raw, np.void):
+        return decode_string(raw.tobytes())
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, np.bool_):
+        return bool(raw)
+    if isinstance(raw, np.integer):
+        return int(raw)
+    if isinstance(raw, np.floating):
+        return float(raw)
+    return raw
 
 
 def encode_strings(values: Sequence[str], size: int | None = None
@@ -157,23 +192,33 @@ def read_attr(obj: Any, name: str) -> Any:
     int8 is a boolean, int64 an integer, float64 a float, and a
     fixed-length string a string with its trailing NUL bytes
     stripped (sections 18 and 25). The null sentinel comes back as
-    None.
+    None, and so does an attribute that cannot be read at all.
+
+    This call never raises. A file may store an attribute as an
+    array, as a string that is not UTF-8, or as a type the library
+    will not convert; each of those is a rule the validator reports
+    (E19, E26) and not a reason for a reader to stop.
     """
-    raw = obj.attrs[name]
-    if isinstance(raw, bytes):
-        if raw == NULL_SENTINEL:
+    try:
+        raw = obj.attrs[name]
+    except Exception:
+        return None
+    if isinstance(raw, bytes) and raw == NULL_SENTINEL:
+        return None
+    dtype = getattr(raw, "dtype", None)
+    if isinstance(raw, np.ndarray):
+        if raw.size == 0:
             return None
-        return decode_string(raw)
-    if isinstance(raw, str):
-        return raw
-    value = np.asarray(raw)
-    if value.dtype == np.int8:
-        return bool(value.reshape(-1)[0]) if value.size else False
-    if value.dtype.kind in "iu":
-        return int(value.reshape(-1)[0])
-    if value.dtype.kind == "f":
-        return float(value.reshape(-1)[0])
-    return raw
+        raw = raw.reshape(-1)[0]
+    if dtype is not None and dtype == np.int8:
+        # int8 is a boolean, here and inside a dictionary (25).
+        return bool(raw)
+    value = normalise_attr(raw)
+    if isinstance(value, (np.ndarray, np.generic)):
+        # A type this reader cannot reduce to one value, such as an
+        # object reference. E19 is what reports it.
+        return None
+    return value
 
 
 def attribute_names(obj: Any) -> list[str]:
@@ -199,19 +244,6 @@ def attach(dset: h5py.Dataset, scales: Iterable[h5py.Dataset]) -> None:
     for axis, scale in enumerate(scales):
         if scale is not None:
             dset.dims[axis].attach_scale(scale)
-
-
-def scale_names(dset: h5py.Dataset) -> list[tuple[str, ...]]:
-    """The link names of the scales attached to each axis.
-
-    The dimension's name is the scale's link name and never its NAME
-    attribute, which says the same sentence in every file (21).
-    """
-    names = []
-    for dim in dset.dims:
-        names.append(tuple(dim[i].name.rsplit("/", 1)[-1]
-                           for i in range(len(dim))))
-    return names
 
 
 # ---------------------------------------------------------- chunk default

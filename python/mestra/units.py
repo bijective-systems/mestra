@@ -26,6 +26,8 @@ import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
+from . import limits
+
 __all__ = ["Unit", "parse", "is_parseable", "same_dimensions"]
 
 #: The base dimensions every other unit is reduced to.
@@ -193,6 +195,10 @@ class _Parser:
     def __init__(self, text: str) -> None:
         self.tokens = list(_scan(text))
         self.at = 0
+        #: How many parentheses deep the parser is. A units string
+        #: is one or two levels; thousands is an attack on a
+        #: recursive descent parser and not a unit (limits).
+        self.depth = 0
 
     def peek(self) -> _Token | None:
         while (self.at < len(self.tokens)
@@ -264,7 +270,12 @@ class _Parser:
     def factor(self) -> dict[str, int]:
         token = self.take()
         if token.kind == "open":
+            if self.depth >= limits.MAX_UNITS_DEPTH:
+                raise _ParseError("more than %d parentheses deep"
+                                  % limits.MAX_UNITS_DEPTH)
+            self.depth += 1
             dims = self.expression()
+            self.depth -= 1
             close = self.peek()
             if close is None or close.kind != "close":
                 raise _ParseError("a group is not closed")
@@ -283,6 +294,8 @@ def parse(text: str) -> Unit | None:
     A None result is what the validator reports as W10.
     """
     if text is None:
+        return None
+    if len(text) > limits.MAX_UNITS_LENGTH:
         return None
     stripped = text.strip()
     if not stripped:

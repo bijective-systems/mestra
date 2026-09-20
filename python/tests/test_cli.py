@@ -44,7 +44,9 @@ def test_validate_several_files(capsys):
 
 def test_validate_a_file_that_is_not_there(capsys):
     assert main(["validate", "/no/such/file.mes"]) == 1
-    assert "cannot be read" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "E01" in out
+    assert "no file at this path" in out
 
 
 def test_info_is_one_screen(capsys):
