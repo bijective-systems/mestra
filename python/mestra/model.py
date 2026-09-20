@@ -46,6 +46,7 @@ __all__ = [
     "ScalarSlot",
     "ArraySlot",
     "Support",
+    "Callables",
     "Dataset",
     "KEY_ROLES",
     "ARRAY_ROLES",
@@ -916,6 +917,104 @@ class Support:
             self.name, self.kind, self.n_nodes, self.n_cells)
 
 
+# ------------------------------------------------------------ callables
+
+class Callables(dict):
+    """The file's callables by id, each read when it is asked for.
+
+    Section 7 of docs/api-conventions.md fixes what a metadata open
+    may read: "attributes, dataspaces, link types, and
+    dimension-scale structure, and ... a category table in full",
+    and "never a dataset inside a callable's dictionary; those wait
+    for the read". A callable's id is a link name and its `type` and
+    `repr` are attributes, so an open has every id without reading
+    anything; the dictionary is decoded the first time something
+    asks for the callable.
+
+    Everything that needs only the ids -- `len`, `in`, `sorted`,
+    truthiness -- therefore costs nothing, and `[id]`, `items()` and
+    `values()` read what they must. Reading needs the file still
+    open, as any other value a lazy read left behind does; an eager
+    read asks for them before it closes the file.
+
+    A dataset a builder makes has nothing pending and behaves as the
+    plain dictionary it is.
+    """
+
+    def __init__(self, *args: Any, **kw: Any) -> None:
+        super().__init__(*args, **kw)
+        self._pending: dict[str, Any] = {}
+
+    def defer(self, name: str, build: Any) -> None:
+        """Record a callable to be built the first time it is
+        asked for, and its id now."""
+        self._pending[name] = build
+        dict.__setitem__(self, name, None)
+
+    def __getitem__(self, name: Any) -> Any:
+        build = self._pending.pop(name, None)
+        if build is not None:
+            dict.__setitem__(self, name, build())
+        return dict.__getitem__(self, name)
+
+    def __setitem__(self, name: Any, value: Any) -> None:
+        self._pending.pop(name, None)
+        dict.__setitem__(self, name, value)
+
+    def __delitem__(self, name: Any) -> None:
+        self._pending.pop(name, None)
+        dict.__delitem__(self, name)
+
+    def get(self, name: Any, default: Any = None) -> Any:
+        if name not in self:
+            return default
+        return self[name]      # noqa: SIM401 - self.get would recurse
+
+    def pop(self, name: Any, *default: Any) -> Any:
+        if name in self:
+            value = self[name]
+            dict.__delitem__(self, name)
+            return value
+        if default:
+            return default[0]
+        raise KeyError(name)
+
+    def values(self) -> Any:
+        self.read_all()
+        return dict.values(self)
+
+    def items(self) -> Any:
+        self.read_all()
+        return dict.items(self)
+
+    def copy(self) -> dict[str, Any]:
+        self.read_all()
+        return dict(dict.items(self))
+
+    def __repr__(self) -> str:
+        self.read_all()
+        return dict.__repr__(self)
+
+    # An unread callable is held as None under its id, so that the
+    # ids cost nothing to list. Defining these two in Python is what
+    # keeps that private: it makes `dict(callables)` and
+    # `{**callables}` go through `keys()` and `__getitem__` instead
+    # of copying the underlying dictionary, which would hand out the
+    # placeholders.
+
+    def __iter__(self) -> Any:
+        return dict.__iter__(self)
+
+    def keys(self) -> Any:
+        return dict.keys(self)
+
+    def read_all(self) -> None:
+        """Read every dictionary still in the file. An eager read
+        calls this while the file is open."""
+        for name in list(self._pending):
+            self[name]
+
+
 # -------------------------------------------------------------- dataset
 
 class Dataset:
@@ -934,7 +1033,7 @@ class Dataset:
         self.scalars: dict[str, ScalarSlot] = {}
         self.categories: dict[str, CategoryTable] = {}
         self.supports: dict[str, Support] = {}
-        self.callables: dict[str, Any] = {}
+        self.callables: Callables = Callables()
         self._row_support: _Source | None = None
         self.notes: dict[str, Any] = dict(notes or {})
         #: Root attributes this reader does not know (W11).

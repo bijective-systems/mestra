@@ -176,8 +176,11 @@ def _create(group: h5py.Group, key: str, data: Any, dtype: Any,
     return group.create_dataset(
         key, shape=shape, dtype=dtype, data=data, track_times=False,
         # Section 25: every zero-length axis is created with an
-        # unlimited maximum, so that the dimension is legal.
-        maxshape=(None,) * len(shape) if empty else None,
+        # unlimited maximum, so that the dimension is legal. An axis
+        # that has a length keeps it, which is what the other three
+        # writers produce and what the scale on that axis says.
+        maxshape=tuple(None if n == 0 else n for n in shape)
+        if empty else None,
         chunks=(1,) * len(shape) if empty else None)
 
 
@@ -253,7 +256,19 @@ def _trouble(problems: list[Finding] | None, where: str,
 
 
 def decode_array(dset: h5py.Dataset, where: str = "") -> Any:
-    """One dictionary dataset as the value it holds (section 25)."""
+    """One dictionary dataset as the value it holds (section 25).
+
+    Every value this returns carries its own element type, so that
+    writing it again gives the same dataset. A numeric dataset is a
+    numpy array, which carries its dtype. A one-dimensional string
+    dataset is a list of `str`, whose elements carry the type -
+    except when it is empty, where a bare Python list would carry
+    nothing: section 25 makes "an empty list with no element type
+    known" the empty float64 dataset, so an empty string dataset
+    comes back as an empty numpy string array instead, which is the
+    Python value for "an empty list of strings" and which the writer
+    keeps as strings.
+    """
     where = where or dset.name
     if dset.ndim == 0:
         raise MestraError(
@@ -262,6 +277,8 @@ def decode_array(dset: h5py.Dataset, where: str = "") -> Any:
     values = h5safe.read_values(dset, where)
     if is_fixed_string(dset.dtype):
         flat = [decode_string(v) for v in np.asarray(values).reshape(-1)]
+        if not flat:
+            return np.empty(tuple(dset.shape), dtype="<U1")
         if dset.ndim == 1:
             return flat
         return np.array(flat, dtype=np.str_).reshape(dset.shape)

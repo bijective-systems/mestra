@@ -39,7 +39,11 @@ Five minutes
 ------------
 
 Open a file. Nothing is read from disk until you ask for a value, so
-opening a large file is cheap.
+opening a large file is cheap: an open reads attributes, dataspaces,
+link types and dimension-scale structure, and a category table in
+full, and never a slot's data or a dataset inside a callable's
+dictionary. It costs about a second on a file with a thousand
+columns, and grows with the number of them and not with its square.
 
     import mestra
 
@@ -88,6 +92,12 @@ Close it when you are done, or use it as a context manager:
 
 `mestra.read(path, lazy=False)` reads every value at once and closes
 the file for you.
+
+A callable's dictionary is a value like any other: `ds.callables`
+knows every id as soon as the file is open, and reads one dictionary
+the first time you ask for that callable. `lazy=False` asks for all
+of them before it closes the file, so a callable you got that way
+works afterwards.
 
 
 Build a file from arrays
@@ -305,7 +315,11 @@ Adding a type of your own is a subclass and one registration call:
 
 A file whose callable type you do not have still reads: its
 dictionary comes back whole, it can be copied and written out
-unchanged, and calling it is refused rather than guessed.
+unchanged, and calling it is refused rather than guessed. An empty
+list of strings in one comes back as an empty numpy string array and
+not as `[]`, because section 25 gives `[]` -- "an empty list with no
+element type known" -- the empty float64 dataset, and the two must
+stay apart across a round trip.
 
 
 Weights and integration

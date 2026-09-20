@@ -19,6 +19,7 @@ from inside the library. What it could not copy is named in
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import h5py
@@ -53,6 +54,23 @@ __all__ = ["read", "support_ids", "REFUSED"]
 #: than hand back values it does not trust. Everything else - a role
 #: it does not know, missing units, a cardinality - is the file
 #: describing itself badly, and the values still mean what they say.
+#: It is the set section 2 of docs/api-conventions.md fixes.
+#:
+#: One set decides every entry point, which is finding 13 of the
+#: Phase 3 report: the metadata open, an eager read, `mestra info`
+#: and any operation that reads a slot all go through `_refuse`
+#: below and all name the same rule for the same file. A file this
+#: reader opens is a file it will read, and a file it refuses to
+#: read is one it refuses to open; there is no file that opens and
+#: then fails on the first slot, and none that is refused at the
+#: door and would have read cleanly. `test_entry_points.py` holds
+#: that over every case of the corpus and every hostile file.
+#:
+#: The one difference section 29 allows is the element cap, and it
+#: goes the other way: "a lazy read and a row-range read are not
+#: subject to that last limit ... so the same file may be readable
+#: one way and E41 the other". A slot too large to materialise is
+#: E41 from an eager read of it and readable a row range at a time.
 REFUSED = ("E01", "E16", "E19", "E25", "E26", "E29", "E30", "E40",
            "E41")
 
@@ -103,6 +121,9 @@ def read(path: str, lazy: bool = True, strict: bool = True) -> Dataset:
     if lazy:
         dataset._file = handle
     else:
+        # An eager read reads everything, the callables' dictionaries
+        # with it, and it must do so before the file is closed.
+        dataset.callables.read_all()
         handle.close()
     return dataset
 
@@ -110,11 +131,19 @@ def read(path: str, lazy: bool = True, strict: bool = True) -> Dataset:
 def _refuse(handle: h5py.File, path: str) -> None:
     """Refuse a file this reader cannot vouch for (section 29).
 
-    The pass reads no more than `limits.MAX_OPEN_ELEMENTS` of any
-    one dataset, so opening a file costs a check and not a read.
+    Section 7 of docs/api-conventions.md fixes what this pass may
+    look at: "attributes, dataspaces, link types, and dimension-scale
+    structure, and ... a category table in full", and "never a slot's
+    data and never a dataset inside a callable's dictionary". The
+    nine rules of `REFUSED` are decided from exactly that, which is
+    why an open and a read name the same rule for the same file, and
+    why opening a file costs a check and not a read. The element cap
+    stands beside it for the tables, which are small by construction
+    but are still somebody else's number.
     """
     from .validator import scan
-    report = scan(handle, limit=limits.MAX_OPEN_ELEMENTS)
+    report = scan(handle, limit=limits.MAX_OPEN_ELEMENTS,
+                  tables_only=True)
     bad = [f for f in report.errors if f.rule in REFUSED]
     if bad:
         handle.close()
@@ -183,7 +212,12 @@ def _read(f: h5py.File, lazy: bool) -> Dataset:
     found = root.get("row_support")
     if found is not None and isinstance(found.obj, h5py.Dataset):
         ds._row_support = _source(f, "/row_support", found.obj, lazy)
-    _read_supports(f, ds, root, lazy)
+    # One scale index for the whole open, built from the handle this
+    # reader holds. Section 21 asks for a map from each scale's
+    # address to its link name, built during the reader's own
+    # bounded walk; building one per dataset instead is what made an
+    # open cost the square of the number of datasets.
+    _read_supports(f, ds, root, lazy, h5safe.scale_index(f))
     _read_callables(f, ds, root)
     notes = root.get("notes")
     if notes is not None and isinstance(notes.obj, h5py.Group):
@@ -292,8 +326,8 @@ def _storage(dset: h5py.Dataset) -> Storage:
                    shuffle=shuffle, contiguous=chunks is None)
 
 
-def _dims(dset: h5py.Dataset, fallback: tuple[str, ...]
-          ) -> tuple[str, ...]:
+def _dims(dset: h5py.Dataset, fallback: tuple[str, ...],
+          scales: Mapping[int, str]) -> tuple[str, ...]:
     """The logical dimension names, taken from the scales.
 
     A reader takes a dimension's name from the scale's link name and
@@ -301,7 +335,7 @@ def _dims(dset: h5py.Dataset, fallback: tuple[str, ...]
     no scale or more than one, which is a broken file (E25), the
     names the slot's own attributes imply are used instead.
     """
-    names = h5safe.scale_names(dset)
+    names = h5safe.scale_names(dset, scales)
     if not names or any(len(axis) != 1 for axis in names):
         return fallback
     return tuple(logical_dimension(axis[0]) for axis in names)
@@ -423,7 +457,8 @@ def _read_scalars(f: h5py.File, ds: Dataset,
 
 
 def _read_supports(f: h5py.File, ds: Dataset,
-                   root: dict[str, h5safe.Member], lazy: bool) -> None:
+                   root: dict[str, h5safe.Member], lazy: bool,
+                   scales: Mapping[int, str]) -> None:
     group = _group_of(ds, root, "supports")
     if group is None:
         return
@@ -439,11 +474,12 @@ def _read_supports(f: h5py.File, ds: Dataset,
                                 "dataset")
             continue
         ds.supports[member.name] = _read_support(
-            f, ds, member.name, member.obj, lazy)
+            f, ds, member.name, member.obj, lazy, scales)
 
 
 def _read_support(f: h5py.File, ds: Dataset, name: str,
-                  group: h5py.Group, lazy: bool) -> Support:
+                  group: h5py.Group, lazy: bool,
+                  scales: Mapping[int, str]) -> Support:
     attrs = h5safe.attr_names(group)
     n_nodes = read_attr(group, "n_nodes") if "n_nodes" in attrs else 0
     n_cells = read_attr(group, "n_cells") if "n_cells" in attrs else 0
@@ -474,7 +510,7 @@ def _read_support(f: h5py.File, ds: Dataset, name: str,
         if found.usable:
             support.coordinates = _read_array(
                 f, support, "coordinates", found.obj,
-                base + "/coordinates", "node", lazy)
+                base + "/coordinates", "node", lazy, scales)
         else:
             _problem(ds, base + "/coordinates",
                      found.problem or "unreadable",
@@ -500,7 +536,7 @@ def _read_support(f: h5py.File, ds: Dataset, name: str,
                 continue
             into[member.name] = _read_array(
                 f, support, member.name, member.obj, where, location,
-                lazy)
+                lazy, scales)
     for member in h5safe.members(group):
         if member.name in _SUPPORT_MEMBERS:
             continue
@@ -517,7 +553,8 @@ def _read_support(f: h5py.File, ds: Dataset, name: str,
 
 
 def _read_array(f: h5py.File, support: Support, name: str, member: Any,
-                path: str, location: str, lazy: bool) -> ArraySlot:
+                path: str, location: str, lazy: bool,
+                scales: Mapping[int, str]) -> ArraySlot:
     got = _slot_attrs(member)
     components = got.get("components", 1)
     slot = ArraySlot(
@@ -534,7 +571,7 @@ def _read_array(f: h5py.File, support: Support, name: str, member: Any,
     if isinstance(member, h5py.Dataset):
         slot.data = _source(f, path, member, lazy)
         slot.storage = _storage(member)
-        slot.dims = _dims(member, slot.dims)
+        slot.dims = _dims(member, slot.dims, scales)
     return slot
 
 
@@ -557,20 +594,34 @@ def _read_callables(f: h5py.File, ds: Dataset,
         attrs = h5safe.attr_names(member.obj)
         kind = read_attr(member.obj, "type") if "type" in attrs else ""
         line = read_attr(member.obj, "repr") if "repr" in attrs else None
+        # The id, the type and the repr line are a link name and two
+        # attributes, so an open has them. The dictionary is datasets
+        # and section 7 of docs/api-conventions.md says an open never
+        # reads one, so it waits until something asks for the
+        # callable.
+        ds.callables.defer(member.name, _build_callable(
+            ds, where, member.obj,
+            kind if isinstance(kind, str) else "",
+            line if isinstance(line, str) else None))
+
+
+def _build_callable(ds: Dataset, where: str, group: h5py.Group,
+                    kind: str, line: str | None) -> Any:
+    """What `Dataset.callables` runs the first time it is asked for
+    this callable: decode the dictionary and hand it to its type."""
+    def build() -> Any:
         trouble: list[Finding] = []
-        body = decode_dict(member.obj, problems=trouble)
+        body = decode_dict(group, problems=trouble)
         if trouble:
             ds.problems.extend(trouble)
             ds.lossy.append(where)
         try:
-            ds.callables[member.name] = callable_from_dict(
-                kind if isinstance(kind, str) else "", body,
-                line if isinstance(line, str) else None)
+            return callable_from_dict(kind, body, line)
         except MestraError as exc:
             _problem(ds, where, "this callable's dictionary does not "
                                 "fit its type: %s" % exc.message)
-            ds.callables[member.name] = callable_from_dict("", body,
-                                                           None)
+            return callable_from_dict("", body, None)
+    return build
 
 
 def _read_unknown_groups(ds: Dataset,
