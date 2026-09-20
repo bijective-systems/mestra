@@ -19,6 +19,11 @@ function out = evaluate(dataset, keysTable)
 %   its row count must match the table, and an error names the slot if
 %   it does not.
 %
+%   The result has no callables: every callable slot now holds data,
+%   so there is nothing left for one to serve, and the written file
+%   has no `/callables` group at all rather than an empty one
+%   (docs/api-conventions.md, section 7).
+%
 %   Example
 %
 %       d = mestra.read('affine_zero_rows.mes');
@@ -90,7 +95,14 @@ function out = evaluate(dataset, keysTable)
         end
         out.supports(i) = s;
     end
+    % Section 7 of docs/api-conventions.md: evaluating turns every
+    % callable slot into a stored slot, so the result has no callable
+    % to keep and the `/callables` group is absent from the file, not
+    % present and empty.  Dropping the callables is not enough on its
+    % own: the writer also writes a group the file it came from
+    % carried, so the group has to go from `groupsPresent` too.
     out.callables = mestra.Dataset.emptyCallable();
+    out.groupsPresent = setdiff(out.groupsPresent, {'callables'}, 'stable');
 end
 
 % ---------------------------------------------------------------------
@@ -126,6 +138,22 @@ function slot = fill(d, results, slot, path, keysTable, nRows, fileDims, ...
     if ~results.isKey(id)
         record = d.callable(id);
         if isempty(record.obj)
+            if ~isempty(record.type) && mestra.Registry.isKnown(record.type)
+                % The type is one this package can build, so what is
+                % missing is the dictionary to build it from.  A
+                % dataset from mestra.open has none, because an open
+                % does not read one (docs/api-conventions.md, section
+                % 7); a dataset from mestra.read has one that would
+                % not build.
+                error('mestra:evaluate', ...
+                      ['the callable "%s" has type "%s" and no object ' ...
+                       'built from it. A dataset from mestra.open ' ...
+                       'carries no dictionary, because an open does ' ...
+                       'not read one: read the file with mestra.read ' ...
+                       'to evaluate it. If it was read, the ' ...
+                       'dictionary does not describe a %s'], ...
+                      id, record.type, record.type);
+            end
             error('mestra:evaluate', ...
                   ['the callable "%s" has type "%s", which no registered ' ...
                    'type can evaluate; register it with ' ...
