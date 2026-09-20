@@ -224,7 +224,7 @@ def _read(f: h5py.File, lazy: bool) -> Dataset:
         ds.present.add("notes")
         for name in h5safe.attr_names(notes.obj):
             ds.notes[name] = read_attr(notes.obj, name)
-    _read_unknown_groups(ds, root)
+    _read_unknown_groups(ds, root, lazy, h5safe.scale_index(f))
     return ds
 
 
@@ -548,7 +548,8 @@ def _read_support(f: h5py.File, ds: Dataset, name: str,
             continue
         if isinstance(member.obj, h5py.Group):
             support.opaque[member.name] = opaque.capture(
-                member.obj, where, 0, ds.problems, ds.lossy)
+                member.obj, where, 0, ds.problems, ds.lossy, lazy,
+                scales)
     return support
 
 
@@ -624,8 +625,9 @@ def _build_callable(ds: Dataset, where: str, group: h5py.Group,
     return build
 
 
-def _read_unknown_groups(ds: Dataset,
-                         root: dict[str, h5safe.Member]) -> None:
+def _read_unknown_groups(ds: Dataset, root: dict[str, h5safe.Member],
+                         lazy: bool,
+                         scales: Mapping[int, str]) -> None:
     """Keep /private and any group section 28 lets a version add.
 
     A reader must not interpret /private and must not require it
@@ -633,6 +635,12 @@ def _read_unknown_groups(ds: Dataset,
     not throw away the producer's own records. What it could not
     copy, because of a link, a depth or a size, is a finding and a
     refusal to rewrite rather than a silent loss.
+
+    A lazy open copies the shape of what is there and leaves the
+    values in the file, because section 29 says an open reads no
+    array and a producer's own records are arrays like any other.
+    `scales` is this pass's scale index, which is how an axis
+    attached to a scale outside the copied group is named.
     """
     for name, member in root.items():
         if name == "row_support":
@@ -644,4 +652,5 @@ def _read_unknown_groups(ds: Dataset,
         if not isinstance(member.obj, h5py.Group):
             continue                  # a dimension scale at root
         ds.opaque[name] = opaque.capture(member.obj, "/" + name, 0,
-                                         ds.problems, ds.lossy)
+                                         ds.problems, ds.lossy, lazy,
+                                         scales)
