@@ -19,8 +19,14 @@ VALID = corpus.valid_case_names()
 
 
 def test_the_corpus_is_where_it_should_be():
-    assert len(CASES) == 70
-    assert len(VALID) == 30
+    """Seventy-five cases since the third reconciliation, which added
+    `compressed_field`, `wide_keys`, `notes_and_private`, `err_e42`
+    and `err_e43`. Three of the five are valid files, so the cases a
+    reader and a writer must handle end to end went from thirty to
+    thirty-three. `wide_keys` is generated on demand, as
+    vectors/README.md says: `python vectors/generate.py --wide`."""
+    assert len(CASES) == 75
+    assert len(VALID) == 33
     assert len(WITH_CODEC) == 5
 
 
