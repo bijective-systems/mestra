@@ -12,7 +12,14 @@ What is here:
 
     SPEC.md               the normative draft: concepts, roles, layout,
                           validator rules, the two states, the boundary
-                          between public data and private model state
+                          between public data and private model state,
+                          and, in sections 18 to 30, the byte-level
+                          detail an implementer needs
+    docs/example.md       two valid files listed object by object and
+                          value by value; the document to keep open
+                          while implementing
+    docs/examples/        those two files, and the script that writes
+                          them with h5py alone
     docs/mappings.md      five real datasets mapped onto the model on
                           paper, which is the test the model must pass
                           before any code is written
