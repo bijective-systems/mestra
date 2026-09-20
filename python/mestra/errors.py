@@ -49,7 +49,11 @@ class TooLarge(MestraError):
 
 @dataclass(frozen=True)
 class Finding:
-    """One validator outcome: a rule identifier and where it applies."""
+    """One validator outcome: a rule identifier and where it applies.
+
+    Printed as `<id> <path>: <message>`, which is the line every
+    language's command-line tool prints.
+    """
 
     rule: str
     where: str
@@ -57,5 +61,5 @@ class Finding:
 
     def __str__(self) -> str:
         if self.where:
-            return "%s  %s: %s" % (self.rule, self.where, self.message)
-        return "%s  %s" % (self.rule, self.message)
+            return "%s %s: %s" % (self.rule, self.where, self.message)
+        return "%s: %s" % (self.rule, self.message)
