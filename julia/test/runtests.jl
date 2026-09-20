@@ -783,6 +783,55 @@ end
     @test "E20" in bad.errors
 end
 
+"""The HDF5 object header version of every object in a file.
+
+Section 30 asks a golden file to be byte reproducible, and
+`vectors/README.md` rejects the newer object header layout for the
+corpus because its root header records four timestamps.  The version
+is not something section 30's structural equality compares, so it is
+read here directly."""
+function header_versions(path::AbstractString)
+    out = Dict{String,Int}()
+    HDF5.h5open(String(path), "r") do f
+        out["/"] = Int(HDF5.API.h5o_get_native_info(f).hdr.version)
+        Mestra.walk_objects(f) do p, obj
+            out[p] = Int(HDF5.API.h5o_get_native_info(obj).hdr.version)
+        end
+    end
+    return out
+end
+
+@testset "the writer writes the corpus's object header layout (finding 8)" begin
+    # libhdf5 2.0 changed the default low libver bound from
+    # `earliest` to `v18`, so a writer that takes the default writes
+    # version-2 object headers.  The root one then records when the
+    # file was written, which costs byte reproducibility, and every
+    # reader pays for the layout as well.  `Mestra.WRITER_LIBVER` is
+    # the one call that decides it.
+    for name in ("mesh_two_rows", "affine_with_rows", "scalars_only",
+                 "two_supports_unaligned", "labels_tables",
+                 "cascade_varying_geometry")
+        src = case_file(name)
+        dst = joinpath(SCRATCH, "hdr_" * name * ".mes")
+        Mestra.write(Mestra.read(src; lazy = false), dst)
+        @test isempty(Mestra.structural_diff(src, dst))
+        want = header_versions(src)
+        got = header_versions(dst)
+        @test sort(collect(keys(got))) == sort(collect(keys(want)))
+        @test got == want
+        @test all(==(1), values(got))
+    end
+    # and two writes a second apart are the same bytes, which is what
+    # `julia/README.md` claims and what section 30 asks of a generator
+    ds = Mestra.read(case_file("mesh_two_rows"); lazy = false)
+    a = joinpath(SCRATCH, "twice_a.mes")
+    b = joinpath(SCRATCH, "twice_b.mes")
+    Mestra.write(ds, a)
+    sleep(1.1)
+    Mestra.write(ds, b)
+    @test read(a) == read(b)
+end
+
 @testset "gzip and shuffle, the two portable filters (section 23)" begin
     ds = Mestra.Dataset(writer = "mestra.jl test 0",
                         created = "2026-09-19T00:00:00Z")
