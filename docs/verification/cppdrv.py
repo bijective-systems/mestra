@@ -9,6 +9,7 @@ nothing else: every answer comes out of the tool.
   cppdrv.py CLI eval  FILE SPEC.json
   cppdrv.py CLI evalw FILE SPEC.json OUT.mes
   cppdrv.py CLI codec FILE
+  cppdrv.py CLI corpus [REPO]
 """
 
 from __future__ import annotations
@@ -16,13 +17,69 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
+import time
 
 AXES = ("row", "instance", "draw", "node", "cell", "cell_plus_one",
         "component", "index")
 TIMEOUT = 60
+
+# One finding in the human form of conventions section 5:
+# "<id> <path>: <message>", the identifier a letter and two digits.
+FINDING = re.compile(r"^([EW]\d{2,})\s+(\S.*?):")
+# The summary line the same form ends with.
+SUMMARY = re.compile(r"^(\d+) error\(s\), (\d+) warning\(s\)$")
+
+
+def parse_findings(text):
+    """The rule identifiers in whatever form `validate` printed.
+
+    Two forms have to be read. `validate --ids` prints "E <id>" and
+    "W <id>" one per line, and "! <path>: <message>" for a finding
+    that has no identifier. Plain `validate` prints the human form
+    of conventions section 5, "<id> <path>: <message>", and ends
+    with "<n> error(s), <m> warning(s)". Reading both means the
+    driver survives the next change to either.
+
+    Returns (errors, warnings, trouble). `trouble` carries the
+    unidentified findings and any line neither form explains, and
+    the counts from a summary line that disagrees with what was
+    parsed, which is how a third form would announce itself instead
+    of passing as an empty result.
+    """
+    errors, warnings, trouble = [], [], []
+    summary = None
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] in ("E", "W"):
+            (errors if parts[0] == "E" else warnings).append(parts[1])
+            continue
+        if parts[0] == "!":
+            trouble.append("validate: " + line.strip())
+            continue
+        m = FINDING.match(line)
+        if m:
+            ident = m.group(1)
+            (errors if ident[0] == "E" else warnings).append(ident)
+            continue
+        m = SUMMARY.match(line.strip())
+        if m:
+            summary = (int(m.group(1)), int(m.group(2)))
+            continue
+        trouble.append("validate: " + line.strip())
+    errors = sorted(set(errors))
+    warnings = sorted(set(warnings))
+    if summary is not None and summary != (len(errors), len(warnings)):
+        trouble.append(
+            "validate: the summary says %d error(s), %d warning(s) and "
+            "%d and %d were parsed" % (summary[0], summary[1],
+                                       len(errors), len(warnings)))
+    return errors, warnings, trouble
 
 
 def run(cli, *args, timeout=TIMEOUT):
@@ -34,19 +91,16 @@ def run(cli, *args, timeout=TIMEOUT):
 def do_check(cli, path, probes_path):
     out = {"errors": [], "warnings": [], "support_ids": {}, "probes": [],
            "trouble": []}
-    code, so, se = run(cli, "validate", path)
-    for line in so.splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and parts[0] == "E":
-            out["errors"].append(parts[1])
-        elif len(parts) >= 2 and parts[0] == "W":
-            out["warnings"].append(parts[1])
-        elif line.strip():
-            out["trouble"].append("validate: " + line.strip())
+    # `--ids` is the form meant for a script; `parse_findings` reads
+    # the human form too, so the driver keeps working if the flag or
+    # the layout changes again.
+    code, so, se = run(cli, "validate", "--ids", path)
+    errors, warnings, trouble = parse_findings(so)
+    out["errors"] = errors
+    out["warnings"] = warnings
+    out["trouble"].extend(trouble)
     if se.strip():
         out["trouble"].append("validate stderr: " + se.strip()[:200])
-    out["errors"] = sorted(set(out["errors"]))
-    out["warnings"] = sorted(set(out["warnings"]))
 
     code, so, se = run(cli, "info", path)
     names = [ln.split()[1] for ln in so.splitlines() if ln.startswith("support ")]
@@ -209,6 +263,83 @@ def do_codec(cli, path):
     return out
 
 
+def do_corpus(cli, root=None):
+    """The C++ validator's rule ids against every expected.json.
+
+    The whole corpus and the whole hostile subset, judged on the
+    identifiers alone: no writing, no probing, no other language.
+    A corpus case must give exactly the errors and warnings its
+    expected.json states. A hostile file must give at least its
+    `required_errors` -- section 30 allows more -- and must exit
+    cleanly inside its `timeout_seconds`.
+
+    One line per file that disagrees, then the counts.
+    """
+    root = root or os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))))
+    vectors = os.path.join(root, "vectors")
+    manifest = json.load(open(os.path.join(vectors, "manifest.json")))
+    cases = [c["name"] for c in manifest["cases"]]
+    hostile = [c["name"] for c in manifest.get("hostile", [])]
+    out = {"cases": len(cases), "hostile": len(hostile),
+           "cases_agreed": 0, "hostile_agreed": 0, "disagreements": []}
+
+    for name in cases:
+        d = os.path.join(vectors, "cases", name)
+        exp = json.load(open(os.path.join(d, "expected.json")))
+        errors, warnings, trouble = parse_findings(
+            run(cli, "validate", "--ids", os.path.join(d, "case.mes"))[1])
+        bad = list(trouble)
+        if errors != exp["validator"]["errors"]:
+            bad.append("errors %s, expected %s"
+                       % (errors, exp["validator"]["errors"]))
+        if warnings != exp["validator"]["warnings"]:
+            bad.append("warnings %s, expected %s"
+                       % (warnings, exp["validator"]["warnings"]))
+        if bad:
+            out["disagreements"].append({"case": name, "why": bad})
+        else:
+            out["cases_agreed"] += 1
+
+    for name in hostile:
+        d = os.path.join(vectors, "hostile", name)
+        exp = json.load(open(os.path.join(d, "expected.json")))
+        limit = exp.get("timeout_seconds", 10)
+        began = time.monotonic()
+        try:
+            code, so, _se = run(cli, "validate", "--ids",
+                                os.path.join(d, "case.mes"),
+                                timeout=limit)
+        except subprocess.TimeoutExpired:
+            out["disagreements"].append(
+                {"case": "hostile/" + name,
+                 "why": ["did not finish inside %ds" % limit]})
+            continue
+        took = time.monotonic() - began
+        errors, warnings, trouble = parse_findings(so)
+        bad = list(trouble)
+        missing = [i for i in exp["required_errors"] if i not in errors]
+        if missing:
+            bad.append("missing %s; reported %s" % (missing, errors))
+        if code < 0:
+            bad.append("killed by signal %d" % -code)
+        if took > limit:
+            bad.append("took %.1fs, the limit is %ds" % (took, limit))
+        if bad:
+            out["disagreements"].append({"case": "hostile/" + name,
+                                         "why": bad})
+        else:
+            out["hostile_agreed"] += 1
+
+    for one in out["disagreements"]:
+        for why in one["why"]:
+            print("%-30s %s" % (one["case"], why))
+    print("%d of %d corpus cases agree; %d of %d hostile files meet "
+          "the contract" % (out["cases_agreed"], out["cases"],
+                            out["hostile_agreed"], out["hostile"]))
+    return out
+
+
 def run_job(cli, job):
     op = job["op"]
     if op == "check":
@@ -250,6 +381,9 @@ def main(argv):
         result = do_eval(cli, argv[3], argv[4], argv[5])
     elif mode == "codec":
         result = do_codec(cli, argv[3])
+    elif mode == "corpus":
+        do_corpus(cli, argv[3] if len(argv) > 3 else None)
+        return 0
     else:
         raise SystemExit("unknown mode %s" % mode)
     json.dump(result, sys.stdout)

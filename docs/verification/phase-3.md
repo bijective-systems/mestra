@@ -808,3 +808,65 @@ only fast on files the fourth does not write. The format is correct
 at the size the corpus tests, six nodes and three rows, and nobody
 has yet asked it to carry the size a real dataset will be. That is
 the work I would do before Phase 4 touches it.
+
+
+13. Addendum, 2026-09-20: the C++ id comparison
+------------------------------------------------
+
+Added by the cleanup pass that followed this report. It corrects one
+thing in the method above, and it is written here rather than in the
+sections it touches so that what the report said on the day it was
+written still reads as it did.
+
+**What was vacuous.** `cppdrv.py` read the C++ validator's rule ids
+by taking the first two fields of each line of `mestra-cli validate`
+and keeping those whose first field was `E` or `W`. That was the
+tool's only output when this report was run, and it was right then.
+The same day, the conventions pass gave the tool the human form of
+conventions section 5 -- `<id> <path>: <message>`, then
+`<n> error(s), <m> warning(s)` -- and moved the terse form behind
+`--ids`. `cppdrv.py` was not changed with it. From that merge on,
+every line of a validator run failed both tests, the driver returned
+an empty error list and an empty warning list for every file, and the
+lines went into a `trouble` field that `harness.py` never reads. A
+C++ column was still printed, and it was no longer a measurement.
+
+How much it hid, measured by running the old parser against the
+current tool over the whole corpus: 16 of the 75 cases agree, and
+they are exactly the 16 whose expected error and warning lists are
+both empty, so the agreement is between two empty lists; the other 59
+disagree, and 0 of the 15 hostile files report a required id, because
+every one of them requires at least one. Nothing in section 2 rests
+on this: that matrix was run before the tool's output changed, and
+its C++ column was a real comparison. What was lost was the ability
+to run it again.
+
+**The fix.** `cppdrv.py` now calls `validate --ids`, which is the
+form the tool offers a script, and parses both forms, so that the
+driver survives the next change to either. A summary line that
+disagrees with the ids parsed beside it is reported as trouble, which
+is how a third output form would announce itself rather than pass as
+an empty result. `cppdrv.py CLI corpus` was added: it compares the
+C++ validator's ids against every `expected.json` directly, with no
+writing, no probing and no other language, which is the comparison
+that was silently not happening.
+
+**The measured result.** With the tool built from this tree:
+
+    $PY docs/verification/cppdrv.py cpp/build/mestra-cli corpus
+
+    75 of 75 corpus cases agree; 15 of 15 hostile files meet the
+    contract
+
+Every corpus case gives exactly the errors and exactly the warnings
+its `expected.json` states -- not a superset, and the warnings as
+well as the errors -- and every hostile file reports each of its
+`required_errors` and exits cleanly inside its ten-second limit. The
+corpus is 75 cases and 15 hostile files here, against the 70 and 15
+of section 1: decision 56 added `compressed_field`, `wide_keys` and
+`notes_and_private`, and decisions 52 and 54 brought `err_e42` and
+`err_e43` with them. The comparison covers all of them, valid and
+invalid alike, where section 2 covered the valid ones only.
+
+So the C++ result this report states is confirmed rather than
+corrected, and it is now reproducible with one command.
