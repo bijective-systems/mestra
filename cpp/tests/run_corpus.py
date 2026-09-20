@@ -16,6 +16,7 @@ it skips with a note when h5py is not importable.
 import argparse
 import json
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -45,6 +46,45 @@ class Tool(object):
             raise RuntimeError("mestra-cli %s failed: %s"
                                % (" ".join(arguments), done.stderr.strip()))
         return done.stdout
+
+
+# ---------------------------------------------------- validator output
+
+# docs/api-conventions.md section 5: every finding is printed as
+# "<id> <path>: <message>" and the run ends with the counts.  A fault
+# no rule covers carries no identifier and is printed as "! ".
+FINDING = re.compile(r"^([EW][0-9]{2}) (\S+): (.*)$")
+SUMMARY = re.compile(r"^([0-9]+) error\(s\), ([0-9]+) warning\(s\)$")
+
+
+def findings_of(text):
+    """The identifiers the tool printed, sorted and without
+    duplicates, which is the form expected.json compares, and the
+    problems with the shape of the output itself."""
+    lines = text.splitlines()
+    ids = []
+    printed = 0
+    for line in lines[:-1] if lines else []:
+        match = FINDING.match(line)
+        if match:
+            ids.append(match.group(1))
+            printed += 1
+        elif line.startswith("! "):
+            printed += 1
+        else:
+            return None, None, "not a finding line: %r" % (line,)
+    summary = SUMMARY.match(lines[-1]) if lines else None
+    if summary is None:
+        return None, None, ("the last line is not "
+                            "\"<n> error(s), <m> warning(s)\": %r"
+                            % (lines[-1] if lines else "",))
+    counted = int(summary.group(1)) + int(summary.group(2))
+    if counted != printed:
+        return None, None, ("the summary counts %d finding(s) and %d "
+                            "were printed" % (counted, printed))
+    errors = sorted({i for i in ids if i.startswith("E")})
+    warnings = sorted({i for i in ids if i.startswith("W")})
+    return errors, warnings, None
 
 
 # ------------------------------------------------------- float compare
@@ -230,11 +270,13 @@ def run_case(tool, directory, name, totals, problems):
                         % (name, what, got, want))
 
     # --- the validator ------------------------------------------------
-    lines = tool.run("validate", mes, allowed=(0, 1)).splitlines()
-    errors = [line[2:] for line in lines if line.startswith("E ")]
-    warnings = [line[2:] for line in lines if line.startswith("W ")]
+    errors, warnings, malformed = findings_of(
+        tool.run("validate", mes, allowed=(0, 1)))
     totals["validator"] += 1
-    if errors != expected["validator"]["errors"] or \
+    if malformed is not None:
+        fail("validator output", malformed,
+             "<id> <path>: <message> lines and a summary")
+    elif errors != expected["validator"]["errors"] or \
             warnings != expected["validator"]["warnings"]:
         fail("validator outcome",
              "errors=%s warnings=%s" % (errors, warnings),

@@ -75,6 +75,49 @@ bool is_null_sentinel_bytes(const std::string& raw) {
   return raw.size() == 5 && raw[0] == '\0' && raw.compare(1, 4, "null") == 0;
 }
 
+// A rule that could fire once per row reports once, with the count
+// and the first three rows (conventions section 5).  A validator that
+// prints 1,800 copies of one sentence is not telling a reader
+// anything the count would not, and a reader still needs somewhere to
+// start looking, which is what the three indices are for.
+class PerRow {
+ public:
+  explicit PerRow(const char* noun = "row") : noun_(noun) {}
+
+  // The count is of values that broke the rule; the three indices are
+  // distinct, because three copies of the same row number tell a
+  // reader nothing about where to look next.
+  void hit(std::size_t at) {
+    ++count_;
+    if (first_.size() < 3 && (first_.empty() || first_.back() != at)) {
+      first_.push_back(at);
+    }
+  }
+  bool any() const { return count_ != 0; }
+  std::size_t count() const { return count_; }
+
+  // "<n> <what>; rows 3, 7, 9"
+  std::string message(const std::string& what) const {
+    std::string out = internal::format_i64(
+                          static_cast<std::int64_t>(count_)) + " " + what;
+    if (first_.empty()) return out;
+    out += "; ";
+    out += noun_;
+    if (first_.size() > 1) out += "s";
+    out += " ";
+    for (std::size_t i = 0; i < first_.size(); ++i) {
+      if (i != 0) out += ", ";
+      out += internal::format_i64(static_cast<std::int64_t>(first_[i]));
+    }
+    return out;
+  }
+
+ private:
+  const char* noun_;
+  std::size_t count_ = 0;
+  std::vector<std::size_t> first_;
+};
+
 // What a slot's axes look like, taken from the dimension scales.
 struct Axes {
   std::vector<std::string> logical;   // one per axis, "" when unknown
@@ -778,14 +821,16 @@ void Validator::keys() {
     }
 
     if (k.dtype == DType::Float64 && (k.has_lower || k.has_upper)) {
-      bool outside = false;
+      PerRow outside;
       double lo = 0.0;
       double hi = 0.0;
       bool any = false;
-      for (const double v : k.f64) {
+      for (std::size_t i = 0; i < k.f64.size(); ++i) {
+        const double v = k.f64[i];
         if (!std::isfinite(v)) continue;
-        if (k.has_lower && v < k.lower) outside = true;
-        if (k.has_upper && v > k.upper) outside = true;
+        if ((k.has_lower && v < k.lower) || (k.has_upper && v > k.upper)) {
+          outside.hit(i);
+        }
         if (!any) {
           lo = v;
           hi = v;
@@ -795,8 +840,9 @@ void Validator::keys() {
           hi = std::max(hi, v);
         }
       }
-      if (outside) {
-        warn("W04", p, "a key value outside its declared bounds");
+      if (outside.any()) {
+        warn("W04", p,
+             outside.message("key value(s) outside the declared bounds"));
       } else if (k.has_lower && k.has_upper && any && hi > lo) {
         // Decision 20: more than a factor of four in width.  A value
         // outside the bounds is W04 and not W08, and decision 36
@@ -841,12 +887,13 @@ void Validator::keys() {
           converged = static_cast<std::int64_t>(i);
         }
       }
-      for (const std::int64_t v : status_key->i64) {
-        if (v != converged) {
-          warn("W02", "/keys/" + status_key->name,
-               "a row whose status is not converged");
-          break;
-        }
+      PerRow other;
+      for (std::size_t i = 0; i < status_key->i64.size(); ++i) {
+        if (status_key->i64[i] != converged) other.hit(i);
+      }
+      if (other.any()) {
+        warn("W02", "/keys/" + status_key->name,
+             other.message("row(s) whose status is not converged"));
       }
     }
   }
@@ -969,11 +1016,16 @@ void Validator::scalars() {
     check_dataset_storage(p, info, true,
                           static_cast<std::size_t>(n_rows_));
     if (dtype == DType::Float64) {
-      for (const double v : reals(p)) {
-        if (!std::isfinite(v)) {
-          warn("W03", p, "a non-finite value in a scalar");
-          break;
-        }
+      PerRow missing;
+      const std::vector<double> values = reals(p);
+      for (std::size_t i = 0; i < values.size(); ++i) {
+        if (!std::isfinite(values[i])) missing.hit(i);
+      }
+      if (missing.any()) {
+        warn("W03", p,
+             missing.message("non-finite value(s) in a scalar, which is "
+                             "how this format spells missing "
+                             "floating-point data"));
       }
     }
     });
@@ -1477,11 +1529,25 @@ void Validator::slot(const std::string& path,
 
   if ((role == "field" || role == "derived") && dtype_ok &&
       dtype == DType::Float64) {
-    for (const double v : reals(path)) {
-      if (!std::isfinite(v)) {
-        warn("W03", path, "a non-finite value in a " + role);
-        break;
+    // Per row where the array has rows, and per stored element where
+    // it has none, so that the three indices a reader is given always
+    // point at something they can look up.
+    std::size_t per_row = 1;
+    for (std::size_t i = 1; i < axes.extent.size(); ++i) {
+      per_row *= axes.extent[i] == 0 ? 1 : axes.extent[i];
+    }
+    PerRow missing(row_leading ? "row" : "index");
+    const std::vector<double> values = reals(path);
+    for (std::size_t i = 0; i < values.size(); ++i) {
+      if (!std::isfinite(values[i])) {
+        missing.hit(row_leading ? i / per_row : i);
       }
+    }
+    if (missing.any()) {
+      warn("W03", path,
+           missing.message("non-finite value(s) in a " + role +
+                           ", which is how this format spells missing "
+                           "floating-point data"));
     }
   }
 
