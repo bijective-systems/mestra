@@ -316,6 +316,7 @@ class Validator {
                             bool warn_oversize);
   void check_dataset_storage(const std::string& path, const DsetInfo& info,
                              bool is_row_dataset, std::size_t chunk_rows);
+  void check_unlimited(const std::string& path, const DsetInfo& info);
   void unknown_dataset(const std::string& path, const DsetInfo& info);
 
   void root();
@@ -440,10 +441,43 @@ void Validator::check_string_dataset(const std::string& path,
   }
 }
 
+// E43, decision 54.  `row` is the only dimension that may be
+// unlimited, file-level or support-local, because every other
+// dimension carries its length in its name and one that grows makes
+// its own name false.  The check is on the dataspace: an axis whose
+// maximum extent is H5S_UNLIMITED is legal only where the scale
+// attached to it is `row`, or where the object is the `row` scale
+// itself.  Section 25's zero-length dictionary axis is the one
+// exception, because HDF5 has no other legal way to write it.
+void Validator::check_unlimited(const std::string& path,
+                                const DsetInfo& info) {
+  const bool in_dictionary = path.compare(0, 11, "/callables/") == 0;
+  for (std::size_t axis = 0; axis < info.maxshape.size(); ++axis) {
+    if (info.maxshape[axis] != H5S_UNLIMITED) continue;
+    if (in_dictionary && axis < info.shape.size() &&
+        info.shape[axis] == 0) {
+      continue;
+    }
+    bool is_row = false;
+    if (info.is_scale) {
+      is_row = internal::basename(path) == "row";
+    } else if (axis < info.scales.size()) {
+      for (const std::string& name : info.scales[axis]) {
+        if (name == "row") is_row = true;
+      }
+    }
+    if (is_row) continue;
+    error("E43", path,
+          "axis " + internal::format_i64(static_cast<std::int64_t>(axis)) +
+              " is unlimited and is not `row`");
+  }
+}
+
 void Validator::check_dataset_storage(const std::string& path,
                                       const DsetInfo& info,
                                       bool is_row_dataset,
                                       std::size_t chunk_rows) {
+  check_unlimited(path, info);
   for (const auto& filter : info.filters) {
     const int id = filter.first;
     if (id == H5Z_FILTER_SHUFFLE) continue;
@@ -541,6 +575,20 @@ void Validator::scales() {
                   "a dimension scale with no NAME attribute, which section "
                   "21 requires of one");
           }
+          // E42, decision 52.  Nothing about the creation properties
+          // is visible in a byte position, so the rule is checked by
+          // asking the property list back.  A scale created without
+          // them keeps its REFERENCE_LIST in an object header message,
+          // where an attribute may not exceed 64 KiB, so it takes at
+          // most 4085 attachments and the 4086th destroys the list on
+          // its way to failing.
+          if (!info.attr_order_tracked || !info.attr_order_indexed) {
+            error("E42", child,
+                  "a dimension scale created without attribute creation "
+                  "order tracked and indexed, which section 21 requires: "
+                  "such a scale takes at most 4085 attachments");
+          }
+          check_unlimited(child, info);
         }
         if (!internal::known_dataset_path(child, info.is_scale)) {
           unknown_dataset(child, info);
