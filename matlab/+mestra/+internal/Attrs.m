@@ -47,7 +47,11 @@ classdef Attrs
             kinds = mestra.internal.Attrs.kinds();
             for name = H5.publicAttrNames(oid)
                 try
-                    info = H5.attrInfo(oid, name{1});
+                    % One open of the attribute answers both what it
+                    % is and what it holds.  Every finding below needs
+                    % one or the other, and asking separately opened
+                    % each attribute of each object two or three times.
+                    info = H5.attrDetail(oid, name{1});
                 catch err
                     found = mestra.internal.Attrs.add(found, 'E41', ...
                         name{1}, sprintf( ...
@@ -89,7 +93,7 @@ classdef Attrs
                         continue
                     end
                     if strcmp(want, 'int8')
-                        v = H5.readAttr(oid, name{1});
+                        v = info.raw;
                         if ~any(double(v) == [0 1])
                             found = mestra.internal.Attrs.add(found, 'E19', ...
                                 name{1}, sprintf( ...
@@ -100,7 +104,7 @@ classdef Attrs
                 end
                 if strcmp(info.type, 'string')
                     try
-                        bytes = H5.readRawStrAttr(oid, name{1});
+                        bytes = H5.stringBytes(info.raw, name{1});
                         [ok, why] = ...
                             mestra.internal.Text.checkStringBytes(bytes);
                         if ~ok

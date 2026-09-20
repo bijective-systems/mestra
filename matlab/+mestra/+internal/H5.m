@@ -118,8 +118,14 @@ classdef H5
 
         function v = cast(name, data)
         %cast  Convert a MATLAB array to the class a type name names.
+        %   float32 is forbidden in the public part of a file
+        %   (section 19), but /private and any group this version does
+        %   not know are copied through as they stand, and MATLAB
+        %   refuses to write a double into an H5T_IEEE_F32LE dataset,
+        %   so the name has to mean `single` here.
             switch name
-                case {'float64', 'float32'}, v = double(data);
+                case 'float64', v = double(data);
+                case 'float32', v = single(data);
                 case 'int64',  v = int64(data);
                 case 'int32',  v = int32(data);
                 case 'int8',   v = int8(data);
@@ -146,11 +152,102 @@ classdef H5
             end
         end
 
+        function n = crtOrderTrackedIndexed()
+        %crtOrderTrackedIndexed  H5P_CRT_ORDER_TRACKED | _INDEXED.
+        %   The one creation property this format requires, on the
+        %   dataset creation property list of every dimension scale
+        %   (specification section 21, decision 52).
+            n = bitor(H5ML.get_constant_value('H5P_CRT_ORDER_TRACKED'), ...
+                      H5ML.get_constant_value('H5P_CRT_ORDER_INDEXED'));
+        end
+
+        function order = attrCreationOrder(dcpl)
+        %attrCreationOrder  The attribute creation order flags of a
+        %   dataset creation property list, or 0 when the build cannot
+        %   be asked.  This is what E42 is decided on.
+            order = 0;
+            try
+                order = double(H5P.get_attr_creation_order(dcpl));
+            catch
+            end
+        end
+
+        % --------------------------------------------------- a pass
+
+        function token = pass()
+        %pass  Begin one reading pass over one file.
+        %
+        %   Within a pass an object's attribute names are listed once
+        %   and every later question about them is answered from that
+        %   list.  A reader asks nine of those questions of each
+        %   dataset -- what it is, its role, its units, its source, its
+        %   statistic, whether it has a DIMENSION_LIST -- and listing
+        %   the names opens and closes one HDF5 identifier per
+        %   attribute, so listing nine times over is most of what an
+        %   open of a wide file costs.
+        %
+        %   The scope is the caller's, and it is what makes this safe:
+        %   nothing writes an attribute inside a read, so the list
+        %   cannot go stale while the token is alive.
+        %
+        %       closer = mestra.internal.H5.pass();  %#ok<NASGU>
+        %
+        %   The token clears the table when it goes out of scope.
+        %   Passes nest: an inner one does not clear the outer one's
+        %   table, which is what lets a read inside a validation share
+        %   it.
+            mestra.internal.H5.attrTable(+1);
+            token = onCleanup(@() mestra.internal.H5.attrTable(-1));
+        end
+
+        function table = attrTable(delta)
+        %attrTable  The pass-scoped table of attribute names, keyed by
+        %   object address, or [] outside a pass.  pass() is how a
+        %   caller opens and closes one; nothing else should call this.
+            persistent depth store
+            if isempty(depth), depth = 0; end
+            if nargin >= 1
+                if delta > 0
+                    depth = depth + 1;
+                    if depth == 1
+                        store = containers.Map('KeyType', 'double', ...
+                                               'ValueType', 'any');
+                    end
+                else
+                    depth = max(0, depth - 1);
+                    if depth == 0, store = []; end
+                end
+            end
+            table = store;
+        end
+
         % ---------------------------------------------- attributes
 
         function names = attrNames(oid)
         %attrNames  Every attribute name on an object, in name order.
+        %   Inside a pass (see pass) the answer for one object is
+        %   found once and kept.  The key is the object's address,
+        %   checked against the file number it came from, so two files
+        %   open at once cannot be confused for one another.
             info = H5O.get_info(oid);
+            table = mestra.internal.H5.attrTable();
+            % A containers.Map calls itself empty when it holds
+            % nothing, so the question here is whether there is a
+            % table at all.  A build that cannot be asked where an
+            % object is cannot have one either.
+            keeping = isa(table, 'containers.Map') && ...
+                      isfield(info, 'addr') && isfield(info, 'fileno');
+            if keeping
+                key = double(info.addr);
+                fileno = double(info.fileno);
+                if table.isKey(key)
+                    kept = table(key);
+                    if kept.fileno == fileno
+                        names = kept.names;
+                        return
+                    end
+                end
+            end
             n = double(info.num_attrs);
             names = cell(1, n);
             for i = 1:n
@@ -159,6 +256,9 @@ classdef H5
                                       'H5P_DEFAULT', 'H5P_DEFAULT');
                 names{i} = H5A.get_name(aid);
                 H5A.close(aid);
+            end
+            if keeping
+                table(key) = struct('fileno', fileno, 'names', {names});
             end
         end
 
@@ -209,16 +309,74 @@ classdef H5
                 if ~mestra.internal.H5.hasAttr(oid, name)
                     return
                 end
-                info = mestra.internal.H5.attrInfo(oid, name);
-                if ~info.scalar
-                    return
-                end
-                v = mestra.internal.H5.readAttr(oid, name);
-                ok = true;
+                [v, ok] = mestra.internal.H5.readIfScalar(oid, name);
             catch
                 v = [];
                 ok = false;
             end
+        end
+
+        function detail = attrDetail(oid, name)
+        %attrDetail  How an attribute is encoded and what it holds,
+        %   from one open of it.  The fields attrInfo gives, plus
+        %   `raw`, the value exactly as H5A.read returns it.
+        %
+        %   Asking the two questions separately opened the attribute,
+        %   its datatype and its dataspace two or three times over,
+        %   and both a reader and the validator ask both of every
+        %   attribute of every object in the file.
+        %
+        %   Nothing is read until the dataspace has been seen to be
+        %   the scalar section 18 requires, which is what keeps an
+        %   attribute declaring a large array from being materialised
+        %   by a reader that was only asking what it is (section 29).
+        %   `raw` is empty when nothing was read.
+            aid = H5A.open(oid, name);
+            closer = onCleanup(@() H5A.close(aid)); %#ok<NASGU>
+            tid = H5A.get_type(aid);
+            sid = H5A.get_space(aid);
+            detail.type = mestra.internal.H5.typeName(tid);
+            detail.size = H5T.get_size(tid);
+            detail.cset = -1;
+            detail.strpad = -1;
+            if strcmp(detail.type, 'string')
+                detail.cset = H5T.get_cset(tid);
+                detail.strpad = H5T.get_strpad(tid);
+            end
+            detail.scalar = H5S.get_simple_extent_type(sid) == ...
+                            H5ML.get_constant_value('H5S_SCALAR');
+            H5S.close(sid);
+            H5T.close(tid);
+            detail.raw = [];
+            if detail.scalar
+                detail.raw = H5A.read(aid);
+            end
+        end
+
+        function [v, ok] = readIfScalar(oid, name)
+        %readIfScalar  An attribute's value, only when its dataspace
+        %   is the scalar section 18 requires, from one open.
+            v = [];
+            ok = false;
+            detail = mestra.internal.H5.attrDetail(oid, name);
+            if ~detail.scalar, return, end
+            if any(strcmp(detail.type, {'string', 'vlstring'}))
+                mestra.internal.H5.checkAsciiRead(detail.raw, 0, ...
+                    sprintf('the attribute %s', name));
+                v = mestra.internal.H5.toText(detail.raw);
+            else
+                v = detail.raw;
+            end
+            ok = true;
+        end
+
+        function bytes = stringBytes(raw, name)
+        %stringBytes  A string attribute's stored bytes, from what
+        %   H5A.read gave back.
+            if iscell(raw), raw = raw{1}; end
+            mestra.internal.H5.checkAsciiRead(raw, 0, ...
+                sprintf('the attribute %s', name));
+            bytes = uint8(raw(:)');
         end
 
         function v = readAttr(oid, name)
@@ -302,10 +460,7 @@ classdef H5
             aid = H5A.open(oid, name);
             raw = H5A.read(aid);
             H5A.close(aid);
-            if iscell(raw), raw = raw{1}; end
-            mestra.internal.H5.checkAsciiRead(raw, 0, ...
-                sprintf('the attribute %s', name));
-            bytes = uint8(raw(:)');
+            bytes = mestra.internal.H5.stringBytes(raw, name);
         end
 
         function writeNumAttr(oid, name, value, typeName)
@@ -368,6 +523,40 @@ classdef H5
         %   A group whose links cannot be listed gives an empty list
         %   rather than an error, so that one damaged group does not
         %   end a walk over the rest of the file.
+        %
+        %   The names come from one H5L.iterate pass and not from one
+        %   indexed lookup each.  An indexed lookup into a group whose
+        %   links live in the heap rebuilds the group's whole link
+        %   table to answer it, so listing a group of n links that way
+        %   costs n squared; on a file with four thousand scalars that
+        %   is most of the time an open takes.  H5_INDEX_NAME is the
+        %   library's own byte order over the names, which is the
+        %   order sortByBytes wants, so the sort below has nothing
+        %   left to do on a well-formed group and is kept for the one
+        %   that is not.
+            names = {};
+            try
+                info = H5G.get_info(gid);
+                n = double(info.nlinks);
+                if n == 0, return, end
+                [~, ~, names] = H5L.iterate(gid, 'H5_INDEX_NAME', ...
+                    'H5_ITER_INC', 0, @mestra.internal.H5.collectLink, {});
+                names = reshape(names, 1, []);
+            catch
+                names = mestra.internal.H5.childrenByIndex(gid);
+            end
+            names = mestra.internal.H5.sortByBytes(names);
+        end
+
+        function [status, names] = collectLink(gid, name, names) %#ok<INUSD>
+        %collectLink  The H5L.iterate callback children uses.
+            names{end + 1} = name;
+            status = 0;
+        end
+
+        function names = childrenByIndex(gid)
+        %childrenByIndex  children, one indexed lookup at a time, for a
+        %   build or a group that will not iterate.
             names = {};
             try
                 info = H5G.get_info(gid);
@@ -377,43 +566,80 @@ classdef H5
                     names{i} = H5L.get_name_by_idx(gid, '.', ...
                         'H5_INDEX_NAME', 'H5_ITER_INC', i - 1, 'H5P_DEFAULT');
                 end
-                names = mestra.internal.H5.sortByBytes(names);
             catch
                 names = {};
             end
         end
 
-        function kind = linkKind(gid, name)
-        %linkKind  What sort of link a name is, without following it.
-        %   'hard', 'soft', 'external' or 'unknown'.  H5L.get_info
-        %   reads the link itself and never the object it points at,
-        %   which is the only safe question to ask first: a soft link
-        %   may dangle or loop, and an external link names another
-        %   file, which this package never opens.
-            kind = 'unknown';
+        function out = listGroup(gid)
+        %listGroup  Every link of a group, asked about once: its name,
+        %   what it really is, and the address a hard link points at.
+        %   A 1-by-n struct array with fields name, kind and address,
+        %   where kind is what childType reports.
+        %
+        %   A walk wants all three of those for every child, and
+        %   asking them separately is three lookups per link where one
+        %   H5L.get_info answers two of them.
+            names = mestra.internal.H5.children(gid);
+            n = numel(names);
+            out = struct('name', {}, 'kind', {}, 'address', {});
+            if n == 0, return, end
+            % Grown one element at a time this would copy the whole
+            % array n times, which on a group of four thousand links
+            % costs more than every HDF5 call in the loop.
+            out(n).name = '';
+            for i = 1:n
+                link = mestra.internal.H5.linkInfo(gid, names{i});
+                out(i).name = names{i};
+                out(i).address = link.address;
+                switch link.kind
+                    case 'hard'
+                        out(i).kind = mestra.internal.H5.objectKind(gid, ...
+                                                                    names{i});
+                    case 'unknown'
+                        out(i).kind = 'unreadable';
+                    otherwise
+                        out(i).kind = link.kind;
+                end
+            end
+        end
+
+        function link = linkInfo(gid, name)
+        %linkInfo  What sort of link a name is and where it points,
+        %   without following it.  Fields: kind ('hard', 'soft',
+        %   'external' or 'unknown') and address ([] for anything but
+        %   a hard link).
+        %
+        %   H5L.get_info reads the link itself and never the object it
+        %   points at, which is the only safe question to ask first: a
+        %   soft link may dangle or loop, and an external link names
+        %   another file, which this package never opens.  Two names
+        %   with one address are one object, which is how a walk
+        %   notices that a file's groups form a cycle.
+            link = struct('kind', 'unknown', 'address', []);
             try
                 info = H5L.get_info(gid, name, 'H5P_DEFAULT');
                 switch double(info.type)
-                    case 0, kind = 'hard';
-                    case 1, kind = 'soft';
-                    case 64, kind = 'external';
+                    case 0
+                        link.kind = 'hard';
+                        if isfield(info, 'address')
+                            link.address = double(info.address);
+                        end
+                    case 1, link.kind = 'soft';
+                    case 64, link.kind = 'external';
                 end
             catch
             end
         end
 
+        function kind = linkKind(gid, name)
+        %linkKind  What sort of link a name is, without following it.
+            kind = mestra.internal.H5.linkInfo(gid, name).kind;
+        end
+
         function addr = linkAddress(gid, name)
         %linkAddress  The address a hard link points at, or [].
-        %   Two names with one address are one object, which is how a
-        %   walk notices that a file's groups form a cycle.
-            addr = [];
-            try
-                info = H5L.get_info(gid, name, 'H5P_DEFAULT');
-                if double(info.type) == 0 && isfield(info, 'address')
-                    addr = double(info.address);
-                end
-            catch
-            end
+            addr = mestra.internal.H5.linkInfo(gid, name).address;
         end
 
         function out = sortByBytes(names)
@@ -467,6 +693,13 @@ classdef H5
                     t = 'unreadable';
                     return
             end
+            t = mestra.internal.H5.objectKind(gid, name);
+        end
+
+        function t = objectKind(gid, name)
+        %objectKind  'group', 'dataset', 'other' or 'unreadable' for a
+        %   name already known to be a hard link.  childType is what a
+        %   caller that does not know that yet asks.
             try
                 oid = H5O.open(gid, name, 'H5P_DEFAULT');
             catch
@@ -539,7 +772,9 @@ classdef H5
         %dsetInfo  Shape, storage and type of a dataset, in FILE order.
         %   Fields: type, dims, maxdims (-1 for unlimited), chunk ([]
         %   when contiguous), filters (an n-by-2 matrix of filter id
-        %   and first parameter), strSize, cset, strpad, isScale.
+        %   and first parameter), attrOrder (the attribute creation
+        %   order flags E42 is decided on), strSize, cset, strpad,
+        %   isScale.
             sid = H5D.get_space(did);
             [~, dims, maxdims] = H5S.get_simple_extent_dims(sid);
             H5S.close(sid);
@@ -557,6 +792,7 @@ classdef H5
             info.elements = prod(max(info.dims, 0));
             info.chunk = [];
             info.filters = zeros(0, 2);
+            info.attrOrder = 0;
             % A creation property list is the file's word for how the
             % data is stored, including filters this build may not have
             % and client data longer than any reader expects. Every
@@ -593,6 +829,8 @@ classdef H5
                     rows(end + 1, :) = [double(id) p]; %#ok<AGROW>
                 end
                 info.filters = rows;
+                info.attrOrder = ...
+                    mestra.internal.H5.attrCreationOrder(dcpl);
                 try
                     H5P.close(dcpl);
                 catch
@@ -617,10 +855,23 @@ classdef H5
         %
         %   The key is the object's address, which is exactly what the
         %   eight bytes of an H5R_OBJECT reference hold, so resolving a
-        %   scale needs no dereference either.  The value carries the
-        %   link name and the length, because the chunk default of
-        %   section 23 is judged against the dimension's length and not
-        %   the dataset's own extent (decision 35).
+        %   scale needs no dereference either.  The value carries, for
+        %   each scale:
+        %
+        %     name       the link name, which is the dimension's name
+        %     length     because the chunk default of section 23 is
+        %                judged against the dimension's length and not
+        %                the dataset's own extent (decision 35)
+        %     hasName    whether it carries a NAME attribute (E25)
+        %     path       its HDF5 path, so that a finding can name it
+        %                and so that decision 43 can leave /private out
+        %     unlimited  whether its own extent is unlimited (E43)
+        %     order      the attribute creation order flags of its
+        %                creation property list (E42)
+        %
+        %   The last three cost nothing here and would otherwise need a
+        %   second walk of the file: this is the one pass that already
+        %   sees every scale there is.
             map = containers.Map('KeyType', 'double', 'ValueType', 'any');
             limits = mestra.internal.Limits.get();
             budget = limits.maxObjects;
@@ -637,48 +888,55 @@ classdef H5
                 catch
                     continue
                 end
-                for name = mestra.internal.H5.children(gid)
+                for entry = mestra.internal.H5.listGroup(gid)
                     budget = budget - 1;
                     if budget <= 0, break, end
-                    if ~strcmp(mestra.internal.H5.linkKind(gid, name{1}), ...
-                               'hard')
-                        continue    % a link this reader never follows
-                    end
                     if strcmp(here, '/')
-                        path = ['/' name{1}];
+                        path = ['/' entry.name];
                     else
-                        path = [here '/' name{1}];
+                        path = [here '/' entry.name];
                     end
-                    kind = mestra.internal.H5.childType(gid, name{1});
-                    if strcmp(kind, 'group')
+                    if strcmp(entry.kind, 'group')
                         pending{end + 1} = path; %#ok<AGROW>
                         depths(end + 1) = depth + 1; %#ok<AGROW>
-                    elseif strcmp(kind, 'dataset')
-                        address = mestra.internal.H5.linkAddress(gid, name{1});
+                    elseif strcmp(entry.kind, 'dataset')
+                        address = entry.address;
                         if isempty(address) || map.isKey(address), continue, end
                         try
-                            did = H5D.open(gid, name{1});
+                            did = H5D.open(gid, entry.name);
                         catch
                             continue
                         end
                         try
+                            % The question that settles it first, and
+                            % the reading only for the few datasets
+                            % that answer yes: most of the datasets in
+                            % a wide file are not scales, and this walk
+                            % is what a lazy read of one row range pays
+                            % before it can name the slot's axes.
                             if H5DS.is_scale(did) > 0
-                                sid = H5D.get_space(did);
-                                [~, dims] = H5S.get_simple_extent_dims(sid);
-                                H5S.close(sid);
+                                names = mestra.internal.H5.attrNames(did);
+                                info = mestra.internal.H5.dsetInfo(did);
                                 length_ = 0;
-                                if ~isempty(dims)
-                                    length_ = double(dims(1));
+                                unlimited = false;
+                                if ~isempty(info.dims)
+                                    length_ = info.dims(1);
+                                    unlimited = info.maxdims(1) < 0;
                                 end
                                 map(address) = struct( ...
-                                    'name', name{1}, 'length', length_, ...
-                                    'hasName', ...
-                                    mestra.internal.H5.hasAttr(did, 'NAME'));
+                                    'name', entry.name, 'length', length_, ...
+                                    'hasName', any(strcmp(names, 'NAME')), ...
+                                    'path', path, 'unlimited', unlimited, ...
+                                    'order', info.attrOrder);
                             end
                         catch
                         end
                         H5D.close(did);
                     end
+                    % Anything else is a link this reader never
+                    % follows, or an object it cannot open; the rules
+                    % for those are E40 and E41 and belong to the
+                    % caller's own walk, not to this map.
                 end
                 H5G.close(gid);
             end
@@ -689,13 +947,13 @@ classdef H5
         %   `axis` is zero based and in FILE order.  `map` comes from
         %   scaleMap; without it nothing can be resolved and the axis
         %   reads as unattached, which is E25.  The result is a struct
-        %   array with fields name, length and hasName, one per scale.
+        %   array shaped like a scaleMap record, one per scale.
         %
         %   The name comes from the link and never from the NAME
         %   attribute, which holds the same sentence in every scale in
         %   the file, and never from a path lookup, which section 21
         %   forbids.
-            found = struct('name', {}, 'length', {}, 'hasName', {});
+            found = mestra.internal.H5.noScales();
             if nargin < 3 || isempty(map), return, end
             if ~mestra.internal.H5.hasAttr(did, 'DIMENSION_LIST')
                 return
@@ -714,10 +972,24 @@ classdef H5
                 if map.isKey(address)
                     found(end + 1) = map(address); %#ok<AGROW>
                 else
-                    found(end + 1) = struct('name', '', 'length', -1, ...
-                                            'hasName', false); %#ok<AGROW>
+                    found(end + 1) = ...
+                        mestra.internal.H5.unresolvedScale(); %#ok<AGROW>
                 end
             end
+        end
+
+        function s = noScales()
+        %noScales  An empty scale list of the shape scaleMap fills.
+            s = struct('name', {}, 'length', {}, 'hasName', {}, ...
+                       'path', {}, 'unlimited', {}, 'order', {});
+        end
+
+        function s = unresolvedScale()
+        %unresolvedScale  What an axis attached to something this
+        %   reader could not resolve to a dimension looks like.  A
+        %   length of -1 is what says so; E25 is the rule.
+            s = struct('name', '', 'length', -1, 'hasName', false, ...
+                       'path', '', 'unlimited', false, 'order', 0);
         end
 
         function n = numScales(did, axis)
@@ -895,14 +1167,18 @@ classdef H5
         % --------------------------------------------------- writing
 
         function did = createDataset(gid, name, typeName, dims, maxdims, ...
-                                     chunk, filters, strSize)
+                                     chunk, filters, strSize, attrOrder)
         %createDataset  Create one dataset, in FILE axis order.
         %   `maxdims` uses -1 for an unlimited extent, `chunk` is []
         %   for contiguous storage, `filters` is an n-by-2 matrix of
-        %   filter id and first parameter, and `strSize` is the byte
-        %   size of a fixed-length string type.
+        %   filter id and first parameter, `strSize` is the byte size
+        %   of a fixed-length string type, and `attrOrder` is the
+        %   attribute creation order flags of section 21, which only a
+        %   dimension scale needs and which defaults to the library's
+        %   own (none).
             if nargin < 7 || isempty(filters), filters = zeros(0, 2); end
             if nargin < 8, strSize = 0; end
+            if nargin < 9 || isempty(attrOrder), attrOrder = 0; end
             rank = numel(dims);
             hmax = maxdims;
             hmax(maxdims < 0) = H5ML.get_constant_value('H5S_UNLIMITED');
@@ -910,6 +1186,9 @@ classdef H5
             dcpl = mestra.internal.H5.plist('H5P_DATASET_CREATE');
             if ~isempty(chunk)
                 H5P.set_chunk(dcpl, chunk);
+            end
+            if attrOrder ~= 0
+                H5P.set_attr_creation_order(dcpl, attrOrder);
             end
             for i = 1:size(filters, 1)
                 switch filters(i, 1)
@@ -963,6 +1242,20 @@ classdef H5
         %   CLASS and NAME as section 21 requires.  An unlimited scale
         %   is chunked with chunk length one; a fixed one is chunked
         %   over its whole length, which is what the corpus carries.
+        %
+        %   The creation property list is the point of decision 52.
+        %   Attribute creation order tracked and indexed gives the
+        %   scale a version 2 object header, which is what lets its
+        %   REFERENCE_LIST live in the file's heap instead of in an
+        %   object header message that may not exceed 64 KiB.  Without
+        %   it a scale takes at most 4085 attachments and the 4086th
+        %   fails after it has already deleted the attribute it was
+        %   extending.  Object time tracking has to go off in the same
+        %   list, which plist already does, because a version 2 header
+        %   records four timestamps unless it is told not to and a file
+        %   that records when it was written is not byte reproducible.
+        %   No other object's property list is touched, so the
+        %   superblock and every non-scale object are as they were.
             if unlimited
                 maxd = H5ML.get_constant_value('H5S_UNLIMITED');
                 chunk = 1;
@@ -973,6 +1266,8 @@ classdef H5
             sid = H5S.create_simple(1, len, maxd);
             dcpl = mestra.internal.H5.plist('H5P_DATASET_CREATE');
             H5P.set_chunk(dcpl, chunk);
+            H5P.set_attr_creation_order(dcpl, ...
+                mestra.internal.H5.crtOrderTrackedIndexed());
             did = H5D.create(gid, name, 'H5T_IEEE_F32BE', sid, ...
                              'H5P_DEFAULT', dcpl, 'H5P_DEFAULT');
             H5P.close(dcpl); H5S.close(sid);
@@ -1109,9 +1404,18 @@ classdef H5
             made = containers.Map('KeyType', 'char', 'ValueType', 'any');
             for i = 1:numel(tree.datasets)
                 ds = tree.datasets(i);
+                order = 0;
+                if isfield(ds.info, 'attrOrder'), order = ds.info.attrOrder; end
+                if ds.info.isScale
+                    % A scale is a scale wherever it is kept, so one
+                    % replayed into /notes or /private is created with
+                    % the property list section 21 gives it, whatever
+                    % the file it came from used.
+                    order = mestra.internal.H5.crtOrderTrackedIndexed();
+                end
                 did = H5.createDataset(gid, ds.name, ds.info.type, ...
                     ds.info.dims, ds.info.maxdims, ds.info.chunk, ...
-                    ds.info.filters, ds.info.strSize);
+                    ds.info.filters, ds.info.strSize, order);
                 if ds.info.isScale
                     % A scale whose NAME attribute was missing is
                     % written back with the sentence section 21 gives

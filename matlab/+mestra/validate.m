@@ -53,6 +53,9 @@ function out = validate(path)
     rep = mestra.internal.Report();
     fid = mestra.internal.Reader.openFile(path);
     closeFile = onCleanup(@() H5F.close(fid)); %#ok<NASGU>
+    % One pass over one file: every object's attribute names are
+    % listed once and answered from that list afterwards.
+    closePass = mestra.internal.H5.pass(); %#ok<NASGU>
     root = H5G.open(fid, '/');
     closeRoot = onCleanup(@() H5G.close(root)); %#ok<NASGU>
 
@@ -73,6 +76,7 @@ function out = validate(path)
     % others to run.  That is what makes a finding late in a file
     % reachable when something early in it will not read.
     guard(ctx, '/', @() checkRoot(ctx));
+    guard(ctx, '/', @() checkDimensionScales(ctx));
     guard(ctx, '/categories', @() checkCategories(ctx));
     guard(ctx, '/keys', @() checkKeys(ctx));
     guard(ctx, '/scalars', @() checkScalars(ctx));
@@ -1351,6 +1355,49 @@ function checkKnownAttrs(ctx, oid, path, known)
     end
 end
 
+function checkDimensionScales(ctx)
+%checkDimensionScales  E42 and E43, over the scale map built once.
+%   Both rules are about the dimension scales themselves rather than
+%   about anything attached to them, and the map of section 21 has
+%   already seen every one of them, so this pass reads nothing more.
+%
+%   Decision 43 keeps it to the public objects: the byte-level rules
+%   of sections 18 to 25 are not checked inside /private, which
+%   section 29 forbids a reader to interpret at all.
+    want = mestra.internal.H5.crtOrderTrackedIndexed();
+    addresses = ctx.scales.keys();
+    for i = 1:numel(addresses)
+        s = ctx.scales(addresses{i});
+        if isPrivate(s.path), continue, end
+        if bitand(s.order, want) ~= want
+            ctx.rep.add('E42', s.path, ...
+                ['this dimension scale was created without attribute ' ...
+                 'creation order tracked and indexed, so it can carry ' ...
+                 'no more than 4085 attachments (section 21)']);
+        end
+        if s.unlimited && ~strcmp(s.name, 'row') && ...
+           ~dictionaryZeroAxis(s.path, s.length)
+            ctx.rep.add('E43', s.path, ...
+                ['the dimension "%s" is unlimited; only `row`, ' ...
+                 'file-level or support-local, may be'], s.name);
+        end
+    end
+end
+
+function tf = isPrivate(path)
+%isPrivate  True for /private and anything under it.
+    tf = strcmp(path, '/private') || strncmp(path, '/private/', 9);
+end
+
+function tf = dictionaryZeroAxis(path, len)
+%dictionaryZeroAxis  The one unlimited dimension that is not `row`.
+%   Section 25 requires the zero-length axis of a dataset inside a
+%   callable's dictionary to be unlimited, because HDF5 has no other
+%   legal way to write a zero-length axis, and section 19 names that
+%   exception where it forbids the rest.
+    tf = len == 0 && strncmp(path, '/callables/', 11);
+end
+
 function checkScales(ctx, did, info, path)
 %checkScales  E25 for every axis of a dataset.
 %   A dimension scale is not itself subject to this rule and carries
@@ -1387,6 +1434,17 @@ function checkScales(ctx, did, info, path)
         why = scaleNameProblem(found(1).name, info.dims(axis));
         if ~isempty(why)
             ctx.rep.add('E25', path, 'axis %d: %s', axis - 1, why);
+        end
+        % Section 19 puts the axis under the same rule as the scale:
+        % every dimension but `row` is created with a maximum extent
+        % equal to its length, so an axis that can grow makes its own
+        % dimension's name false.
+        if numel(info.maxdims) >= axis && info.maxdims(axis) < 0 && ...
+           ~strcmp(found(1).name, 'row') && ...
+           ~dictionaryZeroAxis(path, info.dims(axis))
+            ctx.rep.add('E43', path, ...
+                ['axis %d is unlimited and carries the dimension ' ...
+                 '"%s", which is not `row`'], axis - 1, found(1).name);
         end
     end
 end

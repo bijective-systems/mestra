@@ -96,6 +96,7 @@ classdef Compare
             map = containers.Map('KeyType', 'char', 'ValueType', 'any');
             fid = H5F.open(path, 'H5F_ACC_RDONLY', 'H5P_DEFAULT');
             closer = onCleanup(@() H5F.close(fid)); %#ok<NASGU>
+            closePass = mestra.internal.H5.pass(); %#ok<NASGU>
             root = H5G.open(fid, '/');
             scales = mestra.internal.H5.scaleMap(fid);
             mestra.internal.Compare.walk(map, root, '/', 0, scales);

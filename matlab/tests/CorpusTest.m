@@ -31,6 +31,20 @@ classdef CorpusTest < matlab.unittest.TestCase
             p = fullfile(corpusRoot(), name, 'case.mes');
         end
 
+        function requireCase(testCase, name)
+        %requireCase  Skip a case that is generated on demand and is
+        %   not there, naming the command that writes it, rather than
+        %   failing on a file nobody promised to commit.  `wide_keys`
+        %   is sixteen megabytes; its expected.json is committed, so
+        %   that an implementation knows it exists and knows to
+        %   generate it first (specification section 30).
+            testCase.assumeEqual( ...
+                exist(CorpusTest.caseFile(name), 'file'), 2, ...
+                sprintf(['%s is generated on demand and is not ' ...
+                         'there; run python vectors/generate.py ' ...
+                         '--wide'], name));
+        end
+
         function e = expected(name)
             text = fileread(fullfile(corpusRoot(), name, 'expected.json'));
             e = jsondecode(text);
@@ -113,6 +127,7 @@ classdef CorpusTest < matlab.unittest.TestCase
 
         function validatorOutcome(testCase, caseName)
         %validatorOutcome  The errors and warnings, exactly.
+            CorpusTest.requireCase(testCase, caseName);
             e = CorpusTest.expected(caseName);
             r = mestra.validate(CorpusTest.caseFile(caseName));
             wantE = sort(CorpusTest.asCellstr(e.validator.errors));
@@ -144,6 +159,7 @@ classdef CorpusTest < matlab.unittest.TestCase
 
         function supportIds(testCase, caseName)
         %supportIds  Every digest, computed from the stored arrays.
+            CorpusTest.requireCase(testCase, caseName);
             e = CorpusTest.expected(caseName);
             if ~isfield(e, 'support_ids') || isempty(e.support_ids)
                 return
@@ -168,6 +184,7 @@ classdef CorpusTest < matlab.unittest.TestCase
 
         function probes(testCase, caseName)
         %probes  Every stored value, found by dimension name.
+            CorpusTest.requireCase(testCase, caseName);
             e = CorpusTest.expected(caseName);
             if isempty(e.probes), return, end
             d = mestra.read(CorpusTest.caseFile(caseName));
@@ -186,6 +203,7 @@ classdef CorpusTest < matlab.unittest.TestCase
 
         function codecRoundTrip(testCase, caseName)
         %codecRoundTrip  Every callable's dictionary, in the tagged form.
+            CorpusTest.requireCase(testCase, caseName);
             e = CorpusTest.expected(caseName);
             if ~isfield(e, 'codec') || isempty(fieldnames(e.codec))
                 return
@@ -202,6 +220,7 @@ classdef CorpusTest < matlab.unittest.TestCase
 
         function evaluations(testCase, caseName)
         %evaluations  Every worked evaluation, bit for bit.
+            CorpusTest.requireCase(testCase, caseName);
             e = CorpusTest.expected(caseName);
             if isempty(e.evaluation), return, end
             list = e.evaluation;
@@ -228,6 +247,7 @@ classdef CorpusTest < matlab.unittest.TestCase
 
         function readWriteCompare(testCase, caseName)
         %readWriteCompare  Read, write, compare by section 30's rule.
+            CorpusTest.requireCase(testCase, caseName);
             e = CorpusTest.expected(caseName);
             if ~isempty(CorpusTest.asCellstr(e.validator.errors))
                 return      % an invalid file is not required to round trip
@@ -244,6 +264,7 @@ classdef CorpusTest < matlab.unittest.TestCase
 
         function lazyRowRange(testCase, caseName)
         %lazyRowRange  One slot, one row range, nothing else read.
+            CorpusTest.requireCase(testCase, caseName);
             e = CorpusTest.expected(caseName);
             if ~isempty(CorpusTest.asCellstr(e.validator.errors)), return, end
             d = mestra.open(CorpusTest.caseFile(caseName));

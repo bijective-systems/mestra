@@ -64,6 +64,9 @@ classdef Reader
             end
             fid = mestra.internal.Reader.openFile(path);
             closeFile = onCleanup(@() H5F.close(fid));
+            % One pass over one file: every object's attribute names
+            % are listed once and answered from that list afterwards.
+            closePass = mestra.internal.H5.pass(); %#ok<NASGU>
             d = mestra.Dataset();
             d.path = path;
             root = H5G.open(fid, '/');
@@ -122,6 +125,11 @@ classdef Reader
 
             if mestra.internal.Reader.hasGroup(fid, 'categories')
                 g = H5.openGroup(fid, 'categories');
+                % Collected and joined once.  Appending a record to a
+                % struct array copies the whole array, so a file with
+                % four thousand of them spends more time copying than
+                % reading (see the note on `join` below).
+                found = {};
                 for name = H5.children(g)
                     if ~mestra.internal.Reader.isKind(d, g, name{1}, ...
                             'dataset', ['/categories/' name{1}])
@@ -140,31 +148,36 @@ classdef Reader
                             did, info, d, path);
                         if isempty(rec(1).entries), rec(1).entries = {}; end
                         rec(1).strSize = info.strSize;
-                        d.categories = [d.categories rec];
+                        found{end + 1} = rec; %#ok<AGROW>
                     catch err
                         H5D.close(did);
                         rethrow(err);
                     end
                     H5D.close(did);
                 end
+                d.categories = mestra.internal.Reader.join(d.categories, ...
+                                                           found);
                 H5G.close(g);
             end
 
             if mestra.internal.Reader.hasGroup(fid, 'keys')
                 g = H5.openGroup(fid, 'keys');
+                found = {};
                 for name = H5.children(g)
                     if ~mestra.internal.Reader.isKind(d, g, name{1}, ...
                             'dataset', ['/keys/' name{1}])
                         continue
                     end
-                    d.keys = [d.keys mestra.internal.Reader.readKey( ...
-                        g, name{1}, eager, d, scales)];
+                    found{end + 1} = mestra.internal.Reader.readKey( ...
+                        g, name{1}, eager, d, scales); %#ok<AGROW>
                 end
+                d.keys = mestra.internal.Reader.join(d.keys, found);
                 H5G.close(g);
             end
 
             if mestra.internal.Reader.hasGroup(fid, 'scalars')
                 g = H5.openGroup(fid, 'scalars');
+                found = {};
                 for name = H5.children(g)
                     kind = H5.childType(g, name{1});
                     if ~any(strcmp(kind, {'group', 'dataset'}))
@@ -175,10 +188,11 @@ classdef Reader
                                 'dataset') ', not followed']);
                         continue
                     end
-                    d.scalars = [d.scalars ...
+                    found{end + 1} = ...
                         mestra.internal.Reader.readScalar(g, name{1}, ...
-                                                    eager, d, scales)];
+                                                    eager, d, scales); %#ok<AGROW>
                 end
+                d.scalars = mestra.internal.Reader.join(d.scalars, found);
                 H5G.close(g);
             end
 
@@ -192,20 +206,23 @@ classdef Reader
 
             if mestra.internal.Reader.hasGroup(fid, 'supports')
                 g = H5.openGroup(fid, 'supports');
+                found = {};
                 for name = H5.children(g)
                     if ~mestra.internal.Reader.isKind(d, g, name{1}, ...
                             'group', ['/supports/' name{1}])
                         continue
                     end
-                    d.supports = [d.supports ...
+                    found{end + 1} = ...
                         mestra.internal.Reader.readSupport(g, name{1}, ...
-                                                    eager, scales, d)];
+                                                    eager, scales, d); %#ok<AGROW>
                 end
+                d.supports = mestra.internal.Reader.join(d.supports, found);
                 H5G.close(g);
             end
 
             if mestra.internal.Reader.hasGroup(fid, 'callables')
                 g = H5.openGroup(fid, 'callables');
+                found = {};
                 for name = H5.children(g)
                     if ~mestra.internal.Reader.isKind(d, g, name{1}, ...
                             'group', ['/callables/' name{1}])
@@ -214,12 +231,13 @@ classdef Reader
                     [record, limits] = ...
                         mestra.internal.Reader.readCallable(g, name{1}, ...
                                                             d, eager);
-                    d.callables = [d.callables record];
+                    found{end + 1} = record; %#ok<AGROW>
                     for i = 1:numel(limits)
                         mestra.internal.Reader.note(d, ...
                             ['/callables/' name{1}], 'E41', limits{i});
                     end
                 end
+                d.callables = mestra.internal.Reader.join(d.callables, found);
                 H5G.close(g);
             end
 
@@ -270,6 +288,18 @@ classdef Reader
                             'group') ', not followed']);
                 end
             end
+        end
+
+        function out = join(existing, found)
+        %join  Add a list of records to a struct array, once.
+        %   Appending one record at a time copies the whole array
+        %   every time, so reading n slots that way costs n squared
+        %   and the copying overtakes every HDF5 call in the loop: on
+        %   a file with four thousand scalars it was most of the open.
+        %   Collecting the records and joining them here is one copy.
+            out = existing;
+            if isempty(found), return, end
+            out = [existing found{:}];
         end
 
         function id = strictIdentifier(skipped)
@@ -576,6 +606,7 @@ classdef Reader
             rec(1).upper = R().num(did, 'upper');
             rec(1).dtype = info.type;
             rec(1).chunk = info.chunk;
+            rec(1).filters = info.filters;
             rec(1).strSize = info.strSize;
             mestra.internal.Reader.inspect(did, info, d, path, map);
             if eager
@@ -626,6 +657,7 @@ classdef Reader
             rec(1).quantile = R().num(did, 'quantile');
             rec(1).dtype = info.type;
             rec(1).chunk = info.chunk;
+            rec(1).filters = info.filters;
             mestra.internal.Reader.checkSlotKind(rec(1).source, false, d, path);
             mestra.internal.Reader.inspect(did, info, d, path, map);
             if eager
@@ -691,6 +723,7 @@ classdef Reader
                     continue
                 end
                 ag = H5.openGroup(sid, arrays{a, 1});
+                found = {};
                 for nm = H5.children(ag)
                     if ~any(strcmp(H5.childType(ag, nm{1}), ...
                                    {'group', 'dataset'}))
@@ -699,11 +732,14 @@ classdef Reader
                     slot = mestra.internal.Reader.readSlot(ag, nm{1}, ...
                         name, arrays{a, 2}, eager, map, d, ...
                         [path '/' arrays{a, 1} '/' nm{1}]);
-                    if strcmp(arrays{a, 2}, 'node')
-                        rec(1).nodeArrays(end + 1) = slot;
-                    else
-                        rec(1).cellArrays(end + 1) = slot;
-                    end
+                    found{end + 1} = slot; %#ok<AGROW>
+                end
+                if strcmp(arrays{a, 2}, 'node')
+                    rec(1).nodeArrays = mestra.internal.Reader.join( ...
+                        rec(1).nodeArrays, found);
+                else
+                    rec(1).cellArrays = mestra.internal.Reader.join( ...
+                        rec(1).cellArrays, found);
                 end
                 H5G.close(ag);
             end
@@ -754,6 +790,7 @@ classdef Reader
                 rec(1).shape = [];
                 rec(1).dtype = '';
                 rec(1).chunk = [];
+                rec(1).filters = zeros(0, 2);
                 H5G.close(oid);
                 return
             end
@@ -766,6 +803,7 @@ classdef Reader
             rec(1).shape = reshape(double(info.dims), 1, []);
             rec(1).dtype = info.type;
             rec(1).chunk = info.chunk;
+            rec(1).filters = info.filters;
             R().inspect(oid, info, d, path, map);
             if eager
                 values = R().readValues(oid, info, d, path);
