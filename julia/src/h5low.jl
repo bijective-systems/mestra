@@ -711,7 +711,16 @@ end
 nothing else: attribute creation order tracked and indexed, which is
 what gives the scale a version 2 object header and so lets its
 REFERENCE_LIST live in the file's heap rather than in an object header
-message, where an attribute may not exceed 64 KiB."""
+message, where an attribute may not exceed 64 KiB.
+
+It is not decoration.  That list grows sixteen bytes an attachment,
+and every key, every scalar, every row-varying array and
+`/row_support` attaches to the one `row` scale, so a scale created
+with the library's defaults takes 4085 attachments and the 4086th
+fails *after* deleting the list it was extending -- leaving a file
+every reader and every validator accepts.  `vectors/cases/wide_keys`
+is the corpus case that could not be written without the rule, and
+`vectors/cases/err_e42` the one that breaks it on purpose."""
 function make_dcpl(; chunk = nothing, deflate = nothing, shuffle = false,
                    attr_order::Bool = false)
     dcpl = HDF5.DatasetCreateProperties()

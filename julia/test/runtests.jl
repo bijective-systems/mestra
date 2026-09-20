@@ -846,7 +846,7 @@ end
                    if !(p in scales) && !startswith(p, "/private")])
     end
     # and two writes a second apart are the same bytes, which is what
-    # `julia/README.md` claims and what section 30 asks of a generator
+    # `?Mestra.write` claims and what section 30 asks of a generator
     ds = Mestra.read(case_file("mesh_two_rows"); lazy = false)
     a = joinpath(SCRATCH, "twice_a.mes")
     b = joinpath(SCRATCH, "twice_b.mes")
@@ -1423,6 +1423,10 @@ end
                                                 "c" => 1, "d" => 1]))
     @test e !== nothing && occursin("empty", e.msg)
 
+    # the parts are filled in name order, whatever the fractions' order
+    @test Mestra.grouped_split(sc, ["test" => 1, "train" => 2]) ==
+          Mestra.grouped_split(sc, ["train" => 2, "test" => 1])
+
     @test isempty(Mestra.split_leaks(sc))
     leaky = Mestra.read(case_file("warn_w01"); lazy = false)
     @test !isempty(Mestra.split_leaks(leaky))
@@ -1431,6 +1435,47 @@ end
     @test e !== nothing
     # a file with no unit of generalisation is refused, not guessed at
     @test_throws Mestra.MestraError Mestra.grouped_split(lt)
+end
+
+@testset "the worked example of the grouped split (section 31)" begin
+    # The table of section 31, reproduced: five rotors whose category
+    # table is in one order and whose unit order is another, seed 0.
+    ds = Mestra.Dataset(writer = "mestra.jl test 0")
+    Mestra.add_category_table!(ds, "rotor", ["rotor_b", "rotor_a", "rotor_d",
+                                             "rotor_c", "rotor_e"])
+    Mestra.add_key!(ds, "rotor", [0, 0, 1, 1, 2, 2, 3, 3, 4, 4];
+                    role = :group, category = "rotor")
+    u = Mestra.split_units(ds, ds.keys["rotor"], 0)
+    # the units are in name order and not in table order, and one
+    # splitmix64 draw is taken for each, in that order
+    @test u.names == ["rotor_a", "rotor_b", "rotor_c", "rotor_d", "rotor_e"]
+    @test u.ids == Int32[1, 0, 3, 2, 4]
+    @test u.draws == [0xe220a8397b1dcdaf, 0x6e789e6aa1b965f4,
+                      0x06c45d188009454f, 0xf88bb8a8724c81ec,
+                      0x1b39896a51a8749b]
+    # sorted by the draw: rotor_c, rotor_e, rotor_b, rotor_a, rotor_d
+    @test u.dealt == Int32[3, 4, 0, 1, 2]
+    parts = Mestra.grouped_split(ds, ["train" => 0.8, "test" => 0.2];
+                                 seed = 0)
+    @test parts["test"] == [7, 8]                       # rotor_c
+    @test parts["train"] == [1, 2, 3, 4, 5, 6, 9, 10]   # the other four
+    # the seed is the whole of it, and the state starts at the seed
+    @test Mestra.splitmix64(UInt64(0))[2] == 0xe220a8397b1dcdaf
+    # a table written in another order splits the same way
+    other = Mestra.Dataset(writer = "mestra.jl test 0")
+    Mestra.add_category_table!(other, "rotor",
+                               ["rotor_a", "rotor_b", "rotor_c",
+                                "rotor_d", "rotor_e"])
+    Mestra.add_key!(other, "rotor", [1, 1, 0, 0, 3, 3, 2, 2, 4, 4];
+                    role = :group, category = "rotor")
+    @test Mestra.grouped_split(other, ["train" => 0.8, "test" => 0.2]) ==
+          parts
+    # a fraction of nothing still leaves its part one unit, which is
+    # two rows here, and a negative fraction is refused
+    @test length(Mestra.grouped_split(ds, ["train" => 1.0,
+                                           "test" => 0.0])["test"]) == 2
+    @test refusal(() -> Mestra.grouped_split(ds, ["a" => -1, "b" => 2])) !==
+          nothing
 end
 
 """Run run_hostile.jl over a list of files in a process of its own,
@@ -1636,6 +1681,104 @@ end
     @test eltype(d["outputs"]["cl"]["shape"]) === Int64
     out = Mestra.callable(two, "m1")(Dict("mach" => [0.5], "alpha" => [4.0]))
     @test bitequal(out["cl"][1], 1.45)
+end
+
+# -------------------------------------------------- docs/examples
+
+"""The lines of a README's "Expected output" block, which is the whole
+of what its example prints."""
+function expected_output(readme::AbstractString)
+    lines = split(Base.read(readme, String), '\n')
+    at = findfirst(i -> strip(lines[i]) == "Expected output" &&
+                        startswith(lines[i + 1], "---"),
+                   1:(length(lines) - 1))
+    at === nothing && error("$(readme) has no `Expected output` section")
+    out = String[]
+    for line in lines[(at + 2):end]
+        if isempty(strip(line))
+            isempty(out) && continue
+            break
+        end
+        startswith(line, "    ") || break
+        push!(out, String(rstrip(line[5:end])))
+    end
+    isempty(out) && error("$(readme): the `Expected output` section is empty")
+    return out
+end
+
+# Every number these examples print matches the README's block byte for
+# byte.  These lines cannot, because the block is Python's output and
+# Julia spells the same value differently: `true` for `True`, a symbol
+# for the name of an axis, `["a"]` for `['a']`, `String[]` for an empty
+# list of strings, and a refusal that names the path as well as the
+# rule.  The README's line is the key and this language's is the value,
+# so that every difference between the two is in one place.
+julia_spelling = Dict(
+    "aligned: True nodes: 6 cells: 2" =>
+        "aligned: true nodes: 6 cells: 2",
+    "valid: True" => "valid: true",
+    "2 rows, aligned: True" => "2 rows, aligned: true",
+    "ok: True" => "ok: true",
+    "pressure ('row', 'node', 'component') Pa" =>
+        "pressure (:row, :node, :component) Pa",
+    "pressure ('row', 'node', 'component') Pa row" =>
+        "pressure (:row, :node, :component) Pa row",
+    "pressure ('row', 'draw', 'node', 'component') draw" =>
+        "pressure (:row, :draw, :node, :component) draw",
+    "keys: [('mach', 'condition'), ('member', 'group')]" =>
+        "keys: [(\"mach\", :condition), (\"member\", :group)]",
+    "scalars: ['cl']" => "scalars: [\"cl\"]",
+    "  node arrays: ['pressure']" => "  node arrays: [\"pressure\"]",
+    "  cell arrays: ['region']" => "  cell arrays: [\"region\"]",
+    "region is a label over ['inlet', 'outlet']" =>
+        "region is a label over [\"inlet\", \"outlet\"]",
+    "rows: 0 callables: ['m1']" => "rows: 0 callables: [\"m1\"]",
+    "the split in the file leaks: ['wing_b']" =>
+        "the split in the file leaks: [\"wing_b\"]",
+    "train rows [0, 1, 2, 3] members ['wing_a', 'wing_b']" =>
+        "train rows [0, 1, 2, 3] members [\"wing_a\", \"wing_b\"]",
+    "test rows [4, 5] members ['wing_c']" =>
+        "test rows [4, 5] members [\"wing_c\"]",
+    "errors: [] warnings: ['W01']" =>
+        "errors: String[] warnings: [\"W01\"]",
+    "pressure: [0.5 1.1 3.7 4.3 6.9 7.5]" =>
+        "pressure: [0.5, 1.1, 3.7, 4.3, 6.9, 7.5]",
+    "draw 0 of row 0: [100. 101. 102. 103. 104. 105.]" =>
+        "draw 0 of row 0: [100.0, 101.0, 102.0, 103.0, 104.0, 105.0]",
+    "refused: E11: cl: a scalar carries units; pass units= (\"1\" for a " *
+    "dimensionless one)" =>
+        "refused: mestra: E11 /scalars/cl: a scalar carries units; pass " *
+        "units = \"1\" for a dimensionless one")
+
+@testset "the examples of docs/examples print what their READMEs say" begin
+    examples = joinpath(REPO, "docs", "examples")
+    dirs = sort([joinpath(examples, d) for d in readdir(examples)
+                 if isfile(joinpath(examples, d, "julia.jl"))])
+    @test length(dirs) == 7
+    # no line of the table above is stale: every one of them is a line
+    # some README still asks for
+    asked = Set(l for dir in dirs
+                for l in expected_output(joinpath(dir, "README.md")))
+    @test isempty(setdiff(Base.keys(julia_spelling), asked))
+    for dir in dirs
+        @testset "$(basename(dir))" begin
+            script = joinpath(dir, "julia.jl")
+            body = [l for l in eachline(script)
+                    if !isempty(strip(l)) && !startswith(strip(l), "#")]
+            @test length(body) < 30
+            # Each one runs in a directory of its own, because several
+            # write a file into the working directory.
+            wd = mktempdir()
+            log = joinpath(wd, "printed")
+            cmd = `$(Base.julia_cmd()) --startup-file=no
+                   --project=$(Base.active_project()) $script`
+            run(pipeline(setenv(cmd; dir = wd); stdout = log))
+            printed = [String(rstrip(l)) for l in eachline(log)]
+            want = [get(julia_spelling, l, l)
+                    for l in expected_output(joinpath(dir, "README.md"))]
+            @test printed == want
+        end
+    end
 end
 
 end # testset Mestra
