@@ -1,6 +1,7 @@
 // mestra-cli: the command line over the library, and what the
 // conformance driver of cpp/tests/run_corpus.py talks to.  It prints
 // plain text so that a test script needs no JSON code on this side.
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -37,6 +38,8 @@ int usage() {
       "  dict-dump FILE CALLABLE          a callable's dictionary\n"
       "  dict-roundtrip FILE CALLABLE OUT write the dictionary back\n"
       "  rows FILE SLOT BEGIN END         a lazy read of a row range\n"
+      "  cost FILE [SLOT]                 seconds for a metadata open, a\n"
+      "                                   validation and one lazy row read\n"
       "  callable-types                   the types this build knows\n"
       "\n"
       "A probe index may be `-` when the slot has no such axis, and "
@@ -382,6 +385,49 @@ int cmd_probe(int argc, char** argv) {
   return 0;
 }
 
+// What this file costs to work with: the metadata open of section 29,
+// a validation, and one lazy row read of one slot.  Each is the
+// library call alone and in one process, because `info` validates
+// before it prints (see `refused`) and a shell loop over three
+// commands would time three interpreter starts as well.  The scale
+// study needed a program of its own to ask this; it belongs in the
+// tool, so that a change which makes an open cost the square of the
+// dataset count is caught where the corpus is run.
+int cmd_cost(const std::string& path, const std::string& slot) {
+  using Clock = std::chrono::steady_clock;
+  auto since = [](Clock::time_point start) {
+    return std::chrono::duration<double>(Clock::now() - start).count();
+  };
+  const Clock::time_point t_open = Clock::now();
+  const mestra::Dataset d = mestra::read_header(path);
+  const double open = since(t_open);
+
+  const Clock::time_point t_validate = Clock::now();
+  const mestra::Report r = mestra::validate(path);
+  const double validate = since(t_validate);
+
+  double rows = -1.0;
+  if (!slot.empty() && d.n_rows > 0) {
+    const Clock::time_point t_rows = Clock::now();
+    const mestra::Array a = mestra::read_slot_rows(path, slot, 0, 1);
+    rows = since(t_rows);
+    if (a.shape.empty()) rows = -1.0;
+  }
+  char buffer[128];
+  std::snprintf(buffer, sizeof(buffer), "open %.3f\nvalidate %.3f\n", open,
+                validate);
+  std::cout << buffer;
+  if (rows < 0.0) {
+    std::cout << "rows -\n";
+  } else {
+    std::snprintf(buffer, sizeof(buffer), "rows %.3f\n", rows);
+    std::cout << buffer;
+  }
+  std::cout << "findings " << r.errors.size() << " " << r.warnings.size()
+            << "\n";
+  return 0;
+}
+
 int cmd_rows(const std::string& path, const std::string& slot,
              const std::string& begin, const std::string& end) {
   const mestra::Array a = mestra::read_slot_rows(
@@ -529,6 +575,9 @@ int main(int argc, char** argv) {
     }
     if (command == "rows" && argc == 6) {
       return cmd_rows(argv[2], argv[3], argv[4], argv[5]);
+    }
+    if (command == "cost" && (argc == 3 || argc == 4)) {
+      return cmd_cost(argv[2], argc == 4 ? argv[3] : "");
     }
     if (command == "callable-types") {
       mestra::Affine::register_type();

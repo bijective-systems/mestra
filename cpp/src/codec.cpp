@@ -122,19 +122,28 @@ Dict read_dict_group(const File& f, const std::string& path, bool top_level,
   return d;
 }
 
+std::vector<hsize_t> StoredStorage::chunk_of(const std::string& path) const {
+  std::vector<hsize_t> out;
+  if (chunks == nullptr) return out;
+  const auto it = chunks->find(path);
+  if (it != chunks->end()) out.assign(it->second.begin(), it->second.end());
+  return out;
+}
+
+FilterPipeline StoredStorage::filters_of(const std::string& path) const {
+  if (filters == nullptr) return FilterPipeline();
+  const auto it = filters->find(path);
+  return it == filters->end() ? FilterPipeline() : it->second;
+}
+
 void write_dict_group(File& f, const std::string& path, const Dict& d,
-                      const ChunkOverrides* chunks, int depth) {
+                      const StoredStorage* stored, int depth) {
   if (depth >= kMaxDictDepth) {
     throw Error("E41", "\"" + path + "\" is nested deeper than this writer "
                                       "walks");
   }
-  auto scale_chunk = [chunks](const std::string& p) {
-    std::vector<hsize_t> out;
-    if (chunks == nullptr) return out;
-    const auto it = chunks->find(p);
-    if (it != chunks->end()) out.assign(it->second.begin(), it->second.end());
-    return out;
-  };
+  const StoredStorage none;
+  const StoredStorage& found = stored == nullptr ? none : *stored;
   // Section 25: a writer visits a dictionary's keys in ascending order
   // of their UTF-8 bytes, which is the order Dict iterates in.
   for (const auto& entry : d) {
@@ -192,6 +201,19 @@ void write_dict_group(File& f, const std::string& path, const Dict& d,
           maxshape.assign(shape.size(), H5S_UNLIMITED);
           chunk.assign(shape.size(), 1);
         }
+        // A dictionary dataset is not row dimensioned, so section 23
+        // leaves it contiguous unless the file it came from chunked
+        // it -- which it must have, to carry a filter at all.
+        const FilterPipeline pipeline = found.filters_of(child);
+        const std::vector<hsize_t> kept = found.chunk_of(child);
+        if (!kept.empty()) {
+          chunk = kept;
+        } else if (!pipeline.empty() && chunk.empty()) {
+          chunk = shape;
+          for (hsize_t& e : chunk) {
+            if (e == 0) e = 1;
+          }
+        }
         if (v.kind() == Value::Kind::Strings) {
           std::size_t item = 1;
           for (const std::string& s : a.str) {
@@ -201,12 +223,14 @@ void write_dict_group(File& f, const std::string& path, const Dict& d,
             }
             item = std::max(item, s.size());
           }
-          f.write_strings(child, item, shape, maxshape, chunk, a.str);
+          f.write_strings(child, item, shape, maxshape, chunk, a.str,
+                          pipeline);
         } else if (a.dtype == DType::Float64) {
-          f.write_f64(child, shape, maxshape, chunk, a.f64);
+          f.write_f64(child, shape, maxshape, chunk, a.f64, pipeline);
         } else if (a.dtype == DType::Int32 || a.dtype == DType::Int64 ||
                    a.dtype == DType::Bool) {
-          f.write_ints(child, a.dtype, shape, maxshape, chunk, a.i64);
+          f.write_ints(child, a.dtype, shape, maxshape, chunk, a.i64,
+                       pipeline);
         } else {
           throw Error("E32", "a dictionary array of dtype " +
                                  std::string(dtype_name(a.dtype)) +
@@ -215,14 +239,14 @@ void write_dict_group(File& f, const std::string& path, const Dict& d,
         for (std::size_t axis = 0; axis < a.shape.size(); ++axis) {
           const std::string s = path + "/" + scale_name(key, axis);
           f.make_scale(s, static_cast<hsize_t>(a.shape[axis]),
-                       a.shape[axis] == 0, scale_chunk(s));
+                       a.shape[axis] == 0, found.chunk_of(s));
           f.attach_scale(child, s, static_cast<unsigned>(axis));
         }
         break;
       }
       case Value::Kind::Dict:
         f.make_group(child);
-        write_dict_group(f, child, v.as_dict(), chunks, depth + 1);
+        write_dict_group(f, child, v.as_dict(), stored, depth + 1);
         break;
     }
   }

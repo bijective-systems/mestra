@@ -21,6 +21,28 @@ namespace mestra {
 
 class Callable;
 
+// One step of a dataset's compression pipeline.  Section 23 allows
+// two filters and no others: shuffle, and gzip at levels 1 to 9,
+// either with or without the other.  The order is the order HDF5
+// applies them in and is part of what the file says about its own
+// layout, so a reader keeps it and a writer puts it back.
+struct FilterStep {
+  enum Kind { Shuffle, Gzip };
+  Kind kind = Shuffle;
+  int level = 0;    // the gzip level, 1 to 9; unused for shuffle
+
+  static FilterStep shuffle() { return FilterStep{Shuffle, 0}; }
+  static FilterStep gzip(int level) { return FilterStep{Gzip, level}; }
+  bool operator==(const FilterStep& o) const {
+    return kind == o.kind && (kind != Gzip || level == o.level);
+  }
+  bool operator!=(const FilterStep& o) const { return !(*this == o); }
+};
+
+// A dataset's whole pipeline, in order.  Empty means no filter, which
+// is what a dataset built from vectors gets.
+using FilterPipeline = std::vector<FilterStep>;
+
 // Where an array sits: under `node_arrays` or under `cell_arrays`.
 // It is not an attribute (section 19); the group the slot sits in says
 // it.
@@ -222,6 +244,14 @@ struct Dataset {
   // round trip reproduces the file; a caller building a dataset from
   // vectors leaves it alone and gets the default everywhere.
   std::map<std::string, std::vector<std::size_t>> chunk_overrides;
+  // The compression filters a dataset carries, by its HDF5 path, the
+  // same way and for the same reason as the chunk shape above: a
+  // reader records what it found so that a writer puts the same file
+  // back.  Section 23 makes compression optional, so a dataset built
+  // from vectors carries none and is written uncompressed; what a
+  // round trip must not do is silently drop a filter the file had,
+  // which on a real dataset grows it by a sixth.
+  std::map<std::string, FilterPipeline> filters;
 
   // --- lookup ------------------------------------------------------
   const Key* key(const std::string& name) const;

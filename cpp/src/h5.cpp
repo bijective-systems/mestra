@@ -148,6 +148,21 @@ std::string scale_name_attribute(hsize_t length) {
   return std::string(buffer);
 }
 
+FilterPipeline pipeline_of(const DsetInfo& info) {
+  FilterPipeline out;
+  for (const auto& filter : info.filters) {
+    if (filter.first == H5Z_FILTER_SHUFFLE) {
+      out.push_back(FilterStep::shuffle());
+    } else if (filter.first == H5Z_FILTER_DEFLATE) {
+      const unsigned level = filter.second.empty() ? 0 : filter.second[0];
+      if (level >= 1 && level <= 9) {
+        out.push_back(FilterStep::gzip(static_cast<int>(level)));
+      }
+    }
+  }
+  return out;
+}
+
 Id string_type(std::size_t size) {
   Id t(H5Tcopy(H5T_C_S1));
   need(t.valid(), "cannot make a string type");
@@ -453,6 +468,15 @@ DsetInfo File::dataset_info(const std::string& path) const {
     info.has_fill_value_set = fill == H5D_FILL_VALUE_USER_DEFINED;
   }
 
+  // Section 21 (E42): the creation properties of a dimension scale.
+  // Nothing about them is visible in a byte position, so the only way
+  // to check the rule is to ask the property list back.
+  unsigned crt_order = 0;
+  if (H5Pget_attr_creation_order(dcpl.get(), &crt_order) >= 0) {
+    info.attr_order_tracked = (crt_order & H5P_CRT_ORDER_TRACKED) != 0;
+    info.attr_order_indexed = (crt_order & H5P_CRT_ORDER_INDEXED) != 0;
+  }
+
   info.is_scale = H5DSis_scale(dset.get()) > 0;
   info.scales.resize(static_cast<std::size_t>(rank > 0 ? rank : 0));
   info.scale_paths.resize(static_cast<std::size_t>(rank > 0 ? rank : 0));
@@ -704,13 +728,34 @@ void File::write_attr(const std::string& path, const std::string& name,
 
 namespace {
 
-Id make_dcpl(const std::vector<hsize_t>& chunk) {
+Id make_dcpl(const std::vector<hsize_t>& chunk,
+             const FilterPipeline& filters) {
   Id dcpl(H5Pcreate(H5P_DATASET_CREATE));
   // Section 30: object time tracking off, so that two runs of a writer
   // produce identical bytes.
   H5Pset_obj_track_times(dcpl.get(), 0);
   if (!chunk.empty()) {
     H5Pset_chunk(dcpl.get(), static_cast<int>(chunk.size()), chunk.data());
+    // Section 23: gzip at levels 1 to 9 and shuffle, and no other
+    // filter.  They go on in the pipeline order the file they came
+    // from had, because HDF5 applies them in the order they are set
+    // and a round trip must put the same file back.  The library's own
+    // calls are used rather than H5Pset_filter, so that the flags and
+    // the client data are the ones every other writer of this format
+    // produces.
+    for (const FilterStep& step : filters) {
+      if (step.kind == FilterStep::Shuffle) {
+        need(H5Pset_shuffle(dcpl.get()) >= 0,
+             "cannot set the shuffle filter");
+      } else {
+        need(step.level >= 1 && step.level <= 9,
+             "gzip level " + std::to_string(step.level) +
+                 " is outside the 1 to 9 section 23 allows");
+        need(H5Pset_deflate(dcpl.get(),
+                            static_cast<unsigned>(step.level)) >= 0,
+             "cannot set the gzip filter");
+      }
+    }
     // Section 23 forbids setting a fill value and this sets none.  The
     // fill *time* is a different property, which the format does not
     // mention; ALLOC on a chunked dataset and the library default on a
@@ -749,11 +794,12 @@ void File::write_f64(const std::string& path,
                      const std::vector<hsize_t>& shape,
                      const std::vector<hsize_t>& maxshape,
                      const std::vector<hsize_t>& chunk,
-                     const std::vector<double>& data) {
+                     const std::vector<double>& data,
+                     const FilterPipeline& filters) {
   need_elements(path, shape, data.size());
   make_group(parent_of(path));
   Id space = make_space(shape, maxshape);
-  Id dcpl = make_dcpl(chunk);
+  Id dcpl = make_dcpl(chunk, filters);
   Id dset(H5Dcreate2(id_.get(), path.c_str(), H5T_IEEE_F64LE, space.get(),
                      H5P_DEFAULT, dcpl.get(), H5P_DEFAULT));
   need(dset.valid(), "cannot create the dataset \"" + path + "\"");
@@ -768,7 +814,8 @@ void File::write_ints(const std::string& path, DType dtype,
                       const std::vector<hsize_t>& shape,
                       const std::vector<hsize_t>& maxshape,
                       const std::vector<hsize_t>& chunk,
-                      const std::vector<std::int64_t>& data) {
+                      const std::vector<std::int64_t>& data,
+                      const FilterPipeline& filters) {
   need_elements(path, shape, data.size());
   make_group(parent_of(path));
   hid_t file_type = H5T_STD_I64LE;
@@ -779,7 +826,7 @@ void File::write_ints(const std::string& path, DType dtype,
     default: file_type = H5T_STD_I64LE; break;
   }
   Id space = make_space(shape, maxshape);
-  Id dcpl = make_dcpl(chunk);
+  Id dcpl = make_dcpl(chunk, filters);
   Id dset(H5Dcreate2(id_.get(), path.c_str(), file_type, space.get(),
                      H5P_DEFAULT, dcpl.get(), H5P_DEFAULT));
   need(dset.valid(), "cannot create the dataset \"" + path + "\"");
@@ -794,13 +841,14 @@ void File::write_strings(const std::string& path, std::size_t item_size,
                          const std::vector<hsize_t>& shape,
                          const std::vector<hsize_t>& maxshape,
                          const std::vector<hsize_t>& chunk,
-                         const std::vector<std::string>& data) {
+                         const std::vector<std::string>& data,
+                         const FilterPipeline& filters) {
   need_elements(path, shape, data.size());
   make_group(parent_of(path));
   const std::size_t item = item_size == 0 ? 1 : item_size;
   Id type = string_type(item);
   Id space = make_space(shape, maxshape);
-  Id dcpl = make_dcpl(chunk);
+  Id dcpl = make_dcpl(chunk, filters);
   Id dset(H5Dcreate2(id_.get(), path.c_str(), type.get(), space.get(),
                      H5P_DEFAULT, dcpl.get(), H5P_DEFAULT));
   need(dset.valid(), "cannot create the dataset \"" + path + "\"");
@@ -875,6 +923,24 @@ void File::make_scale(const std::string& path, hsize_t length,
   const hsize_t max = unlimited ? H5S_UNLIMITED : length;
   Id space(H5Screate_simple(1, &length, &max));
   Id dcpl(H5Pcreate(H5P_DATASET_CREATE));
+  // Section 21, decision 52.  Tracking attribute creation order gives
+  // the scale a version 2 object header, which is what lets its
+  // REFERENCE_LIST live in the file's fractal heap instead of in an
+  // object header message, where an attribute may not exceed 64 KiB.
+  // Without it no scale carries more than 4085 attachments.  The
+  // library version bounds stay at the default here and everywhere
+  // else, so this changes the object header of the scales and of
+  // nothing else.
+  //
+  // H5Pset_attr_phase_change looks like the way to ask for the same
+  // thing and is silently ignored under the default bounds; it must
+  // not be relied on.
+  H5Pset_attr_creation_order(dcpl.get(),
+                             H5P_CRT_ORDER_TRACKED | H5P_CRT_ORDER_INDEXED);
+  // Not optional, and not only section 30's byte reproducibility: a
+  // version 2 object header records four timestamps unless it is told
+  // not to, so the call above would make every file record when it
+  // was written.
   H5Pset_obj_track_times(dcpl.get(), 0);
   const hsize_t fallback = unlimited ? 1 : (length == 0 ? 1 : length);
   const hsize_t* use = chunk.empty() ? &fallback : chunk.data();
@@ -894,8 +960,17 @@ void File::attach_scale(const std::string& dataset, const std::string& scale,
   need(d.valid(), "cannot open \"" + dataset + "\"");
   Id s(H5Dopen2(id_.get(), scale.c_str(), H5P_DEFAULT));
   need(s.valid(), "cannot open the dimension scale \"" + scale + "\"");
+  // An attachment that fails has already deleted the REFERENCE_LIST it
+  // was extending, so what is on disk is a file every reader and every
+  // validator still accepts and netCDF-C can no longer rebuild the
+  // dimension from.  The caller has to delete it, so the message says
+  // what was lost and where the rule is.
   need(H5DSattach_scale(d.get(), s.get(), axis) >= 0,
-       "cannot attach \"" + scale + "\" to \"" + dataset + "\"");
+       "cannot attach \"" + scale + "\" to \"" + dataset +
+           "\": the scale's REFERENCE_LIST was deleted before the "
+           "attachment failed and has not been written back, so this file "
+           "is incomplete and must be deleted rather than kept (section "
+           "21)");
 }
 
 namespace {

@@ -103,6 +103,37 @@ class Writer {
     return chunk;
   }
 
+  // The filters the dataset at `path` came with, or none.  Section 23
+  // makes compression optional, so a dataset built from vectors gets
+  // none; what a round trip must not do is drop one the file had.
+  FilterPipeline filters_for(const std::string& path) const {
+    const auto it = d_.filters.find(path);
+    return it == d_.filters.end() ? FilterPipeline() : it->second;
+  }
+
+  // Section 23 for a dataset with no `row` dimension: contiguous,
+  // unless the file chunked it or it carries a filter, which HDF5
+  // allows on a chunked dataset only.  The default then is the whole
+  // dataset when that is 1 MiB or less, and otherwise the row rule
+  // applied to its leading dimension.
+  std::vector<std::size_t> fixed_chunk_for(
+      const std::string& path, std::size_t item,
+      const std::vector<std::size_t>& shape) const {
+    const auto it = d_.chunk_overrides.find(path);
+    if (it != d_.chunk_overrides.end()) return it->second;
+    if (shape.empty() || filters_for(path).empty()) return {};
+    std::vector<std::size_t> chunk(shape);
+    std::size_t bytes = item;
+    for (std::size_t& e : chunk) {
+      if (e == 0) e = 1;
+      bytes *= e;
+    }
+    if (bytes <= 1048576) return chunk;
+    const std::vector<std::size_t> rest(chunk.begin() + 1, chunk.end());
+    chunk[0] = default_chunk_rows(item, rest, chunk[0]);
+    return chunk;
+  }
+
   static std::vector<hsize_t> to_h(const std::vector<std::size_t>& v) {
     return std::vector<hsize_t>(v.begin(), v.end());
   }
@@ -154,7 +185,9 @@ class Writer {
                            const std::vector<std::string>& str,
                            std::size_t string_size,
                            const Support* support) {
-    write_any(path, dtype, shape, {}, {}, f64, i64, str, string_size);
+    const std::vector<std::size_t> chunk =
+        fixed_chunk_for(path, bytes_of(dtype, string_size), shape);
+    write_any(path, dtype, shape, {}, chunk, f64, i64, str, string_size);
     attach(path, shape, dims, support, false);
   }
 
@@ -168,9 +201,10 @@ class Writer {
                  std::size_t string_size) {
     const std::vector<hsize_t> h_shape = to_h(shape);
     const std::vector<hsize_t> h_chunk = to_h(chunk);
+    const FilterPipeline pipeline = filters_for(path);
     switch (dtype) {
       case DType::Float64:
-        f_.write_f64(path, h_shape, maxshape, h_chunk, f64);
+        f_.write_f64(path, h_shape, maxshape, h_chunk, f64, pipeline);
         return;
       case DType::String: {
         std::size_t item = string_size;
@@ -178,11 +212,12 @@ class Writer {
           for (const std::string& s : str) item = std::max(item, s.size());
         }
         f_.write_strings(path, item == 0 ? 1 : item, h_shape, maxshape,
-                         h_chunk, str);
+                         h_chunk, str, pipeline);
         return;
       }
       default:
-        f_.write_ints(path, dtype, h_shape, maxshape, h_chunk, i64);
+        f_.write_ints(path, dtype, h_shape, maxshape, h_chunk, i64,
+                      pipeline);
         return;
     }
   }
@@ -252,8 +287,10 @@ class Writer {
         for (const std::string& s : t.entries) item = std::max(item, s.size());
       }
       const std::vector<std::size_t> shape{t.entries.size()};
-      f_.write_strings(p, item == 0 ? 1 : item, to_h(shape), {}, {},
-                       t.entries);
+      const std::vector<std::size_t> chunk =
+          fixed_chunk_for(p, item == 0 ? 1 : item, shape);
+      f_.write_strings(p, item == 0 ? 1 : item, to_h(shape), {},
+                       to_h(chunk), t.entries, filters_for(p));
       f_.attach_scale(p, "/category_" + t.name, 0);
     }
   }
@@ -423,7 +460,9 @@ class Writer {
       f_.make_group(p);
       put(p, "type", c.type);
       if (c.repr.has_value()) put(p, "repr", *c.repr);
-      internal::write_dict_group(f_, p, c.dict, &d_.chunk_overrides);
+      const internal::StoredStorage stored{&d_.chunk_overrides,
+                                           &d_.filters};
+      internal::write_dict_group(f_, p, c.dict, &stored);
     }
   }
 
