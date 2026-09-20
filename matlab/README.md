@@ -296,7 +296,8 @@ and the first three rows, which is what makes a report on a file of
 1,800 rows still a report:
 
     W04 /keys/mach: 2 of 6 rows are outside the declared bounds
-        [0.2, 0.7]; widen the bounds or leave the rows out
+        [0.2, 0.7] (rows 1, 4); widen the bounds or leave those rows
+        out
 
 `mestra.info` prints what is in a file without reading any array: for
 every key its name, role, units, bounds, category, trajectory group
