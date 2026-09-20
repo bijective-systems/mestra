@@ -50,12 +50,14 @@ name nothing the read does not. `shared_hostile` runs the corpus's own hostile
 subset and `hostile` this implementation's; both are described at the
 end of this file.
 
-Two of the shared hostile files are generated rather than committed,
-so run
+Three corpus files are generated rather than committed, because of
+their size: the two deep hostile files and `cases/wide_keys`, whose
+4200 row-dimensioned datasets all attach to one `row` scale. Run
 
-    python vectors/generate.py --hostile-deep
+    python vectors/generate.py --hostile-deep --wide
 
-before `ctest`.
+before `ctest`, once, and not again while a test is reading
+`vectors/`.
 
 The library is compiled with `-Wall -Wextra -Wpedantic -Wshadow
 -Wconversion -Wsign-conversion` and builds warning-free, and with
@@ -166,6 +168,19 @@ Five minutes with the tool
         one slot for the half-open row range, reading no other slot
         and no row outside the range (section 29).
 
+    mestra-cli cost FILE [SLOT]
+        seconds for a metadata open, a validation and one lazy row
+        read of SLOT, each the library call alone and all three in one
+        process. `info` and `read` validate before they print, which
+        is the tool's policy and not the library's cost, so this is
+        the command to time a file with. The conformance driver prints
+        it for `wide_keys`.
+
+            open 3.047
+            validate 1.991
+            rows 0.056
+            findings 0 0
+
     mestra-cli dict-dump FILE CALLABLE
         a callable's dictionary, one line per leaf.
 
@@ -217,7 +232,7 @@ it. `mestra::read_slot_rows(path, slot, begin, end)` reads one slot
 for a row range without touching the rest.
 
 The two passes are checked against each other on every file there is
--- all 70 corpus cases, the 15 shared hostile files and the 12 here --
+-- all 75 corpus cases, the 15 shared hostile files and the 12 here --
 and they name the same structural rules on every one of them, and the
 open names nothing the read does not.
 
@@ -291,6 +306,35 @@ holds, so that the same arrays give the same file in every language
 and W04 and W08 are decidable on it. A caller who wants a wider domain
 of validity assigns `lower` and `upper` on the key that comes back;
 those are plain attributes and assigning them takes effect.
+
+*What a file said about its own layout survives being read and
+written again.* A chunk shape that is not the default of section 23,
+and a compression filter -- gzip at levels 1 to 9 and shuffle, which
+are the two section 23 allows -- come back off the file into
+`Dataset::chunk_overrides` and `Dataset::filters`, by HDF5 path, and
+`write` puts them back in the pipeline order they were in. A dataset
+built from plain vectors carries neither and gets the default and no
+compression, because section 23 makes compression a writer's choice;
+what a round trip must not do is drop a filter the file had, which on
+a real dataset grows it by a sixth every time. The corpus case is
+`compressed_field` and the comparison is structural equality.
+
+*A dimension scale is created with the properties of section 21.*
+Attribute creation order tracked and indexed, and object time tracking
+off, on the scale's own creation property list and on nothing else in
+the file. The first gives the scale a version 2 object header, so that
+its REFERENCE_LIST lives in the file's heap: without it no scale takes
+more than 4085 attachments, and the 4086th fails after deleting the
+list it was extending, leaving a file every reader and every validator
+accepts. The second keeps the file byte reproducible, because a
+version 2 header records four timestamps unless it is told not to.
+`H5Pset_attr_phase_change` asks for the same thing and is silently
+ignored under the default library version bounds, which this writer
+leaves at the default everywhere. An attachment that fails anyway is
+refused with a message naming the REFERENCE_LIST it destroyed and the
+section, because the file left behind has to be deleted rather than
+kept. The corpus cases are `wide_keys`, which could not be written at
+all without the rule, and `err_e42`, which breaks it on purpose.
 
 *`write` validates first and refuses on any error.* It builds the file
 beside the name you gave and moves it into place only once it
@@ -588,9 +632,9 @@ required identifiers must appear, more are allowed, and `validate`,
 `info` and `read` must each refuse inside the timeout the case states.
 Two of its fifteen files are generated rather than committed, so run
 
-    python vectors/generate.py --hostile-deep
+    python vectors/generate.py --hostile-deep --wide
 
-before `ctest`. `cpp/tests/hostile/` is this implementation's own,
+before `ctest`, which also writes `cases/wide_keys`. `cpp/tests/hostile/` is this implementation's own,
 with `make_hostile.py` saying how each file was made. Building with
 `-DMESTRA_SANITIZE=ON` adds the address and undefined-behaviour
 sanitizers to the whole suite.
@@ -612,18 +656,28 @@ missing value in it; and a zero-row callable file built with
 and evaluated, whose evaluated form keeps no callable and no
 `/callables` group.
 
-All 70 corpus cases: the validator outcome and the shape of the
+All 75 corpus cases: the validator outcome and the shape of the
 validator's own output, every support id, every probe, every codec
 round trip, every worked evaluation, a lazy row read of every
-row-dimensioned probe, and, for the 30 cases that validate without an
+row-dimensioned probe, and, for the 33 cases that validate without an
 error, read-write-compare under the structural equality rule of
 section 30, and, for every worked evaluation, that the evaluated file
 carries no `/callables` group. Then the fifteen cases of
 `vectors/hostile` and the twelve of this implementation's own, each
-through `validate`, `info` and `read`, and all 97 files of the three
+through `validate`, `info` and `read`, and all 102 files of the three
 sets through the metadata open beside the whole read.
 The whole of it also runs under the address and undefined-behaviour
 sanitizers.
+
+The driver also prints what the largest case costs, because a cost is
+a thing a test can watch and not only a thing a study can measure:
+
+    cost   wide_keys   open 3.0 s   validate 2.0 s   one lazy slot read 0.1 s
+
+on 4200 row-dimensioned datasets, each the library call alone. The
+seconds are the machine's and nothing asserts on them; what the line
+is for is that an open or a validation which became the square of the
+dataset count would show here.
 
 Byte identity with the corpus files is not required and section 30
 says it must not be tested: the HDF5 library decides the superblock,
