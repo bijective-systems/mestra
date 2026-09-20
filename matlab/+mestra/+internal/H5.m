@@ -195,12 +195,39 @@ classdef H5
             H5A.close(aid);
         end
 
+        function [v, ok] = scalarAttr(oid, name)
+        %scalarAttr  An attribute, only when its dataspace is scalar.
+        %   Section 18 gives every attribute this format names a scalar
+        %   dataspace.  A file that puts an array there would hand a
+        %   caller an array where it expects one number, and every
+        %   comparison downstream would then be an array too, so the
+        %   value is refused rather than passed on.  `ok` is false when
+        %   the attribute is missing, is not scalar, or cannot be read.
+            v = [];
+            ok = false;
+            try
+                if ~mestra.internal.H5.hasAttr(oid, name)
+                    return
+                end
+                info = mestra.internal.H5.attrInfo(oid, name);
+                if ~info.scalar
+                    return
+                end
+                v = mestra.internal.H5.readAttr(oid, name);
+                ok = true;
+            catch
+                v = [];
+                ok = false;
+            end
+        end
+
         function v = readAttr(oid, name)
         %readAttr  An attribute as a MATLAB value.
         %   Strings arrive as char with the trailing NUL padding
         %   stripped, booleans as int8, integers as int64, floats as
         %   double.  Nothing here interprets int8 as logical: the
-        %   caller knows which attributes are booleans.
+        %   caller knows which attributes are booleans.  This does not
+        %   check the dataspace; scalarAttr is what a reader uses.
             aid = H5A.open(oid, name);
             raw = H5A.read(aid);
             tid = H5A.get_type(aid);
@@ -338,14 +365,55 @@ classdef H5
 
         function names = children(gid)
         %children  The link names of a group, sorted by UTF-8 bytes.
-            info = H5G.get_info(gid);
-            n = double(info.nlinks);
-            names = cell(1, n);
-            for i = 1:n
-                names{i} = H5L.get_name_by_idx(gid, '.', ...
-                    'H5_INDEX_NAME', 'H5_ITER_INC', i - 1, 'H5P_DEFAULT');
+        %   A group whose links cannot be listed gives an empty list
+        %   rather than an error, so that one damaged group does not
+        %   end a walk over the rest of the file.
+            names = {};
+            try
+                info = H5G.get_info(gid);
+                n = double(info.nlinks);
+                names = cell(1, n);
+                for i = 1:n
+                    names{i} = H5L.get_name_by_idx(gid, '.', ...
+                        'H5_INDEX_NAME', 'H5_ITER_INC', i - 1, 'H5P_DEFAULT');
+                end
+                names = mestra.internal.H5.sortByBytes(names);
+            catch
+                names = {};
             end
-            names = mestra.internal.H5.sortByBytes(names);
+        end
+
+        function kind = linkKind(gid, name)
+        %linkKind  What sort of link a name is, without following it.
+        %   'hard', 'soft', 'external' or 'unknown'.  H5L.get_info
+        %   reads the link itself and never the object it points at,
+        %   which is the only safe question to ask first: a soft link
+        %   may dangle or loop, and an external link names another
+        %   file, which this package never opens.
+            kind = 'unknown';
+            try
+                info = H5L.get_info(gid, name, 'H5P_DEFAULT');
+                switch double(info.type)
+                    case 0, kind = 'hard';
+                    case 1, kind = 'soft';
+                    case 64, kind = 'external';
+                end
+            catch
+            end
+        end
+
+        function addr = linkAddress(gid, name)
+        %linkAddress  The address a hard link points at, or [].
+        %   Two names with one address are one object, which is how a
+        %   walk notices that a file's groups form a cycle.
+            addr = [];
+            try
+                info = H5L.get_info(gid, name, 'H5P_DEFAULT');
+                if double(info.type) == 0 && isfield(info, 'address')
+                    addr = double(info.address);
+                end
+            catch
+            end
         end
 
         function out = sortByBytes(names)
@@ -383,8 +451,28 @@ classdef H5
         end
 
         function t = childType(gid, name)
-        %childType  'group', 'dataset' or 'other'.
-            oid = H5O.open(gid, name, 'H5P_DEFAULT');
+        %childType  What a name under a group really is.
+        %   One of 'group', 'dataset', 'other', 'soft', 'external' or
+        %   'unreadable'.  The link is inspected before the object is
+        %   opened, so a soft link is never followed, an external link
+        %   never opens another file, and an object that will not open
+        %   is reported rather than thrown.
+            t = mestra.internal.H5.linkKind(gid, name);
+            switch t
+                case 'soft'
+                    return
+                case 'external'
+                    return
+                case 'unknown'
+                    t = 'unreadable';
+                    return
+            end
+            try
+                oid = H5O.open(gid, name, 'H5P_DEFAULT');
+            catch
+                t = 'unreadable';
+                return
+            end
             kind = H5I.get_type(oid);
             H5O.close(oid);
             if kind == H5ML.get_constant_value('H5I_GROUP')
@@ -393,6 +481,36 @@ classdef H5
                 t = 'dataset';
             else
                 t = 'other';
+            end
+        end
+
+        function gid = openGroup(parent, name)
+        %openGroup  Open a hard-linked group, or raise mestra:reader.
+            if ~strcmp(mestra.internal.H5.childType(parent, name), 'group')
+                error('mestra:reader', ...
+                      '"%s" is not a group this reader will open', name);
+            end
+            try
+                gid = H5G.open(parent, name);
+            catch err
+                error('mestra:reader', ...
+                      'the group "%s" would not open: %s', name, ...
+                      regexprep(strtrim(err.message), '\s+', ' '));
+            end
+        end
+
+        function did = openDataset(parent, name)
+        %openDataset  Open a hard-linked dataset, or raise mestra:reader.
+            if ~strcmp(mestra.internal.H5.childType(parent, name), 'dataset')
+                error('mestra:reader', ...
+                      '"%s" is not a dataset this reader will open', name);
+            end
+            try
+                did = H5D.open(parent, name);
+            catch err
+                error('mestra:reader', ...
+                      'the dataset "%s" would not open: %s', name, ...
+                      regexprep(strtrim(err.message), '\s+', ' '));
             end
         end
 
@@ -436,22 +554,50 @@ classdef H5
                 info.strpad = H5T.get_strpad(tid);
             end
             H5T.close(tid);
-            dcpl = H5D.get_create_plist(did);
-            if H5P.get_layout(dcpl) == H5ML.get_constant_value('H5D_CHUNKED')
-                [~, chunk] = H5P.get_chunk(dcpl);
-                info.chunk = double(chunk);
-            else
-                info.chunk = [];
+            info.elements = prod(max(info.dims, 0));
+            info.chunk = [];
+            info.filters = zeros(0, 2);
+            % A creation property list is the file's word for how the
+            % data is stored, including filters this build may not have
+            % and client data longer than any reader expects. Every
+            % question is asked separately so that one unanswerable one
+            % leaves the rest of the description intact.
+            try
+                dcpl = H5D.get_create_plist(did);
+            catch
+                dcpl = [];
             end
-            nf = H5P.get_nfilters(dcpl);
-            info.filters = zeros(nf, 2);
-            for i = 1:nf
-                [fid, ~, cd] = H5P.get_filter(dcpl, i - 1);
-                p = 0;
-                if ~isempty(cd), p = double(cd(1)); end
-                info.filters(i, :) = [double(fid) p];
+            if ~isempty(dcpl)
+                try
+                    if H5P.get_layout(dcpl) == ...
+                       H5ML.get_constant_value('H5D_CHUNKED')
+                        [~, chunk] = H5P.get_chunk(dcpl);
+                        info.chunk = double(chunk);
+                    end
+                catch
+                end
+                nf = 0;
+                try
+                    nf = H5P.get_nfilters(dcpl);
+                catch
+                end
+                rows = zeros(0, 2);
+                for i = 1:nf
+                    id = -1; p = 0;
+                    try
+                        [id, ~, cd] = H5P.get_filter(dcpl, i - 1);
+                        if ~isempty(cd), p = double(cd(1)); end
+                    catch
+                        id = -1;
+                    end
+                    rows(end + 1, :) = [double(id) p]; %#ok<AGROW>
+                end
+                info.filters = rows;
+                try
+                    H5P.close(dcpl);
+                catch
+                end
             end
-            H5P.close(dcpl);
             info.isScale = false;
             try
                 info.isScale = H5DS.is_scale(did) > 0;
@@ -502,9 +648,11 @@ classdef H5
             if nargin < 2
                 info = mestra.internal.H5.dsetInfo(did);
             end
+            count = prod(max(info.dims, 0));
+            mestra.internal.Limits.checkElements(count, 'this dataset');
             if strcmp(info.type, 'string')
-                raw = H5D.read(did);
-                count = prod(max(info.dims, 0));
+                mestra.internal.H5.checkStringSize(info.strSize);
+                raw = mestra.internal.H5.guardedRead(did);
                 mestra.internal.H5.checkAsciiRead(raw, ...
                     info.strSize * count, 'a fixed-length string dataset');
                 data = mestra.internal.H5.splitStrings(raw, count);
@@ -515,7 +663,35 @@ classdef H5
                 data = mestra.internal.H5.cast(info.type, data);
                 return
             end
-            data = H5D.read(did);
+            data = mestra.internal.H5.guardedRead(did);
+        end
+
+        function raw = guardedRead(did, varargin)
+        %guardedRead  H5D.read, with any failure named as this reader's.
+        %   A filter this build cannot run, a checksum that does not
+        %   match, a shape MATLAB refuses to allocate: all of them are
+        %   the file's doing, not the caller's mistake, so they carry
+        %   this package's own identifier.
+            try
+                raw = H5D.read(did, varargin{:});
+            catch err
+                if strcmp(err.identifier, 'mestra:matlabAscii')
+                    rethrow(err);
+                end
+                error('mestra:reader', ...
+                      'the data would not read: %s', ...
+                      regexprep(strtrim(err.message), '\s+', ' '));
+            end
+        end
+
+        function checkStringSize(size)
+        %checkStringSize  Refuse an absurd fixed-length string width.
+            limit = mestra.internal.Limits.get('maxStringSize');
+            if size > limit
+                error('mestra:reader', ...
+                      ['a fixed-length string of %d bytes an element is ' ...
+                       'past the %d this reader accepts'], size, limit);
+            end
         end
 
         function out = splitStrings(raw, n)
@@ -540,9 +716,12 @@ classdef H5
         %   Returns a size-by-count uint8 matrix, padding and all, so
         %   that a validator can see a NUL where it should not be.
             n = prod(max(info.dims, 0));
+            mestra.internal.H5.checkStringSize(info.strSize);
+            mestra.internal.Limits.checkElements(n * max(info.strSize, 1), ...
+                                                 'this string dataset');
             raw = zeros(info.strSize, n, 'uint8');
             if n == 0, return, end
-            buf = H5D.read(did);
+            buf = mestra.internal.H5.guardedRead(did);
             mestra.internal.H5.checkAsciiRead(buf, info.strSize * n, ...
                 'a fixed-length string dataset');
             if iscell(buf)
@@ -561,17 +740,23 @@ classdef H5
         %   `first` is zero based.  Only the chunks that hold those
         %   rows are touched, which is what section 29 asks a reader
         %   to be able to do.  The result is in MATLAB axis order.
+            block = info.dims;
+            block(1) = count;
+            mestra.internal.Limits.checkElements(prod(max(block, 0)), ...
+                                                 'this row range');
+            if strcmp(info.type, 'string')
+                mestra.internal.H5.checkStringSize(info.strSize);
+            end
             fileSid = H5D.get_space(did);
             start = zeros(1, numel(info.dims));
-            block = info.dims;
             start(1) = first;
-            block(1) = count;
             H5S.select_hyperslab(fileSid, 'H5S_SELECT_SET', start, [], ...
                                  ones(1, numel(block)), block);
             memSid = H5S.create_simple(numel(block), block, block);
             if strcmp(info.type, 'string')
                 tid = H5D.get_type(did);
-                raw = H5D.read(did, tid, memSid, fileSid, 'H5P_DEFAULT');
+                raw = mestra.internal.H5.guardedRead(did, tid, memSid, ...
+                                                     fileSid, 'H5P_DEFAULT');
                 H5T.close(tid);
                 mestra.internal.H5.checkAsciiRead(raw, ...
                     info.strSize * prod(block), ...
@@ -579,7 +764,8 @@ classdef H5
                 data = mestra.internal.H5.splitStrings(raw, prod(block));
             else
                 mtid = mestra.internal.H5.memType(info.type);
-                data = H5D.read(did, mtid, memSid, fileSid, 'H5P_DEFAULT');
+                data = mestra.internal.H5.guardedRead(did, mtid, memSid, ...
+                                                     fileSid, 'H5P_DEFAULT');
                 H5T.close(mtid);
                 data = reshape(data, [fliplr(block) 1 1]);
             end
@@ -676,15 +862,36 @@ classdef H5
 
         % --------------------------------------- whole subtree copies
 
-        function tree = captureTree(gid)
+        function tree = captureTree(gid, depth, seen)
         %captureTree  Everything under a group, kept as it stands.
         %   Used for /notes, for /private, which section 29 forbids a
         %   reader to interpret, and for any group this version does
         %   not know (section 28).  A round trip through this package
         %   therefore loses none of them.
+        %
+        %   The walk is bounded in three ways, because the shape of the
+        %   tree is the file's choice and not this reader's: it stops
+        %   at maxDepth levels, it stops at a group it has already
+        %   visited in this walk, which is how a cycle of hard links
+        %   ends, and it never follows a soft or an external link.
+        %   Each of those records a note in `tree.stopped` and returns
+        %   what it has, rather than descending until the stack gives
+        %   out.
             H5 = mestra.internal.H5;
+            if nargin < 2, depth = 0; end
+            if nargin < 3, seen = []; end
+            tree.stopped = {};
             tree.attrs = struct('name', {}, 'type', {}, 'bytes', {}, ...
                                 'value', {});
+            tree.datasets = struct('name', {}, 'info', {}, 'data', {}, ...
+                                   'scales', {}, 'label', {});
+            tree.groups = struct('name', {}, 'tree', {});
+            if depth > mestra.internal.Limits.get('maxDepth')
+                tree.stopped{end + 1} = sprintf( ...
+                    'nesting past %d levels was not followed', ...
+                    mestra.internal.Limits.get('maxDepth'));
+                return
+            end
             for name = H5.publicAttrNames(gid)
                 info = H5.attrInfo(gid, name{1});
                 rec.name = name{1};
@@ -698,40 +905,71 @@ classdef H5
                 end
                 tree.attrs(end + 1) = rec;
             end
-            tree.datasets = struct('name', {}, 'info', {}, 'data', {}, ...
-                                   'scales', {}, 'label', {});
-            tree.groups = struct('name', {}, 'tree', {});
             for name = H5.children(gid)
-                if strcmp(H5.childType(gid, name{1}), 'group')
-                    sub = H5G.open(gid, name{1});
-                    tree.groups(end + 1) = struct('name', name{1}, ...
-                        'tree', H5.captureTree(sub));
-                    H5G.close(sub);
-                else
-                    did = H5D.open(gid, name{1});
-                    info = H5.dsetInfo(did);
-                    rec.name = name{1};
-                    rec.info = info;
-                    rec.data = [];
-                    if ~info.isScale
-                        rec.data = H5.readData(did, info);
-                    end
-                    rec.scales = cell(1, numel(info.dims));
-                    for axis = 1:numel(info.dims)
-                        found = H5.scaleNames(did, axis - 1);
-                        if isempty(found)
-                            rec.scales{axis} = '';
-                        else
-                            rec.scales{axis} = found{1};
+                kind = H5.childType(gid, name{1});
+                switch kind
+                    case 'group'
+                        address = H5.linkAddress(gid, name{1});
+                        if ~isempty(address) && any(seen == address)
+                            tree.stopped{end + 1} = sprintf( ...
+                                ['"%s" is another name for a group ' ...
+                                 'already visited; it was not ' ...
+                                 'followed'], name{1}); %#ok<AGROW>
+                            continue
                         end
-                    end
-                    rec.label = '';
-                    if info.isScale && H5.hasAttr(did, 'NAME')
-                        rec.label = H5.readAttr(did, 'NAME');
-                    end
-                    tree.datasets(end + 1) = rec;
-                    H5D.close(did);
+                        sub = H5G.open(gid, name{1});
+                        subTree = H5.captureTree(sub, depth + 1, ...
+                                                 [seen address]);
+                        H5G.close(sub);
+                        tree.groups(end + 1) = struct('name', name{1}, ...
+                                                      'tree', subTree);
+                        for i = 1:numel(subTree.stopped)
+                            tree.stopped{end + 1} = ...
+                                [name{1} '/' subTree.stopped{i}]; %#ok<AGROW>
+                        end
+                    case 'dataset'
+                        did = H5D.open(gid, name{1});
+                        try
+                            rec = H5.captureDataset(did, name{1});
+                            tree.datasets(end + 1) = rec;
+                        catch err
+                            tree.stopped{end + 1} = sprintf( ...
+                                '"%s" would not read: %s', name{1}, ...
+                                regexprep(strtrim(err.message), ...
+                                          '\s+', ' ')); %#ok<AGROW>
+                        end
+                        H5D.close(did);
+                    otherwise
+                        tree.stopped{end + 1} = sprintf( ...
+                            '"%s" is a %s and was not followed', ...
+                            name{1}, kind); %#ok<AGROW>
                 end
+            end
+        end
+
+        function rec = captureDataset(did, name)
+        %captureDataset  One dataset of a captured subtree.
+            H5 = mestra.internal.H5;
+            info = H5.dsetInfo(did);
+            rec.name = name;
+            rec.info = info;
+            rec.data = [];
+            if ~info.isScale
+                rec.data = H5.readData(did, info);
+            end
+            rec.scales = cell(1, numel(info.dims));
+            for axis = 1:numel(info.dims)
+                found = H5.scaleNames(did, axis - 1);
+                if isempty(found)
+                    rec.scales{axis} = '';
+                else
+                    rec.scales{axis} = found{1};
+                end
+            end
+            rec.label = '';
+            if info.isScale && H5.hasAttr(did, 'NAME')
+                label = H5.readAttr(did, 'NAME');
+                if ischar(label), rec.label = label; end
             end
         end
 
@@ -753,7 +991,17 @@ classdef H5
                     ds.info.dims, ds.info.maxdims, ds.info.chunk, ...
                     ds.info.filters, ds.info.strSize);
                 if ds.info.isScale
-                    H5DS.set_scale(did, ds.label);
+                    % A scale whose NAME attribute was missing is
+                    % written back with the sentence section 21 gives
+                    % it, because H5DS.set_scale needs some name and
+                    % nothing reads this one anyway.
+                    label = ds.label;
+                    if isempty(label)
+                        label = sprintf('%s%10d', ...
+                            mestra.internal.H5.SENTENCE, ...
+                            max(ds.info.dims(1), 0));
+                    end
+                    H5DS.set_scale(did, label);
                 else
                     H5.writeData(did, ds.info.type, ds.data, ds.info.strSize);
                 end

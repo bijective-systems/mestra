@@ -170,6 +170,7 @@ function out = copyDataset(d)
     out.notes = d.notes;
     out.privateTree = d.privateTree;
     out.unknownGroups = d.unknownGroups;
+    out.skipped = d.skipped;
     if d.unknownAttrs.Count > 0
         out.unknownAttrs = containers.Map(d.unknownAttrs.keys(), ...
                                           d.unknownAttrs.values());

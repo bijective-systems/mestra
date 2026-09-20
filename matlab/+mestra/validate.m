@@ -23,6 +23,22 @@ function out = validate(path)
 %   the UDUNITS grammar and not the names, because shipping a unit
 %   database is not what the rule asks for.
 %
+%   A file is untrusted input, so the pass is per object: an object
+%   that will not open or will not read stops that object and nothing
+%   else, and leaves an unclassified finding with its path.  Those
+%   findings are in OUT.UNCLASSIFIED and never in OUT.ERRORS or
+%   OUT.WARNINGS, so they cannot be mistaken for a rule of section 14.
+%   Their identifiers are
+%
+%       U01   an object this reader could not read
+%       U02   a link this reader does not follow: soft, external or
+%             dangling.  Section 13 gives the format no links, and an
+%             external link names another file, which is never opened
+%       U03   a limit of this reader was reached; see mestra.limits
+%
+%   A file that is not HDF5 at all, or that is truncated, raises
+%   mestra:reader rather than a library error.
+%
 %   Example
 %
 %       r = mestra.validate('case.mes');
@@ -35,7 +51,7 @@ function out = validate(path)
 %   See also mestra.read, mestra.write, mestra.Dataset.
 
     rep = mestra.internal.Report();
-    fid = H5F.open(path, 'H5F_ACC_RDONLY', 'H5P_DEFAULT');
+    fid = mestra.internal.Reader.openFile(path);
     closeFile = onCleanup(@() H5F.close(fid)); %#ok<NASGU>
     root = H5G.open(fid, '/');
     closeRoot = onCleanup(@() H5G.close(root)); %#ok<NASGU>
@@ -49,17 +65,66 @@ function out = validate(path)
         out = rep.result();
         return
     end
-    ctx = gather(ctx);
-    checkRoot(ctx);
-    checkCategories(ctx);
-    checkKeys(ctx);
-    checkScalars(ctx);
-    checkRowSupport(ctx);
-    checkSupports(ctx);
-    checkCallables(ctx);
-    checkUnknown(ctx);
-    checkPrivate(ctx);
+    ctx = guard(ctx, '/', @() gather(ctx), ctx);
+    % Each pass is separate, so that one that cannot finish leaves the
+    % others to run.  That is what makes a finding late in a file
+    % reachable when something early in it will not read.
+    guard(ctx, '/', @() checkRoot(ctx));
+    guard(ctx, '/categories', @() checkCategories(ctx));
+    guard(ctx, '/keys', @() checkKeys(ctx));
+    guard(ctx, '/scalars', @() checkScalars(ctx));
+    guard(ctx, '/row_support', @() checkRowSupport(ctx));
+    guard(ctx, '/supports', @() checkSupports(ctx));
+    guard(ctx, '/callables', @() checkCallables(ctx));
+    guard(ctx, '/', @() checkUnknown(ctx));
+    guard(ctx, '/private', @() checkPrivate(ctx));
     out = rep.result();
+end
+
+% ============================================== per-object recovery
+
+function out = guard(ctx, path, fn, fallback)
+%guard  Run one check; a failure is a finding and not the end.
+%   A limit of this reader is U03, anything else is U01.  Both carry
+%   the path, so a caller knows which object was passed over.
+    if nargin < 4, fallback = []; end
+    try
+        if nargout > 0
+            out = fn();
+        else
+            fn();
+            out = [];
+        end
+    catch err
+        out = fallback;
+        if strcmp(err.identifier, 'mestra:reader') && ...
+           ~isempty(strfind(err.message, 'this reader')) %#ok<STREMP>
+            id = 'U03';
+        else
+            id = 'U01';
+        end
+        ctx.rep.add(id, path, '%s', ...
+                    regexprep(strtrim(err.message), '\s+', ' '));
+    end
+end
+
+function tf = followable(ctx, gid, name, path)
+%followable  True for a hard link; anything else is U02 and skipped.
+    kind = mestra.internal.H5.childType(gid, name);
+    tf = any(strcmp(kind, {'group', 'dataset', 'other'}));
+    if ~tf
+        switch kind
+            case 'soft'
+                why = ['a soft link, which this format does not define ' ...
+                       'and this reader does not follow'];
+            case 'external'
+                why = ['an external link, which names another file; ' ...
+                       'this reader never opens one'];
+            otherwise
+                why = 'an object that would not open';
+        end
+        ctx.rep.add('U02', path, '%s', why);
+    end
 end
 
 % ===================================================== the vocabulary
@@ -107,8 +172,8 @@ function ok = checkFormat(ctx)
         ctx.rep.add('E17', '/', 'format is missing');
         return
     end
-    value = H5.readAttr(ctx.root, 'format');
-    if ~ischar(value), value = ''; end
+    [value, ok] = H5.scalarAttr(ctx.root, 'format');
+    if ~ok || ~ischar(value), value = ''; end
     major = mestra.internal.Reader.majorVersion(value);
     if isnan(major) || major ~= 0
         ctx.rep.add('E01', '/', ...
@@ -122,47 +187,48 @@ function ctx = gather(ctx)
 %gather  Read once what every check needs.
     H5 = mestra.internal.H5;
     ctx.aligned = [];
-    if H5.hasAttr(ctx.root, 'aligned')
-        v = H5.readAttr(ctx.root, 'aligned');
-        if isnumeric(v), ctx.aligned = double(v); end
-    end
-    ctx.generalisationGroup = '';
-    if H5.hasAttr(ctx.root, 'generalisation_group')
-        v = H5.readAttr(ctx.root, 'generalisation_group');
-        if ischar(v), ctx.generalisationGroup = v; end
-    end
+    v = mestra.internal.Reader.num(ctx.root, 'aligned');
+    if ~isempty(v), ctx.aligned = v; end
+    ctx.generalisationGroup = ...
+        mestra.internal.Reader.str(ctx.root, 'generalisation_group');
 
-    ctx.rowCount = mestra.internal.Reader.rowCount(ctx.fid);
+    ctx.rowCount = 0;
     ctx.rowUnlimited = true;
-    if H5.exists(ctx.fid, '/row')
-        did = H5D.open(ctx.fid, '/row');
+    if mestra.internal.Reader.hasKind(ctx.fid, 'row', 'dataset')
+        did = H5D.open(ctx.fid, 'row');
         info = H5.dsetInfo(did);
         H5D.close(did);
+        if ~isempty(info.dims), ctx.rowCount = info.dims(1); end
         ctx.rowUnlimited = ~isempty(info.maxdims) && info.maxdims(1) < 0;
     end
 
     ctx.categories = containers.Map('KeyType', 'char', 'ValueType', 'any');
     ctx.categoryNames = {};
-    if H5.exists(ctx.fid, '/categories')
-        g = H5G.open(ctx.fid, '/categories');
+    if mestra.internal.Reader.hasGroup(ctx.fid, 'categories')
+        g = H5.openGroup(ctx.fid, 'categories');
         for name = H5.children(g)
+            ctx.categoryNames{end + 1} = name{1};
+            ctx.categories(name{1}) = {};
+            if ~strcmp(H5.childType(g, name{1}), 'dataset'), continue, end
             did = H5D.open(g, name{1});
-            info = H5.dsetInfo(did);
-            if strcmp(info.type, 'string')
-                ctx.categories(name{1}) = H5.readData(did, info);
-            else
-                ctx.categories(name{1}) = {};
+            try
+                info = H5.dsetInfo(did);
+                if strcmp(info.type, 'string')
+                    ctx.categories(name{1}) = H5.readData(did, info);
+                end
+            catch
+                % The table cannot be read; checkCategories says so and
+                % every value checked against it is simply not checked.
             end
             H5D.close(did);
-            ctx.categoryNames{end + 1} = name{1};
         end
         H5G.close(g);
     end
 
     ctx.keys = struct('name', {}, 'role', {}, 'values', {}, 'type', {}, ...
                       'category', {}, 'trajectoryGroup', {});
-    if H5.exists(ctx.fid, '/keys')
-        g = H5G.open(ctx.fid, '/keys');
+    if mestra.internal.Reader.hasGroup(ctx.fid, 'keys')
+        g = H5.openGroup(ctx.fid, 'keys');
         for name = H5.children(g)
             rec.name = name{1};
             rec.role = '';
@@ -172,15 +238,21 @@ function ctx = gather(ctx)
             rec.trajectoryGroup = '';
             if strcmp(H5.childType(g, name{1}), 'dataset')
                 did = H5D.open(g, name{1});
-                info = H5.dsetInfo(did);
-                rec.type = info.type;
                 try
-                    rec.values = reshape(H5.readData(did, info), 1, []);
+                    info = H5.dsetInfo(did);
+                    rec.type = info.type;
+                    try
+                        rec.values = reshape(H5.readData(did, info), 1, []);
+                    catch
+                        % The values are unreadable; checkKeys reports
+                        % it and every value-based rule is skipped for
+                        % this key alone.
+                    end
+                    rec.role = strAttr(did, 'role');
+                    rec.category = strAttr(did, 'category');
+                    rec.trajectoryGroup = strAttr(did, 'trajectory_group');
                 catch
                 end
-                rec.role = strAttr(did, 'role');
-                rec.category = strAttr(did, 'category');
-                rec.trajectoryGroup = strAttr(did, 'trajectory_group');
                 H5D.close(did);
             end
             ctx.keys(end + 1) = rec;
@@ -189,16 +261,16 @@ function ctx = gather(ctx)
     end
 
     ctx.supportNames = {};
-    if H5.exists(ctx.fid, '/supports')
-        g = H5G.open(ctx.fid, '/supports');
+    if mestra.internal.Reader.hasGroup(ctx.fid, 'supports')
+        g = H5.openGroup(ctx.fid, 'supports');
         ctx.supportNames = H5.children(g);
         H5G.close(g);
     end
 
     ctx.rowSupport = [];
     ctx.hasRowSupport = H5.exists(ctx.fid, '/row_support');
-    if ctx.hasRowSupport
-        did = H5D.open(ctx.fid, '/row_support');
+    if mestra.internal.Reader.hasKind(ctx.fid, 'row_support', 'dataset')
+        did = H5D.open(ctx.fid, 'row_support');
         info = H5.dsetInfo(did);
         try
             ctx.rowSupport = reshape(double(H5.readData(did, info)), 1, []);
@@ -208,8 +280,8 @@ function ctx = gather(ctx)
     end
 
     ctx.callableIds = {};
-    if H5.exists(ctx.fid, '/callables')
-        g = H5G.open(ctx.fid, '/callables');
+    if mestra.internal.Reader.hasGroup(ctx.fid, 'callables')
+        g = H5.openGroup(ctx.fid, 'callables');
         ctx.callableIds = H5.children(g);
         H5G.close(g);
     end
@@ -243,8 +315,8 @@ function checkRoot(ctx)
              'is required']);
     end
     if H5.hasAttr(ctx.root, 'created')
-        v = H5.readAttr(ctx.root, 'created');
-        if ischar(v) && ~mestra.internal.Text.iso8601Utc(v)
+        v = mestra.internal.Reader.str(ctx.root, 'created');
+        if ~isempty(v) && ~mestra.internal.Text.iso8601Utc(v)
             rep.add('W14', '/', ...
                 'created "%s" is not an ISO 8601 UTC timestamp', v);
         end
@@ -281,39 +353,66 @@ end
 
 function checkCategories(ctx)
     H5 = mestra.internal.H5;
-    if ~H5.exists(ctx.fid, '/categories'), return, end
-    g = H5G.open(ctx.fid, '/categories');
+    if ~mestra.internal.Reader.hasGroup(ctx.fid, 'categories'), return, end
+    g = H5.openGroup(ctx.fid, 'categories');
     closer = onCleanup(@() H5G.close(g)); %#ok<NASGU>
     for name = H5.children(g)
         path = ['/categories/' name{1}];
         checkName(ctx, name{1}, path);
-        if ~strcmp(H5.childType(g, name{1}), 'dataset'), continue, end
-        did = H5D.open(g, name{1});
-        info = H5.dsetInfo(did);
-        if ~strcmp(info.type, 'string')
-            ctx.rep.add('E20', path, ...
-                'a category table must be a fixed-length UTF-8 string');
-        else
-            raw = H5.readRawStrings(did, info);
-            longest = 0;
-            for i = 1:size(raw, 2)
-                [ok, why] = mestra.internal.Text.checkStringBytes(raw(:, i)');
-                if ~ok
-                    ctx.rep.add('E26', path, 'entry %d has %s', i - 1, why);
-                end
-                last = find(raw(:, i) ~= 0, 1, 'last');
-                if isempty(last), last = 0; end
-                longest = max(longest, last);
-            end
-            if info.strSize > max(longest, 1)
-                ctx.rep.add('W13', path, ...
-                    'the size is %d bytes where %d would do', ...
-                    info.strSize, max(longest, 1));
-            end
+        if ~followable(ctx, g, name{1}, path), continue, end
+        if ~strcmp(H5.childType(g, name{1}), 'dataset')
+            ctx.rep.add('E20', path, 'a category table must be a dataset');
+            continue
         end
-        checkAttrEncodings(ctx, did, path);
-        checkScales(ctx, did, info, path);
-        H5D.close(did);
+        guard(ctx, path, @() checkOneCategory(ctx, g, name{1}, path));
+    end
+end
+
+function checkOneCategory(ctx, g, name, path)
+    H5 = mestra.internal.H5;
+    did = H5D.open(g, name);
+    closer = onCleanup(@() H5D.close(did)); %#ok<NASGU>
+    info = H5.dsetInfo(did);
+    if ~strcmp(info.type, 'string')
+        ctx.rep.add('E20', path, ...
+            'a category table must be a fixed-length UTF-8 string');
+    else
+        checkStringDataset(ctx, did, info, path);
+    end
+    checkAttrEncodings(ctx, did, path);
+    checkScales(ctx, did, info, path);
+end
+
+function checkStringDataset(ctx, did, info, path)
+%checkStringDataset  E26 and W13 over the stored bytes.
+%   A string whose bytes MATLAB will not hand over is an unclassified
+%   finding and not a guess: MATLAB's HDF5 interface decodes a
+%   fixed-length string to text before this package sees it, so a
+%   file that is not ASCII cannot be told from one that is not valid
+%   UTF-8 at all, and saying E26 either way would be a fabrication.
+    H5 = mestra.internal.H5;
+    try
+        raw = H5.readRawStrings(did, info);
+    catch err
+        ctx.rep.add('U01', path, ...
+            'the strings could not be read as bytes: %s', ...
+            regexprep(strtrim(err.message), '\s+', ' '));
+        return
+    end
+    longest = 0;
+    for i = 1:size(raw, 2)
+        [ok, why] = mestra.internal.Text.checkStringBytes(raw(:, i)');
+        if ~ok
+            ctx.rep.add('E26', path, 'entry %d has %s', i - 1, why);
+        end
+        last = find(raw(:, i) ~= 0, 1, 'last');
+        if isempty(last), last = 0; end
+        longest = max(longest, last);
+    end
+    if info.strSize > max(longest, 1)
+        ctx.rep.add('W13', path, ...
+            'the size is %d bytes where %d would do', ...
+            info.strSize, max(longest, 1));
     end
 end
 
@@ -322,68 +421,23 @@ end
 function checkKeys(ctx)
     H5 = mestra.internal.H5;
     rep = ctx.rep;
-    if ~H5.exists(ctx.fid, '/keys'), return, end
-    g = H5G.open(ctx.fid, '/keys');
+    if ~mestra.internal.Reader.hasGroup(ctx.fid, 'keys'), return, end
+    g = H5.openGroup(ctx.fid, 'keys');
     closer = onCleanup(@() H5G.close(g)); %#ok<NASGU>
 
     counts = containers.Map(keyRoles(), num2cell(zeros(1, numel(keyRoles()))));
     for name = H5.children(g)
         path = ['/keys/' name{1}];
         checkName(ctx, name{1}, path);
+        if ~followable(ctx, g, name{1}, path), continue, end
         if ~strcmp(H5.childType(g, name{1}), 'dataset')
             rep.add('E39', path, 'a key must be a dataset');
             continue
         end
-        did = H5D.open(g, name{1});
-        info = H5.dsetInfo(did);
-        checkAttrEncodings(ctx, did, path);
-        checkKnownAttrs(ctx, did, path, ...
-            {'role', 'units', 'lower', 'upper', 'category', ...
-             'trajectory_group', 'parent'});
-        checkScales(ctx, did, info, path);
-        checkChunking(ctx, did, info, path, ctx.rowCount);
-
-        role = strAttr(did, 'role');
-        if isempty(role) || ~ismember(role, keyRoles())
-            rep.add('E02', path, 'the role is "%s"', role);
-        else
+        role = guard(ctx, path, @() checkOneKey(ctx, g, name{1}, path), '');
+        if ~isempty(role) && ismember(role, keyRoles())
             counts(role) = counts(role) + 1;
         end
-
-        units = strAttr(did, 'units');
-        if ismember(role, {'design', 'condition', 'time'})
-            if ~H5.hasAttr(did, 'units')
-                rep.add('E39', path, 'a %s key needs units', role);
-            end
-        end
-        if ~isempty(units) && ~mestra.internal.Units.parses(units)
-            rep.add('W10', path, 'the units "%s" do not parse', units);
-        end
-        if ismember(role, {'categorical', 'group', 'split', 'status'})
-            if ~H5.hasAttr(did, 'category')
-                rep.add('E39', path, 'a %s key needs a category table', role);
-            end
-        end
-        if strcmp(role, 'time') && ~isempty(ctx.groupKeys) && ...
-           ~H5.hasAttr(did, 'trajectory_group')
-            rep.add('E39', path, ...
-                'the time key needs trajectory_group when the file has groups');
-        end
-
-        checkKeyDtype(ctx, role, info.type, path);
-        if ~isempty(info.dims) && info.dims(1) ~= ctx.rowCount
-            rep.add('E16', path, ...
-                'the key holds %d values where the file has %d rows', ...
-                info.dims(1), ctx.rowCount);
-        end
-
-        values = [];
-        try
-            values = H5.readData(did, info);
-        catch
-        end
-        checkKeyValues(ctx, did, path, role, values);
-        H5D.close(did);
     end
 
     for role = {'time', 'split', 'id', 'status'}
@@ -394,10 +448,68 @@ function checkKeys(ctx)
         end
     end
 
-    checkSplitLeak(ctx);
-    checkTrajectories(ctx);
-    checkStatus(ctx);
-    checkUnusedCategories(ctx);
+    guard(ctx, '/keys', @() checkSplitLeak(ctx));
+    guard(ctx, '/keys', @() checkTrajectories(ctx));
+    guard(ctx, '/keys', @() checkStatus(ctx));
+    guard(ctx, '/categories', @() checkUnusedCategories(ctx));
+end
+
+function role = checkOneKey(ctx, g, name, path)
+    H5 = mestra.internal.H5;
+    rep = ctx.rep;
+    did = H5.openDataset(g, name);
+    closer = onCleanup(@() H5D.close(did)); %#ok<NASGU>
+    info = H5.dsetInfo(did);
+    checkAttrEncodings(ctx, did, path);
+    checkKnownAttrs(ctx, did, path, ...
+        {'role', 'units', 'lower', 'upper', 'category', ...
+         'trajectory_group', 'parent'});
+    checkScales(ctx, did, info, path);
+    checkChunking(ctx, did, info, path, ctx.rowCount);
+
+    role = strAttr(did, 'role');
+    if isempty(role) || ~ismember(role, keyRoles())
+        rep.add('E02', path, 'the role is "%s"', role);
+    end
+
+    units = strAttr(did, 'units');
+    if ismember(role, {'design', 'condition', 'time'})
+        if ~H5.hasAttr(did, 'units')
+            rep.add('E39', path, 'a %s key needs units', role);
+        end
+    end
+    if ~isempty(units) && ~mestra.internal.Units.parses(units)
+        rep.add('W10', path, 'the units "%s" do not parse', units);
+    end
+    if ismember(role, {'categorical', 'group', 'split', 'status'})
+        if ~H5.hasAttr(did, 'category')
+            rep.add('E39', path, 'a %s key needs a category table', role);
+        end
+    end
+    if strcmp(role, 'time') && ~isempty(ctx.groupKeys) && ...
+       ~H5.hasAttr(did, 'trajectory_group')
+        rep.add('E39', path, ...
+            'the time key needs trajectory_group when the file has groups');
+    end
+
+    checkKeyDtype(ctx, role, info.type, path);
+    if ~isempty(info.dims) && info.dims(1) ~= ctx.rowCount
+        rep.add('E16', path, ...
+            'the key holds %d values where the file has %d rows', ...
+            info.dims(1), ctx.rowCount);
+    end
+
+    values = [];
+    try
+        values = H5.readData(did, info);
+    catch err
+        rep.add('U01', path, 'the values would not read: %s', ...
+                regexprep(strtrim(err.message), '\s+', ' '));
+    end
+    checkKeyValues(ctx, did, path, role, values);
+    if strcmp(info.type, 'string')
+        guard(ctx, path, @() checkStringDataset(ctx, did, info, path));
+    end
 end
 
 function checkKeyDtype(ctx, role, type, path)
@@ -526,58 +638,71 @@ end
 
 function checkScalars(ctx)
     H5 = mestra.internal.H5;
-    if ~H5.exists(ctx.fid, '/scalars'), return, end
-    g = H5G.open(ctx.fid, '/scalars');
+    if ~mestra.internal.Reader.hasGroup(ctx.fid, 'scalars'), return, end
+    g = H5.openGroup(ctx.fid, 'scalars');
     closer = onCleanup(@() H5G.close(g)); %#ok<NASGU>
     for name = H5.children(g)
         path = ['/scalars/' name{1}];
         checkName(ctx, name{1}, path);
-        isGroup = strcmp(H5.childType(g, name{1}), 'group');
-        if isGroup
-            oid = H5G.open(g, name{1});
-        else
-            oid = H5D.open(g, name{1});
-        end
-        checkAttrEncodings(ctx, oid, path);
-        checkKnownAttrs(ctx, oid, path, ...
-            {'units', 'source', 'output', 'statistic', 'of', 'quantile'});
-        if ~H5.hasAttr(oid, 'units')
-            ctx.rep.add('E11', path, 'a scalar needs units');
-        else
-            units = strAttr(oid, 'units');
-            if ~isempty(units) && ~mestra.internal.Units.parses(units)
-                ctx.rep.add('W10', path, ...
-                    'the units "%s" do not parse', units);
-            end
-        end
-        checkSource(ctx, oid, path, isGroup);
-        checkStatistic(ctx, oid, path);
-        if isGroup
-            H5G.close(oid);
-            continue
-        end
-        info = H5.dsetInfo(oid);
-        if ~strcmp(info.type, 'float64')
-            ctx.rep.add('E20', path, ...
-                'a scalar is stored as %s where float64 is required', ...
-                info.type);
-        end
-        if ~isempty(info.dims) && info.dims(1) ~= ctx.rowCount
-            ctx.rep.add('E16', path, ...
-                'the scalar holds %d values where the file has %d rows', ...
-                info.dims(1), ctx.rowCount);
-        end
-        checkScales(ctx, oid, info, path);
-        checkChunking(ctx, oid, info, path, ctx.rowCount);
-        try
-            values = H5.readData(oid, info);
-            if isnumeric(values) && any(~isfinite(double(values)))
-                ctx.rep.add('W03', path, 'a non-finite value');
-            end
-        catch
-        end
-        H5D.close(oid);
+        if ~followable(ctx, g, name{1}, path), continue, end
+        guard(ctx, path, @() checkOneScalar(ctx, g, name{1}, path));
     end
+end
+
+function checkOneScalar(ctx, g, name, path)
+    H5 = mestra.internal.H5;
+    kind = H5.childType(g, name);
+    if strcmp(kind, 'group')
+        isGroup = true;
+        oid = H5.openGroup(g, name);
+    elseif strcmp(kind, 'dataset')
+        isGroup = false;
+        oid = H5.openDataset(g, name);
+    else
+        ctx.rep.add('E39', path, 'a scalar must be a dataset or a group');
+        return
+    end
+    checkAttrEncodings(ctx, oid, path);
+    checkKnownAttrs(ctx, oid, path, ...
+        {'units', 'source', 'output', 'statistic', 'of', 'quantile'});
+    if ~H5.hasAttr(oid, 'units')
+        ctx.rep.add('E11', path, 'a scalar needs units');
+    else
+        units = strAttr(oid, 'units');
+        if ~isempty(units) && ~mestra.internal.Units.parses(units)
+            ctx.rep.add('W10', path, ...
+                'the units "%s" do not parse', units);
+        end
+    end
+    checkSource(ctx, oid, path, isGroup);
+    checkStatistic(ctx, oid, path);
+    if isGroup
+        H5G.close(oid);
+        return
+    end
+    info = H5.dsetInfo(oid);
+    if ~strcmp(info.type, 'float64')
+        ctx.rep.add('E20', path, ...
+            'a scalar is stored as %s where float64 is required', ...
+            info.type);
+    end
+    if ~isempty(info.dims) && info.dims(1) ~= ctx.rowCount
+        ctx.rep.add('E16', path, ...
+            'the scalar holds %d values where the file has %d rows', ...
+            info.dims(1), ctx.rowCount);
+    end
+    checkScales(ctx, oid, info, path);
+    checkChunking(ctx, oid, info, path, ctx.rowCount);
+    try
+        values = H5.readData(oid, info);
+        if isnumeric(values) && any(~isfinite(double(values)))
+            ctx.rep.add('W03', path, 'a non-finite value');
+        end
+    catch err
+        ctx.rep.add('U01', path, 'the values would not read: %s', ...
+                    regexprep(strtrim(err.message), '\s+', ' '));
+    end
+    H5D.close(oid);
 end
 
 % ======================================================= row_support
@@ -614,13 +739,20 @@ end
 
 function checkSupports(ctx)
     H5 = mestra.internal.H5;
-    if ~H5.exists(ctx.fid, '/supports'), return, end
-    g = H5G.open(ctx.fid, '/supports');
+    if ~mestra.internal.Reader.hasGroup(ctx.fid, 'supports'), return, end
+    g = H5.openGroup(ctx.fid, 'supports');
     closer = onCleanup(@() H5G.close(g)); %#ok<NASGU>
     for i = 1:numel(ctx.supportNames)
         name = ctx.supportNames{i};
-        checkName(ctx, name, ['/supports/' name]);
-        checkOneSupport(ctx, g, name, i - 1);
+        path = ['/supports/' name];
+        checkName(ctx, name, path);
+        if ~followable(ctx, g, name, path), continue, end
+        if ~strcmp(H5.childType(g, name), 'group')
+            ctx.rep.add('E39', path, 'a support must be a group');
+            continue
+        end
+        index = i - 1;
+        guard(ctx, path, @() checkOneSupport(ctx, g, name, index));
     end
 end
 
@@ -628,7 +760,7 @@ function checkOneSupport(ctx, parent, name, index)
     H5 = mestra.internal.H5;
     rep = ctx.rep;
     path = ['/supports/' name];
-    sid = H5G.open(parent, name);
+    sid = H5.openGroup(parent, name);
     closer = onCleanup(@() H5G.close(sid)); %#ok<NASGU>
     checkAttrEncodings(ctx, sid, path);
     checkKnownAttrs(ctx, sid, path, ...
@@ -690,10 +822,16 @@ function checkOneSupport(ctx, parent, name, index)
     end
     stored = strAttr(sid, 'support_id');
     if ~isempty(stored)
-        computed = mestra.supportId(record);
-        if ~strcmp(computed, stored)
-            rep.add('E08', path, ...
-                'the support_id does not match the stored arrays');
+        try
+            computed = mestra.supportId(record);
+            if ~strcmp(computed, stored)
+                rep.add('E08', path, ...
+                    'the support_id does not match the stored arrays');
+            end
+        catch err
+            rep.add('U01', path, ...
+                'the support_id could not be computed: %s', ...
+                regexprep(strtrim(err.message), '\s+', ' '));
         end
     end
 
@@ -702,18 +840,26 @@ function checkOneSupport(ctx, parent, name, index)
         rep.add('E03', path, 'a %s support has no coordinates array', kind);
     end
     if has('coordinates')
-        checkSlot(ctx, sid, 'coordinates', [path '/coordinates'], ...
-                  'node', nNodes, nCells, kind, index);
+        guard(ctx, [path '/coordinates'], @() checkSlot(ctx, sid, ...
+            'coordinates', [path '/coordinates'], 'node', nNodes, ...
+            nCells, kind, index));
     end
     pairs = {'node_arrays', 'node'; 'cell_arrays', 'cell'};
     for p = 1:size(pairs, 1)
         if ~has(pairs{p, 1}), continue, end
-        ag = H5G.open(sid, pairs{p, 1});
+        groupPath = [path '/' pairs{p, 1}];
+        if ~strcmp(H5.childType(sid, pairs{p, 1}), 'group')
+            rep.add('E39', groupPath, '%s must be a group', pairs{p, 1});
+            continue
+        end
+        ag = H5.openGroup(sid, pairs{p, 1});
         for nm = H5.children(ag)
-            slotPath = [path '/' pairs{p, 1} '/' nm{1}];
+            slotPath = [groupPath '/' nm{1}];
             checkName(ctx, nm{1}, slotPath);
-            checkSlot(ctx, ag, nm{1}, slotPath, pairs{p, 2}, nNodes, ...
-                      nCells, kind, index);
+            if ~followable(ctx, ag, nm{1}, slotPath), continue, end
+            location = pairs{p, 2};
+            guard(ctx, slotPath, @() checkSlot(ctx, ag, nm{1}, slotPath, ...
+                location, nNodes, nCells, kind, index));
         end
         H5G.close(ag);
     end
@@ -800,11 +946,15 @@ function checkSlot(ctx, parent, name, path, location, nNodes, nCells, ...
                    kind, supportIndex)
     H5 = mestra.internal.H5;
     rep = ctx.rep;
-    isGroup = strcmp(H5.childType(parent, name), 'group');
+    kind_ = H5.childType(parent, name);
+    isGroup = strcmp(kind_, 'group');
     if isGroup
         oid = H5G.open(parent, name);
-    else
+    elseif strcmp(kind_, 'dataset')
         oid = H5D.open(parent, name);
+    else
+        rep.add('E39', path, 'a slot must be a dataset or a group');
+        return
     end
     checkAttrEncodings(ctx, oid, path);
     checkKnownAttrs(ctx, oid, path, ...
@@ -928,7 +1078,9 @@ function checkSlot(ctx, parent, name, path, location, nNodes, nCells, ...
             if isnumeric(values) && any(~isfinite(double(values(:))))
                 rep.add('W03', path, 'a non-finite value');
             end
-        catch
+        catch err
+            rep.add('U01', path, 'the values would not read: %s', ...
+                    regexprep(strtrim(err.message), '\s+', ' '));
         end
     end
     H5D.close(oid);
@@ -971,25 +1123,35 @@ end
 
 function checkCallables(ctx)
     H5 = mestra.internal.H5;
-    if ~H5.exists(ctx.fid, '/callables'), return, end
-    g = H5G.open(ctx.fid, '/callables');
+    if ~mestra.internal.Reader.hasGroup(ctx.fid, 'callables'), return, end
+    g = H5.openGroup(ctx.fid, 'callables');
     closer = onCleanup(@() H5G.close(g)); %#ok<NASGU>
     for name = H5.children(g)
         path = ['/callables/' name{1}];
         checkName(ctx, name{1}, path);
+        if ~followable(ctx, g, name{1}, path), continue, end
         if ~strcmp(H5.childType(g, name{1}), 'group')
             ctx.rep.add('E15', path, 'a callable must be a group');
             continue
         end
-        cid = H5G.open(g, name{1});
-        if ~H5.hasAttr(cid, 'type')
-            ctx.rep.add('E15', path, 'a callable group has no type');
-        end
-        [~, problems] = mestra.internal.Codec.read(cid, true);
-        for i = 1:numel(problems)
+        guard(ctx, path, @() checkOneCallable(ctx, g, name{1}, path));
+    end
+end
+
+function checkOneCallable(ctx, g, name, path)
+    H5 = mestra.internal.H5;
+    cid = H5.openGroup(g, name);
+    closer = onCleanup(@() H5G.close(cid)); %#ok<NASGU>
+    if ~H5.hasAttr(cid, 'type')
+        ctx.rep.add('E15', path, 'a callable group has no type');
+    end
+    [~, problems] = mestra.internal.Codec.read(cid, true);
+    for i = 1:numel(problems)
+        if numel(problems{i}) > 4 && strcmp(problems{i}(1:4), 'U03 ')
+            ctx.rep.add('U03', path, '%s', problems{i}(5:end));
+        else
             ctx.rep.add('E32', path, '%s', problems{i});
         end
-        H5G.close(cid);
     end
 end
 
@@ -1050,10 +1212,32 @@ function checkAttrEncodings(ctx, oid, path)
     H5 = mestra.internal.H5;
     kinds = attrKinds();
     for name = H5.publicAttrNames(oid)
-        info = H5.attrInfo(oid, name{1});
+        try
+            info = H5.attrInfo(oid, name{1});
+        catch err
+            ctx.rep.add('U01', path, ...
+                'the attribute %s would not be described: %s', name{1}, ...
+                regexprep(strtrim(err.message), '\s+', ' '));
+            continue
+        end
         if strcmp(info.type, 'vlstring')
             ctx.rep.add('E19', path, ...
                 'the attribute %s is a variable-length string', name{1});
+            continue
+        end
+        if ~info.scalar
+            % Section 18 gives every attribute this format names a
+            % scalar dataspace, so an array there is the wrong
+            % encoding whatever its type.
+            if kinds.isKey(name{1})
+                ctx.rep.add('E19', path, ...
+                    ['the attribute %s is an array where a scalar ' ...
+                     'is required'], name{1});
+            else
+                ctx.rep.add('W11', path, ...
+                    'the attribute %s is not a scalar and is ignored', ...
+                    name{1});
+            end
             continue
         end
         if kinds.isKey(name{1})
@@ -1073,11 +1257,17 @@ function checkAttrEncodings(ctx, oid, path)
             end
         end
         if strcmp(info.type, 'string')
-            bytes = H5.readRawStrAttr(oid, name{1});
-            [ok, why] = mestra.internal.Text.checkStringBytes(bytes);
-            if ~ok
-                ctx.rep.add('E26', path, 'the attribute %s has %s', ...
-                            name{1}, why);
+            try
+                bytes = H5.readRawStrAttr(oid, name{1});
+                [ok, why] = mestra.internal.Text.checkStringBytes(bytes);
+                if ~ok
+                    ctx.rep.add('E26', path, 'the attribute %s has %s', ...
+                                name{1}, why);
+                end
+            catch err
+                ctx.rep.add('U01', path, ...
+                    'the attribute %s could not be read as bytes: %s', ...
+                    name{1}, regexprep(strtrim(err.message), '\s+', ' '));
             end
         end
     end

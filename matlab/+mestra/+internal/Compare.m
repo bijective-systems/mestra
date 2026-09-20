@@ -97,12 +97,20 @@ classdef Compare
             fid = H5F.open(path, 'H5F_ACC_RDONLY', 'H5P_DEFAULT');
             closer = onCleanup(@() H5F.close(fid)); %#ok<NASGU>
             root = H5G.open(fid, '/');
-            mestra.internal.Compare.walk(map, root, '/');
+            mestra.internal.Compare.walk(map, root, '/', 0);
             H5G.close(root);
         end
 
-        function walk(map, gid, prefix)
+        function walk(map, gid, prefix, depth)
+        %walk  Every object under a group, to a bounded depth.
             H5 = mestra.internal.H5;
+            if nargin < 4, depth = 0; end
+            if depth > mestra.internal.Limits.get('maxDepth')
+                map([prefix ' (not followed)']) = struct('kind', 'limit', ...
+                    'attrs', containers.Map('KeyType', 'char', ...
+                                            'ValueType', 'any'));
+                return
+            end
             rec.kind = 'group';
             rec.attrs = mestra.internal.Compare.attrs(gid);
             map(prefix) = rec;
@@ -112,14 +120,19 @@ classdef Compare
                 else
                     path = [prefix '/' name{1}];
                 end
-                if strcmp(H5.childType(gid, name{1}), 'group')
+                kind = H5.childType(gid, name{1});
+                if strcmp(kind, 'group')
                     sub = H5G.open(gid, name{1});
-                    mestra.internal.Compare.walk(map, sub, path);
+                    mestra.internal.Compare.walk(map, sub, path, depth + 1);
                     H5G.close(sub);
-                else
+                elseif strcmp(kind, 'dataset')
                     did = H5D.open(gid, name{1});
                     map(path) = mestra.internal.Compare.dataset(did);
                     H5D.close(did);
+                else
+                    map(path) = struct('kind', kind, ...
+                        'attrs', containers.Map('KeyType', 'char', ...
+                                                'ValueType', 'any'));
                 end
             end
         end
