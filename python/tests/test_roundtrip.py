@@ -54,19 +54,46 @@ def test_the_writer_is_deterministic(tmp_path, name):
 
 @pytest.mark.parametrize("name", VALID)
 def test_netcdf4_opens_what_we_write(tmp_path, name):
-    """A valid file is also a valid netCDF-4 file (section 13)."""
+    """A valid file is also a valid netCDF-4 file (section 13).
+
+    Two readers that share no code, and each variable's dimension
+    names must be the link names of the scales attached to it, which
+    is the check that catches a reader taking a name from the NAME
+    attribute instead.
+    """
     netCDF4 = pytest.importorskip("netCDF4")
+    h5netcdf = pytest.importorskip("h5netcdf")
     written = str(tmp_path / "again.mes")
     with mestra.read(corpus.case_path(name)) as dataset:
         mestra.write(dataset, written)
+    wanted = _dimensions_on_disk(written)
+
     handle = netCDF4.Dataset(written, "r")
     try:
         seen = _dimensions(handle)
     finally:
         handle.close()
-    for path, dims in _dimensions_on_disk(written).items():
+    for path, dims in wanted.items():
         assert path in seen, path
         assert seen[path] == dims, path
+
+    other = h5netcdf.File(written, "r")
+    try:
+        seen = _h5netcdf_dimensions(other, "")
+    finally:
+        other.close()
+    for path, dims in wanted.items():
+        assert path in seen, path
+        assert [d.rsplit("/", 1)[-1] for d in seen[path]] == dims, path
+
+
+def _h5netcdf_dimensions(group, prefix):
+    out = {}
+    for name, variable in group.variables.items():
+        out[prefix + "/" + name] = list(variable.dimensions)
+    for name, sub in group.groups.items():
+        out.update(_h5netcdf_dimensions(sub, prefix + "/" + name))
+    return out
 
 
 def _dimensions(group, prefix=""):
