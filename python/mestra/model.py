@@ -1,0 +1,1231 @@
+"""The objects a mestra file holds, and the calls that build one.
+
+A `Dataset` is the whole file: keys, scalars, category tables,
+supports with their arrays, callables, and the metadata of section
+11. Every array carries its dimension names, so a value is found by
+name and never by axis position.
+
+Building one from arrays takes a handful of calls:
+
+    ds = mestra.Dataset(writer="my tool 1")
+    ds.add_key("mach", [0.4, 0.8], role="condition", units="1")
+    ds.add_key("member", [0, 1], role="group",
+               categories=["wing_a", "wing_b"], generalisation=True)
+    ds.add_scalar("cl", [0.25, 0.55], units="1")
+    s = ds.add_support("s0", coordinates=xy, cells=(types, offsets,
+                                                    conn))
+    s.add_node_array("pressure", p, units="Pa")
+
+The dimensions, the bounds and the support id are filled in.
+"""
+
+from __future__ import annotations
+
+import datetime as _datetime
+from collections.abc import Iterator, Mapping, Sequence
+from typing import Any
+
+import numpy as np
+
+from .encoding import support_digest
+from .errors import MestraError
+from .names import is_legal_name, is_reserved
+
+__all__ = [
+    "NamedArray",
+    "Storage",
+    "CategoryTable",
+    "Key",
+    "ScalarSlot",
+    "ArraySlot",
+    "Support",
+    "Dataset",
+    "KEY_ROLES",
+    "ARRAY_ROLES",
+    "STATISTICS",
+    "FORMAT",
+]
+
+FORMAT = "mestra/0"
+
+#: Section 3. The cardinality of each key role, None for 0..n.
+KEY_ROLES: dict[str, int | None] = {
+    "design": None, "condition": None, "time": 1, "categorical": None,
+    "group": None, "split": 1, "id": 1, "status": 1,
+}
+
+#: Section 3. The cardinality of each array role, per support.
+ARRAY_ROLES: dict[str, int | None] = {
+    "coordinates": 1, "field": None, "label": None, "weight": 1,
+    "normal": 1, "derived": None,
+}
+
+#: Section 9.
+STATISTICS = ("value", "mean", "std", "quantile", "draw")
+
+#: Section 19: which keys are stored as integers.
+_INTEGER_KEY_ROLES = ("categorical", "group", "split", "status")
+
+
+# --------------------------------------------------------------- arrays
+
+class NamedArray:
+    """A numpy array together with the name of each of its axes.
+
+    `values` is the array as stored, `dims` the logical dimension
+    names of section 21 in the same order. Index by name with
+    `at()`, or reorder with `transpose()`; a reader in another
+    language may hand back another order, and the names are what
+    both agree on.
+    """
+
+    __slots__ = ("values", "dims")
+
+    def __init__(self, values: Any, dims: Sequence[str]) -> None:
+        self.values = np.asarray(values)
+        self.dims = tuple(dims)
+        if len(self.dims) != self.values.ndim:
+            raise ValueError(
+                "%d dimension names for an array of %d axes"
+                % (len(self.dims), self.values.ndim))
+
+    # -- the array itself
+
+    def __array__(self, dtype: Any = None, copy: Any = None) -> Any:
+        if dtype is None:
+            return self.values
+        return self.values.astype(dtype, copy=False)
+
+    def __getitem__(self, item: Any) -> Any:
+        return self.values[item]
+
+    def __len__(self) -> int:
+        return len(self.values)
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self.values)
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return self.values.shape
+
+    @property
+    def dtype(self) -> np.dtype:
+        return self.values.dtype
+
+    @property
+    def ndim(self) -> int:
+        return self.values.ndim
+
+    def axis(self, name: str) -> int:
+        """The position of the axis called `name`.
+
+        "instance" is accepted for the leading axis of an array that
+        varies along a group, which is what the corpus calls it.
+        """
+        for at, dim in enumerate(self.dims):
+            if dim == name:
+                return at
+            if name == "instance" and dim.startswith("group:"):
+                return at
+            if name == "group" and dim.startswith("group:"):
+                return at
+        raise KeyError(
+            "no axis called %r; this array has %s"
+            % (name, ", ".join(self.dims) or "no axes"))
+
+    def at(self, **where: int) -> Any:
+        """The value at the named indices, for example
+
+            array.at(row=1, node=3, component=0)
+
+        Axes not named come back whole.
+        """
+        index: list[Any] = [slice(None)] * self.values.ndim
+        for name, position in where.items():
+            index[self.axis(name)] = position
+        return self.values[tuple(index)]
+
+    def transpose(self, *dims: str) -> NamedArray:
+        """The same values with the axes in the order named."""
+        order = [self.axis(name) for name in dims]
+        if len(order) != self.values.ndim:
+            raise ValueError("name every axis to transpose")
+        return NamedArray(self.values.transpose(order), dims)
+
+    def __repr__(self) -> str:
+        return "NamedArray(%s, dims=%s)" % (
+            "x".join(str(n) for n in self.values.shape) or "scalar",
+            ", ".join(self.dims))
+
+
+class Storage:
+    """How a dataset is laid out, when the file says something other
+    than the default of section 23.
+
+    A reader fills this in so that a file written back out keeps the
+    layout it had; a writer that finds it empty uses the default.
+    """
+
+    __slots__ = ("chunks", "gzip", "shuffle", "contiguous")
+
+    def __init__(self, chunks: Sequence[int] | None = None,
+                 gzip: int | None = None, shuffle: bool = False,
+                 contiguous: bool = False) -> None:
+        self.chunks = tuple(int(c) for c in chunks) if chunks else None
+        self.gzip = gzip
+        self.shuffle = shuffle
+        self.contiguous = contiguous
+
+    def __repr__(self) -> str:
+        return "Storage(chunks=%r, gzip=%r, shuffle=%r)" % (
+            self.chunks, self.gzip, self.shuffle)
+
+
+class _Source:
+    """Where a slot's values come from: memory, or the file."""
+
+    def read(self, rows: slice | None = None) -> np.ndarray:
+        raise NotImplementedError
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        raise NotImplementedError
+
+    @property
+    def dtype(self) -> np.dtype:
+        raise NotImplementedError
+
+
+class MemorySource(_Source):
+    """Values already in memory."""
+
+    __slots__ = ("array",)
+
+    def __init__(self, array: Any) -> None:
+        self.array = np.asarray(array)
+
+    def read(self, rows: slice | None = None) -> np.ndarray:
+        if rows is None:
+            return self.array
+        return self.array[rows]
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return self.array.shape
+
+    @property
+    def dtype(self) -> np.dtype:
+        return self.array.dtype
+
+
+class FileSource(_Source):
+    """Values still in the file, read when they are asked for.
+
+    Reading a row range touches that range of that one dataset and
+    nothing else, which is what section 29 requires of a reader.
+    `reads` counts the reads that have happened, so that a test can
+    show that opening a file reads no array at all.
+    """
+
+    __slots__ = ("_file", "path", "_shape", "_dtype", "_decode", "reads")
+
+    def __init__(self, file: Any, path: str, shape: Sequence[int],
+                 dtype: np.dtype, decode: bool = False) -> None:
+        self._file = file
+        self.path = path
+        self._shape = tuple(int(n) for n in shape)
+        self._dtype = dtype
+        self._decode = decode
+        self.reads = 0
+
+    def read(self, rows: slice | None = None) -> np.ndarray:
+        self.reads += 1
+        if not self._file:
+            raise MestraError(
+                "E00", "the file has been closed; read it with "
+                "lazy=False to keep the values", self.path)
+        dset = self._file[self.path]
+        values = dset[()] if rows is None else dset[rows]
+        if self._decode:
+            return _decode_strings(values)
+        return values
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return self._shape
+
+    @property
+    def dtype(self) -> np.dtype:
+        return self._dtype
+
+
+def _wrap(values: Any, dtype: str) -> _Source | None:
+    """Hold values that are already in memory, or nothing."""
+    if values is None:
+        return None
+    if isinstance(values, _Source):
+        return values
+    return MemorySource(np.asarray(values, dtype=dtype))
+
+
+def _decode_strings(values: Any) -> np.ndarray:
+    """Fixed-length bytes as read from HDF5 into text (section 18)."""
+    flat = [v.rstrip(b"\x00").decode("utf-8") if isinstance(v, bytes)
+            else str(v) for v in np.asarray(values).reshape(-1)]
+    return np.array(flat, dtype=np.str_).reshape(np.asarray(values).shape)
+
+
+# ------------------------------------------------------ category tables
+
+class CategoryTable(Sequence[str]):
+    """The named categories of a key or a label.
+
+    A category id is the position of its entry: the first entry is
+    id 0 (section 21).
+    """
+
+    __slots__ = ("entries", "itemsize")
+
+    def __init__(self, entries: Sequence[str],
+                 itemsize: int | None = None) -> None:
+        self.entries = [str(e) for e in entries]
+        #: The stored byte size, when a file declared a larger one.
+        self.itemsize = itemsize
+
+    def __getitem__(self, at: Any) -> Any:
+        return self.entries[at]
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    def id_of(self, name: str) -> int:
+        """The category id of an entry, by name."""
+        try:
+            return self.entries.index(name)
+        except ValueError:
+            raise KeyError(
+                "no category %r; this table holds %s"
+                % (name, ", ".join(self.entries))) from None
+
+    def __repr__(self) -> str:
+        return "CategoryTable(%r)" % (self.entries,)
+
+
+# ----------------------------------------------------------------- keys
+
+class Key:
+    """One key column: a per-row value with a role (section 3)."""
+
+    def __init__(self, name: str, role: str, *, units: str | None = None,
+                 lower: float | None = None, upper: float | None = None,
+                 category: str | None = None,
+                 trajectory_group: str | None = None,
+                 parent: str | None = None,
+                 data: _Source | None = None,
+                 itemsize: int | None = None,
+                 extra: Mapping[str, Any] | None = None) -> None:
+        self.name = name
+        self.role = role
+        self.units = units
+        self.lower = lower
+        self.upper = upper
+        self.category = category
+        self.trajectory_group = trajectory_group
+        self.parent = parent
+        self.data = data
+        #: The stored byte size of a string id column.
+        self.itemsize = itemsize
+        #: Attributes this reader does not know, kept for a rewrite.
+        self.extra = dict(extra or {})
+
+    @property
+    def dims(self) -> tuple[str, ...]:
+        return ("row",)
+
+    @property
+    def dtype(self) -> np.dtype:
+        return self.data.dtype if self.data is not None else np.dtype("f8")
+
+    @property
+    def values(self) -> NamedArray:
+        """The whole column, with its dimension name."""
+        return self.read()
+
+    def read(self, rows: slice | None = None) -> NamedArray:
+        """The column, or one row range of it."""
+        if self.data is None:
+            return NamedArray(np.zeros(0), ("row",))
+        return NamedArray(self.data.read(rows), ("row",))
+
+    def __repr__(self) -> str:
+        return "Key(%r, role=%r, units=%r)" % (
+            self.name, self.role, self.units)
+
+
+# ---------------------------------------------------------------- slots
+
+class Slot:
+    """A quantity that holds stored data or names a callable."""
+
+    def __init__(self, name: str, *, units: str | None = None,
+                 source: str = "data", output: str | None = None,
+                 statistic: str | None = None, of: str | None = None,
+                 quantile: float | None = None,
+                 data: _Source | None = None,
+                 storage: Storage | None = None,
+                 extra: Mapping[str, Any] | None = None) -> None:
+        self.name = name
+        self.units = units
+        self.source = source
+        self.output = output
+        self.statistic = statistic
+        self.of = of
+        self.quantile = quantile
+        self.data = data
+        self.storage = storage or Storage()
+        self.extra = dict(extra or {})
+
+    @property
+    def is_callable(self) -> bool:
+        """True when a callable serves this slot rather than data."""
+        return self.source.startswith("callable:")
+
+    @property
+    def callable_id(self) -> str | None:
+        """The id of the callable that serves the slot, or None."""
+        if self.is_callable:
+            return self.source[len("callable:"):]
+        return None
+
+
+class ScalarSlot(Slot):
+    """A per-row quantity of interest, with units (section 2)."""
+
+    role = "scalar"
+
+    @property
+    def dims(self) -> tuple[str, ...]:
+        return ("row",)
+
+    def read(self, rows: slice | None = None) -> NamedArray:
+        """The column, or one row range of it."""
+        if self.data is None:
+            raise MestraError(
+                "E30", "this slot is served by %s and holds no data"
+                % self.source, self.name)
+        return NamedArray(self.data.read(rows), ("row",))
+
+    @property
+    def values(self) -> NamedArray:
+        return self.read()
+
+    def __repr__(self) -> str:
+        return "ScalarSlot(%r, units=%r, source=%r)" % (
+            self.name, self.units, self.source)
+
+
+class ArraySlot(Slot):
+    """A field-like quantity on a support (sections 3 and 5)."""
+
+    def __init__(self, name: str, role: str, *, varies: str = "none",
+                 components: int = 1, location: str = "node",
+                 units: str | None = None, category: str | None = None,
+                 recomputed: bool | None = None,
+                 derived_from: str | None = None,
+                 recipe: str | None = None, reference: str | None = None,
+                 dims: Sequence[str] | None = None,
+                 support: Support | None = None, **rest: Any) -> None:
+        super().__init__(name, units=units, **rest)
+        self.role = role
+        self.varies = varies
+        self.components = int(components)
+        self.location = location
+        self.category = category
+        self.recomputed = recomputed
+        self.derived_from = derived_from
+        self.recipe = recipe
+        self.reference = reference
+        self.support = support
+        self._dims = tuple(dims) if dims is not None else None
+
+    @property
+    def dims(self) -> tuple[str, ...]:
+        """The logical name of each axis, leading axis first.
+
+        (row | group:<k> | nothing, [draw], node | cell, component),
+        which is the order section 19 stores them in.
+        """
+        if self._dims is not None:
+            return self._dims
+        return array_dims(self.varies, self.statistic, self.location)
+
+    @dims.setter
+    def dims(self, value: Sequence[str] | None) -> None:
+        self._dims = tuple(value) if value is not None else None
+
+    def read(self, rows: slice | None = None) -> NamedArray:
+        """The array, or one range of its leading dimension.
+
+        `rows` applies to the leading dimension only, and in an
+        unaligned file that dimension counts the rows on this
+        support and not the file's rows (section 22).
+        """
+        if self.data is None:
+            raise MestraError(
+                "E30", "this slot is served by %s and holds no data"
+                % self.source, self.name)
+        return NamedArray(self.data.read(rows), self.dims)
+
+    @property
+    def values(self) -> NamedArray:
+        return self.read()
+
+    def __repr__(self) -> str:
+        return ("ArraySlot(%r, role=%r, varies=%r, units=%r, "
+                "source=%r)" % (self.name, self.role, self.varies,
+                                self.units, self.source))
+
+
+def array_dims(varies: str, statistic: str | None,
+               location: str) -> tuple[str, ...]:
+    """The dimension names an array slot has, from its attributes."""
+    dims: list[str] = []
+    if varies != "none":
+        dims.append(varies)
+    if statistic == "draw":
+        dims.append("draw")
+    dims.append(location)
+    dims.append("component")
+    return tuple(dims)
+
+
+# ------------------------------------------------------------- supports
+
+class Support:
+    """The structure a field lives on: a mesh, an axis, or none."""
+
+    def __init__(self, name: str, kind: str = "mesh", *,
+                 n_nodes: int = 0, n_cells: int = 0,
+                 cell_types: Any = None, cell_offsets: Any = None,
+                 cell_connectivity: Any = None,
+                 stored_support_id: str | None = None,
+                 extra: Mapping[str, Any] | None = None) -> None:
+        self.name = name
+        self.kind = kind
+        self.n_nodes = int(n_nodes)
+        self.n_cells = int(n_cells)
+        self._cells: dict[str, _Source | None] = {
+            "cell_types": _wrap(cell_types, "<u1"),
+            "cell_offsets": _wrap(cell_offsets, "<i8"),
+            "cell_connectivity": _wrap(cell_connectivity, "<i8"),
+        }
+        self.coordinates: ArraySlot | None = None
+        self.node_arrays: dict[str, ArraySlot] = {}
+        self.cell_arrays: dict[str, ArraySlot] = {}
+        #: What the file said, kept so that the validator can check
+        #: it. Changing a cell array clears it, so that a support
+        #: whose arrays have changed writes a fresh digest.
+        self.stored_support_id = stored_support_id
+        self.extra = dict(extra or {})
+        self.dataset: Dataset | None = None
+        #: Optional groups the support carried, empty ones included.
+        self.present: set[str] = set()
+        #: Groups under the support this reader does not know.
+        self.opaque: dict[str, Any] = {}
+
+    # -- the cells
+
+    @property
+    def cell_types(self) -> np.ndarray | None:
+        """VTK cell type codes, one per cell (section 20)."""
+        return self._read_cells("cell_types")
+
+    @cell_types.setter
+    def cell_types(self, values: Any) -> None:
+        self._cells["cell_types"] = _wrap(values, "<u1")
+        self.stored_support_id = None
+
+    @property
+    def cell_offsets(self) -> np.ndarray | None:
+        """Where each cell starts in the connectivity, n_cells + 1."""
+        return self._read_cells("cell_offsets")
+
+    @cell_offsets.setter
+    def cell_offsets(self, values: Any) -> None:
+        self._cells["cell_offsets"] = _wrap(values, "<i8")
+        self.stored_support_id = None
+
+    @property
+    def cell_connectivity(self) -> np.ndarray | None:
+        """The nodes of every cell, cell by cell (section 20)."""
+        return self._read_cells("cell_connectivity")
+
+    @cell_connectivity.setter
+    def cell_connectivity(self, values: Any) -> None:
+        self._cells["cell_connectivity"] = _wrap(values, "<i8")
+        self.stored_support_id = None
+
+    def _read_cells(self, which: str) -> np.ndarray | None:
+        source = self._cells.get(which)
+        return None if source is None else source.read()
+
+    def cells_of(self, cell: int) -> np.ndarray:
+        """The nodes of one cell, in VTK order for its type."""
+        offsets = self.cell_offsets
+        connectivity = self.cell_connectivity
+        if offsets is None or connectivity is None:
+            raise MestraError(
+                "E38", "a support of kind %s carries no cells"
+                % self.kind, self.name)
+        return connectivity[offsets[cell]:offsets[cell + 1]]
+
+    # -- identity
+
+    @property
+    def support_id(self) -> str:
+        """The content hash of section 24.
+
+        What the file stored when it stored one, and otherwise the
+        digest computed from this support's own arrays.
+        """
+        if self.stored_support_id is not None:
+            return self.stored_support_id
+        return self.computed_support_id()
+
+    def computed_support_id(self) -> str:
+        """The digest of section 24, computed from the arrays.
+
+        Coordinates of a mesh support are not hashed, because they
+        may vary between rows while the support does not; the
+        coordinates of an axis support are part of its identity.
+        """
+        axis_coordinates = None
+        if (self.kind == "axis" and self.coordinates is not None
+                and self.coordinates.data is not None):
+            axis_coordinates = self.coordinates.data.read()
+        if self.kind != "mesh":
+            # A support of kind axis or none has no cell arrays, so
+            # they contribute no bytes at all for it (section 24).
+            return support_digest(self.n_nodes,
+                                  axis_coordinates=axis_coordinates)
+        return support_digest(self.n_nodes, self.cell_types,
+                              self.cell_offsets, self.cell_connectivity,
+                              axis_coordinates)
+
+    # -- arrays
+
+    def arrays(self) -> dict[str, ArraySlot]:
+        """Every array on this support, coordinates included."""
+        out: dict[str, ArraySlot] = {}
+        if self.coordinates is not None:
+            out["coordinates"] = self.coordinates
+        for name, slot in self.node_arrays.items():
+            out["node_arrays/" + name] = slot
+        for name, slot in self.cell_arrays.items():
+            out["cell_arrays/" + name] = slot
+        return out
+
+    def add_node_array(self, name: str, values: Any = None, *,
+                       role: str = "field", units: str | None = None,
+                       varies: str | None = None, **rest: Any
+                       ) -> ArraySlot:
+        """Add an array over this support's nodes."""
+        return self._add(self.node_arrays, "node", name, values,
+                         role=role, units=units, varies=varies, **rest)
+
+    def add_cell_array(self, name: str, values: Any = None, *,
+                       role: str = "field", units: str | None = None,
+                       varies: str | None = None, **rest: Any
+                       ) -> ArraySlot:
+        """Add an array over this support's cells."""
+        return self._add(self.cell_arrays, "cell", name, values,
+                         role=role, units=units, varies=varies, **rest)
+
+    def _add(self, into: dict[str, ArraySlot], location: str, name: str,
+             values: Any, *, role: str, units: str | None,
+             varies: str | None, categories: Sequence[str] | None = None,
+             category: str | None = None, callable_id: str | None = None,
+             output: str | None = None, components: int | None = None,
+             dtype: Any = None, **rest: Any) -> ArraySlot:
+        _check_name(name)
+        if role not in ARRAY_ROLES:
+            raise MestraError(
+                "E02", "%r is not an array role; section 3 has %s"
+                % (role, ", ".join(sorted(ARRAY_ROLES))), name)
+        if name in into:
+            raise MestraError(
+                "E33", "this support already has an array called %r"
+                % name, name)
+        if categories is not None:
+            if self.dataset is None:
+                raise MestraError(
+                    "E10", "add the support to a dataset before naming "
+                    "categories", name)
+            category = category or name
+            self.dataset.add_categories(category, categories)
+        statistic = rest.get("statistic")
+        if callable_id is not None:
+            if components is None:
+                raise MestraError(
+                    "E31", "a slot served by a callable must declare "
+                    "its components", name)
+            slot = ArraySlot(
+                name, role, varies=varies or "row",
+                components=components, location=location, units=units,
+                category=category, support=self,
+                source="callable:" + callable_id,
+                output=output or name, **rest)
+            into[name] = slot
+            return slot
+        array = _as_array(values, role, dtype, name)
+        if varies is None:
+            varies = _guess_varies(array, self, location, statistic,
+                                   name)
+        array = _shape_array(array, location, varies, statistic, name)
+        if components is None:
+            components = int(array.shape[-1])
+        slot = ArraySlot(name, role, varies=varies, components=components,
+                         location=location, units=units,
+                         category=category, support=self,
+                         data=MemorySource(array), **rest)
+        into[name] = slot
+        if self.dataset is not None and varies == "row":
+            self.dataset._note_rows(int(array.shape[0]), name)
+        return slot
+
+    def __repr__(self) -> str:
+        return "Support(%r, kind=%r, n_nodes=%d, n_cells=%d)" % (
+            self.name, self.kind, self.n_nodes, self.n_cells)
+
+
+# -------------------------------------------------------------- dataset
+
+class Dataset:
+    """One mestra file: its rows, its supports, and its metadata."""
+
+    def __init__(self, *, writer: str = "mestra python 0",
+                 created: str | None = None,
+                 format: str = FORMAT,
+                 generalisation_group: str | None = None,
+                 notes: Mapping[str, Any] | None = None) -> None:
+        self.format = format
+        self.writer = writer
+        self.created = created or _now()
+        self.generalisation_group = generalisation_group
+        self.keys: dict[str, Key] = {}
+        self.scalars: dict[str, ScalarSlot] = {}
+        self.categories: dict[str, CategoryTable] = {}
+        self.supports: dict[str, Support] = {}
+        self.callables: dict[str, Any] = {}
+        self._row_support: _Source | None = None
+        self.notes: dict[str, Any] = dict(notes or {})
+        #: Root attributes this reader does not know (W11).
+        self.extra: dict[str, Any] = {}
+        #: Groups this reader does not know, and /private, kept whole.
+        self.opaque: dict[str, Any] = {}
+        #: Optional groups the file carried, so that an empty one
+        #: survives a rewrite.
+        self.present: set[str] = set()
+        #: What the file said, kept so that the validator can check it.
+        self.stored_aligned: bool | None = None
+        self.stored_row_count: int | None = None
+        self._n_rows: int | None = None
+        self._file: Any = None
+        self.path: str | None = None
+
+    # -- which support each row is on
+
+    @property
+    def row_support(self) -> np.ndarray | None:
+        """The support of each row, or None in an aligned file."""
+        if self._row_support is None:
+            return None
+        return self._row_support.read()
+
+    @row_support.setter
+    def row_support(self, values: Any) -> None:
+        self._row_support = (None if values is None
+                             else _wrap(values, "<i4"))
+
+    @property
+    def has_row_support(self) -> bool:
+        """True when the file carries a /row_support column."""
+        return self._row_support is not None
+
+    # -- the two structural facts
+
+    @property
+    def aligned(self) -> bool:
+        """True when the file declares at most one support (section 8).
+
+        Alignment is structural: it is not a separate claim, and
+        index-aligned operations are valid only when it holds.
+        """
+        return len(self.supports) <= 1
+
+    @property
+    def n_rows(self) -> int:
+        """The number of rows the file holds."""
+        if self._n_rows is not None:
+            return self._n_rows
+        for key in self.keys.values():
+            if key.data is not None:
+                return int(key.data.shape[0])
+        for scalar in self.scalars.values():
+            if scalar.data is not None:
+                return int(scalar.data.shape[0])
+        return 0
+
+    @n_rows.setter
+    def n_rows(self, value: int) -> None:
+        self._n_rows = int(value)
+
+    def _note_rows(self, count: int, where: str) -> None:
+        if self._n_rows is None:
+            self._n_rows = count
+        elif self._n_rows != count:
+            raise MestraError(
+                "E16", "this holds %d rows where the dataset has %d"
+                % (count, self._n_rows), where)
+
+    # -- keys
+
+    def key_names(self) -> list[str]:
+        """The file's key order: the names sorted by their UTF-8
+        bytes (section 26)."""
+        return sorted(self.keys, key=lambda n: n.encode("utf-8"))
+
+    def keys_of_role(self, role: str) -> list[Key]:
+        """Every key with this role, in the file's key order."""
+        return [self.keys[n] for n in self.key_names()
+                if self.keys[n].role == role]
+
+    def add_key(self, name: str, values: Any, *, role: str,
+                units: str | None = None, lower: float | None = None,
+                upper: float | None = None,
+                categories: Sequence[str] | None = None,
+                category: str | None = None,
+                trajectory_group: str | None = None,
+                parent: str | None = None,
+                generalisation: bool = False,
+                bounds: str | None = "observed",
+                dtype: Any = None) -> Key:
+        """Add a key column.
+
+        `role` is one of section 3. A categorical, group, split or
+        status key stores category ids, and `categories` writes the
+        table for it. Bounds default to the observed range of a
+        design, condition or time key; pass `lower` and `upper` to
+        declare the domain instead, or `bounds=None` to leave them
+        out.
+        """
+        _check_name(name)
+        if role not in KEY_ROLES:
+            raise MestraError(
+                "E02", "%r is not a key role; section 3 has %s"
+                % (role, ", ".join(sorted(KEY_ROLES))), name)
+        if name in self.keys:
+            raise MestraError(
+                "E33", "this dataset already has a key called %r"
+                % name, name)
+        if role in _INTEGER_KEY_ROLES:
+            given = np.asarray(values)
+            if given.dtype.kind not in "iub":
+                raise MestraError(
+                    "E20", "a %s key stores category ids, which are "
+                    "integers; these are %s" % (role, given.dtype),
+                    name)
+            array = given.astype(dtype or "<i4")
+        elif role == "id":
+            array = np.asarray(values)
+            if array.dtype.kind in "US":
+                array = array.astype(np.str_)
+            else:
+                array = array.astype(dtype or "<i8")
+        else:
+            array = np.asarray(values, dtype=dtype or "<f8")
+        if array.ndim != 1:
+            raise MestraError(
+                "E04", "a key column has one dimension, row; this one "
+                "has %d" % array.ndim, name)
+        if categories is not None:
+            category = category or name
+            self.add_categories(category, categories)
+        if (role in ("design", "condition", "time") and bounds
+                and lower is None and upper is None and array.size):
+            lower = float(np.nanmin(array))
+            upper = float(np.nanmax(array))
+        key = Key(name, role, units=units, lower=lower, upper=upper,
+                  category=category, trajectory_group=trajectory_group,
+                  parent=parent, data=MemorySource(array))
+        self.keys[name] = key
+        self._note_rows(int(array.shape[0]), name)
+        if generalisation:
+            self.generalisation_group = name
+        return key
+
+    # -- scalars
+
+    def add_scalar(self, name: str, values: Any = None, *,
+                   units: str | None = None,
+                   callable_id: str | None = None,
+                   output: str | None = None, **rest: Any) -> ScalarSlot:
+        """Add a per-row quantity of interest, with units.
+
+        Pass `values` for stored data, or `callable_id` and `output`
+        for a slot a callable serves.
+        """
+        _check_name(name)
+        if name in self.scalars:
+            raise MestraError(
+                "E33", "this dataset already has a scalar called %r"
+                % name, name)
+        if callable_id is not None:
+            slot = ScalarSlot(name, units=units,
+                              source="callable:" + callable_id,
+                              output=output or name, **rest)
+            self.scalars[name] = slot
+            return slot
+        array = np.asarray(values, dtype="<f8")
+        if array.ndim != 1:
+            raise MestraError(
+                "E04", "a scalar has one dimension, row; this one has "
+                "%d" % array.ndim, name)
+        slot = ScalarSlot(name, units=units, data=MemorySource(array),
+                          **rest)
+        self.scalars[name] = slot
+        self._note_rows(int(array.shape[0]), name)
+        return slot
+
+    # -- categories
+
+    def add_categories(self, name: str,
+                       entries: Sequence[str]) -> CategoryTable:
+        """Add or replace a category table."""
+        _check_name(name)
+        table = CategoryTable(entries)
+        self.categories[name] = table
+        return table
+
+    # -- supports
+
+    def add_support(self, name: str | None = None, *,
+                    kind: str | None = None, coordinates: Any = None,
+                    cells: tuple[Any, Any, Any] | None = None,
+                    units: str = "m", varies: str = "none",
+                    n_nodes: int | None = None) -> Support:
+        """Add a support, from its coordinates and its cells.
+
+        `cells` is (cell_types, cell_offsets, cell_connectivity) as
+        section 6 stores them. The kind, the node and cell counts and
+        the support id are worked out from what is given.
+        """
+        if name is None:
+            name = "s%d" % len(self.supports)
+        _check_name(name)
+        if name in self.supports:
+            raise MestraError(
+                "E33", "this dataset already has a support called %r"
+                % name, name)
+        coords = None if coordinates is None else _shape_array(
+            np.asarray(coordinates, dtype="<f8"), "node", varies, None,
+            "coordinates")
+        if kind is None:
+            if cells is not None:
+                kind = "mesh"
+            elif coords is not None:
+                kind = "axis"
+            else:
+                kind = "none"
+        if kind not in ("mesh", "axis", "none"):
+            raise MestraError(
+                "E03", "a support is mesh, axis or none, not %r" % kind,
+                name)
+        types = offsets = conn = None
+        if cells is not None:
+            types, offsets, conn = cells
+        if n_nodes is None:
+            n_nodes = 0 if coords is None else int(coords.shape[-2])
+        support = Support(
+            name, kind, n_nodes=n_nodes,
+            n_cells=0 if types is None else int(len(types)),
+            cell_types=types, cell_offsets=offsets,
+            cell_connectivity=conn)
+        support.dataset = self
+        self.supports[name] = support
+        if coords is not None:
+            support.coordinates = ArraySlot(
+                "coordinates", "coordinates", varies=varies,
+                components=int(coords.shape[-1]), location="node",
+                units=units, support=support,
+                data=MemorySource(coords))
+            if varies == "row":
+                self._note_rows(int(coords.shape[0]), "coordinates")
+        return support
+
+    def set_row_support(self, values: Any) -> None:
+        """Say which support each row is on (section 22).
+
+        The value is the zero-based position of the row's support in
+        the file's support order, which is the support names sorted
+        by their UTF-8 bytes.
+        """
+        array = np.asarray(values, dtype="<i4")
+        if array.ndim != 1:
+            raise MestraError(
+                "E04", "/row_support has one dimension, row",
+                "/row_support")
+        self._row_support = MemorySource(array)
+        self._note_rows(int(array.shape[0]), "/row_support")
+
+    def support_names(self) -> list[str]:
+        """The file's support order: names sorted by UTF-8 bytes."""
+        return sorted(self.supports, key=lambda n: n.encode("utf-8"))
+
+    def support_of_row(self, row: int) -> Support | None:
+        """The support a row sits on, or None when there is none."""
+        names = self.support_names()
+        if not names:
+            return None
+        if not self.has_row_support:
+            return self.supports[names[0]]
+        at = int(np.asarray(self.row_support)[row])
+        if not 0 <= at < len(names):
+            raise MestraError(
+                "E06", "row %d references support %d, and the file "
+                "declares %d" % (row, at, len(names)), "/row_support")
+        return self.supports[names[at]]
+
+    def rows_on(self, support: str | Support) -> np.ndarray:
+        """The file rows that reference a support, in file order.
+
+        A row-varying array on that support holds one entry per row
+        in exactly this order (section 22).
+        """
+        name = support if isinstance(support, str) else support.name
+        names = self.support_names()
+        if name not in self.supports:
+            raise KeyError("no support called %r" % name)
+        if not self.has_row_support:
+            return np.arange(self.n_rows)
+        want = names.index(name)
+        return np.flatnonzero(np.asarray(self.row_support) == want)
+
+    # -- callables
+
+    def add_callable(self, identifier: str, obj: Any) -> Any:
+        """Store a callable under an id that slots may reference."""
+        _check_name(identifier)
+        self.callables[identifier] = obj
+        return obj
+
+    # -- everything at once
+
+    def slots(self) -> dict[str, Slot]:
+        """Every slot in the file, by its HDF5 path."""
+        out: dict[str, Slot] = {}
+        for name, scalar in self.scalars.items():
+            out["/scalars/" + name] = scalar
+        for sname, support in self.supports.items():
+            for where, slot in support.arrays().items():
+                out["/supports/%s/%s" % (sname, where)] = slot
+        return out
+
+    def support_of_slot(self, path: str) -> Support | None:
+        """The support a slot path sits under, or None."""
+        parts = path.strip("/").split("/")
+        if len(parts) >= 2 and parts[0] == "supports":
+            return self.supports.get(parts[1])
+        return None
+
+    # -- adapters
+
+    def to_xarray(self) -> Any:
+        """This dataset as an xarray Dataset, dimensions and all.
+
+        An optional adapter: it needs xarray, which is not a
+        dependency of this package. Dimension names are the names on
+        disk of section 21, with a support's own `node`, `cell` and
+        `row` prefixed by the support name when the file declares
+        more than one support, since their lengths differ.
+        """
+        import xarray as xr
+
+        variables: dict[str, Any] = {}
+        attributes = {"format": self.format, "writer": self.writer,
+                      "created": self.created,
+                      "aligned": int(self.aligned)}
+        if self.generalisation_group:
+            attributes["generalisation_group"] = self.generalisation_group
+        for name in self.key_names():
+            key = self.keys[name]
+            if key.data is None:
+                continue
+            variables[name] = (("row",), key.data.read(),
+                               _key_attributes(key))
+        for name, scalar in sorted(self.scalars.items()):
+            if scalar.data is None:
+                continue
+            variables[name] = (("row",), scalar.data.read(),
+                               _slot_attributes(scalar))
+        many = len(self.supports) > 1
+        for sname in self.support_names():
+            support = self.supports[sname]
+            for where, slot in support.arrays().items():
+                if slot.data is None:
+                    continue
+                values = slot.data.read()
+                dims = tuple(
+                    _xarray_dimension(dim, sname, many,
+                                      values.shape[at])
+                    for at, dim in enumerate(slot.dims))
+                short = where.rsplit("/", 1)[-1]
+                label = "%s_%s" % (sname, short) if many else short
+                variables[label] = (dims, values, _slot_attributes(slot))
+        return xr.Dataset(variables, attrs=attributes)
+
+    # -- the file behind a lazy dataset
+
+    def close(self) -> None:
+        """Close the file a lazy dataset is reading from."""
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+
+    def __enter__(self) -> Dataset:
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
+
+    def __repr__(self) -> str:
+        return ("Dataset(rows=%d, keys=%d, scalars=%d, supports=%d, "
+                "callables=%d, aligned=%s)"
+                % (self.n_rows, len(self.keys), len(self.scalars),
+                   len(self.supports), len(self.callables), self.aligned))
+
+
+# ------------------------------------------------------------- helpers
+
+def _key_attributes(key: Key) -> dict[str, Any]:
+    out: dict[str, Any] = {"role": key.role}
+    for name in ("units", "category", "trajectory_group", "parent"):
+        value = getattr(key, name)
+        if value is not None:
+            out[name] = value
+    for name in ("lower", "upper"):
+        value = getattr(key, name)
+        if value is not None:
+            out[name] = float(value)
+    return out
+
+
+def _slot_attributes(slot: Slot) -> dict[str, Any]:
+    out: dict[str, Any] = {"source": slot.source}
+    for name in ("role", "varies", "units", "statistic", "of",
+                 "category", "recipe", "derived_from", "reference"):
+        value = getattr(slot, name, None)
+        if value is not None:
+            out[name] = value
+    if slot.quantile is not None:
+        out["quantile"] = float(slot.quantile)
+    return out
+
+
+def _xarray_dimension(dim: str, support: str, many: bool,
+                      length: int) -> str:
+    """The dimension name to give xarray (section 21 on disk)."""
+    from .names import disk_dimension
+    if dim in ("node", "cell", "row") and many:
+        return "%s_%s" % (support, dim)
+    return disk_dimension(dim, length)
+
+
+def _now() -> str:
+    """An ISO 8601 timestamp in UTC (section 11)."""
+    now = _datetime.datetime.now(_datetime.timezone.utc)
+    return now.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _check_name(name: str) -> None:
+    if not is_legal_name(name):
+        raise MestraError(
+            "E33", "%r is not a legal netCDF-4 name: letters, digits, "
+            "underscore, hyphen, . and + only" % name, name)
+    if is_reserved(name):
+        raise MestraError(
+            "E33", "names beginning with mestra_ are reserved for the "
+            "container", name)
+
+
+def _as_array(values: Any, role: str, dtype: Any, name: str
+              ) -> np.ndarray:
+    if values is None:
+        raise MestraError(
+            "E30", "a slot holding data needs values; pass "
+            "callable_id for a slot a callable serves", name)
+    if role == "label":
+        array = np.asarray(values, dtype=dtype or "<i4")
+        if array.dtype.kind not in "iu":
+            raise MestraError(
+                "E20", "a label is int32 or int64, not %s" % array.dtype,
+                name)
+        return array
+    array = np.asarray(values, dtype=dtype or "<f8")
+    if array.dtype != np.dtype("<f8"):
+        raise MestraError(
+            "E20", "a %s array is float64, not %s" % (role, array.dtype),
+            name)
+    return array
+
+
+def _guess_varies(array: np.ndarray, support: Support, location: str,
+                  statistic: str | None, name: str) -> str:
+    """Take `varies` from the shape when the caller did not say.
+
+    The node or cell axis is the one whose length is the support's,
+    which is what tells (node, component) apart from (row, node).
+    An array that varies along a group is never guessed: say
+    `varies="group:<k>"` for that.
+    """
+    width = support.n_nodes if location == "node" else support.n_cells
+    draws = 1 if statistic == "draw" else 0
+    if array.ndim == 1 + draws:
+        if array.shape[-1] == width:
+            return "none"
+    elif array.ndim == 3 + draws:
+        if array.shape[-2] == width:
+            return "row"
+    elif array.ndim == 2 + draws:
+        fits_none = array.shape[-2] == width
+        fits_row = array.shape[-1] == width
+        if fits_none and not fits_row:
+            return "none"
+        if fits_row and not fits_none:
+            return "row"
+        if fits_none and fits_row:
+            raise MestraError(
+                "E04", "a %s array of shape %s on a support of %d %ss "
+                "is either (%s, component) or (row, %s); say which "
+                "with varies" % (location, array.shape, width,
+                                 location, location, location), name)
+    raise MestraError(
+        "E05", "an array of shape %s does not fit a support of %d "
+        "%ss; the %s axis is the one of that length"
+        % (array.shape, width, location, location), name)
+
+
+def _shape_array(array: np.ndarray, location: str, varies: str,
+                 statistic: str | None, name: str) -> np.ndarray:
+    """Give an array the component axis section 19 always requires."""
+    wanted = len(array_dims(varies, statistic, location))
+    if array.ndim == wanted:
+        return array
+    if array.ndim == wanted - 1:
+        # The component axis is always present, with length 1 for a
+        # single-component quantity (section 19).
+        return array.reshape(array.shape + (1,))
+    raise MestraError(
+        "E04", "an array that varies along %s on %ss has %d axes; this "
+        "one has %d" % (varies, location, wanted, array.ndim), name)
