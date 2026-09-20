@@ -78,10 +78,6 @@ a strict read can refuse a file without reading an array."""
 const STRUCTURAL_RULES = ("E01", "E16", "E19", "E25", "E26", "E29", "E30",
                           "E40", "E41")
 
-"""How many string records a structural pass will read to decide E26.
-It is a bounded look, not a pass over the file: a longer dataset is
-left to `validate`."""
-const STRUCTURAL_STRING_ELEMENTS = 4096
 
 mutable struct Validator
     f::HDF5.File
@@ -100,6 +96,11 @@ mutable struct Validator
     gen_group::Union{Nothing,String}
     missing_public::Bool
     max_elements::Int
+    # False when `aligned` is there and is not a boolean section 18
+    # defines.  The alignment claim is then not a thing this file
+    # states, so E28 and E37, which are both about what it claims,
+    # have nothing to decide and E19 says the whole of what is wrong.
+    aligned_known::Bool
 end
 
 """One finding per rule per object (`docs/api-conventions.md` section
@@ -123,20 +124,17 @@ function rows_tail(rows::Vector{Int}, n::Int = length(rows))
     return "; $(n) rows, the first three: " * join(rows[1:3], ", ")
 end
 
-"""What a structural pass will read of a string dataset, which is its
-own bound and not the caller's: a strict read decides E26 on a look,
-not on a pass over the file."""
-look_limit(v::Validator) =
-    v.structural ? min(v.max_elements, STRUCTURAL_STRING_ELEMENTS) :
-    v.max_elements
+"""What a structural pass may read of a string dataset.
 
-"""Whether a structural pass should leave a string dataset alone: it
-decides E26 on a bounded number of records, never on a whole file."""
-function too_long_to_look(v::Validator, d)
-    v.structural || return false
-    cdims, _ = disk_shape(d)
-    return prod(vcat(cdims, 1)) > STRUCTURAL_STRING_ELEMENTS
-end
+`docs/api-conventions.md` section 7: an open reads attributes,
+dataspaces, link types and dimension-scale structure, and may read a
+category table in full, because tables are small by construction and
+the open needs them to name E10, E26 and E41 on the same files the
+read names them on.  It never reads a slot's data.  So a category
+table is read whole here and every other string dataset is left to the
+full pass, and the nine structural rules come out the same whether the
+caller asked for a lazy read or an eager one."""
+look_limit(v::Validator) = v.max_elements
 
 """Run one object's checks, and turn anything thrown into E41 against
 that object rather than into the end of the pass."""
@@ -235,12 +233,12 @@ function validate(path::AbstractString;
                      first(sprint(showerror, e), 200))])
     end
     try
-        v = Validator(f, ScaleIndex(collect_scales(f)), Finding[],
+        v = Validator(f, ScaleIndex(f), Finding[],
                       Set{Tuple{String,String}}(), structural, 0,
                       String[], Int[], true, Dict{String,Vector{String}}(),
                       Dict{String,String}(), Dict{String,Any}(),
                       Dict{String,String}(), nothing, false,
-                      Int(max_elements))
+                      Int(max_elements), true)
         run_validator!(v)
         errs = sort(unique([x.rule for x in v.findings if x.rule[1] == 'E']))
         warns = sort(unique([x.rule for x in v.findings if x.rule[1] == 'W']))
@@ -299,6 +297,7 @@ function check_root!(v::Validator)
         v.missing_public = true
     else
         v.aligned = a["aligned"].value === true
+        v.aligned_known = a["aligned"].value isa Bool
     end
     v.gen_group = haskey(a, "generalisation_group") &&
                   a["generalisation_group"].value isa AbstractString ?
@@ -321,7 +320,9 @@ function check_root!(v::Validator)
     length(v.supports) > 1 && report!(v, "W05", "/supports",
         "$(length(v.supports)) supports; index-aligned operations are " *
         "not available")
-    if v.aligned && length(v.supports) > 1
+    if !v.aligned_known
+        # nothing to say: E19 already has it
+    elseif v.aligned && length(v.supports) > 1
         report!(v, "E37", "/",
                 "`aligned` is true with $(length(v.supports)) supports")
     elseif !v.aligned && length(v.supports) <= 1
@@ -329,6 +330,13 @@ function check_root!(v::Validator)
                 "`aligned` is false with $(length(v.supports)) support(s)")
     end
     return v
+end
+
+"""What a one-byte attribute holds, for the message E19 prints when it
+is not a legal boolean."""
+function int8_text(at::RawAttr)
+    isempty(at.raw) && return "no byte this validator could read"
+    return string(Int(reinterpret(Int8, at.raw[1:1])[1]))
 end
 
 """E19: every attribute this specification names has one encoding."""
@@ -368,8 +376,20 @@ function check_attr_types!(v::Validator, path::String,
             end
         elseif at.ti.class === :int
             if expected === :bool
-                (at.ti.size == 1) || report!(v, "E19", path,
-                    "boolean `$(name)` is not int8")
+                if at.ti.size != 1
+                    report!(v, "E19", path, "boolean `$(name)` is not int8")
+                elseif !(at.value isa Bool)
+                    # Section 18: "value 0 for false and 1 for true.
+                    # No other value is legal."  E19 covers "a boolean
+                    # that is not int8 or whose value is not 0 or 1",
+                    # so a file that says something the format does not
+                    # define is refused rather than given the meaning
+                    # that suppresses another rule.
+                    report!(v, "E19", path,
+                        "boolean `$(name)` holds $(int8_text(at)); " *
+                        "section 18 gives a boolean the value 0 or 1 " *
+                        "and no other")
+                end
             elseif expected === :int
                 (at.ti.size == 8 && at.ti.signed) ||
                     report!(v, "E19", path, "integer `$(name)` is not int64")
@@ -410,7 +430,7 @@ end
 # ------------------------------------------------------------ names
 
 function check_names!(v::Validator)
-    deep = walk_objects(v.f) do path, obj
+    deep = walk_objects(v.f; skip = unchecked_group) do path, obj
         for n in split(lstrip(path, '/'), '/')
             isempty(n) && continue
             legal_name(n) || report!(v, "E33", path,
@@ -455,8 +475,12 @@ end
 
 """Visit every object reachable by hard links, on an explicit stack
 and no deeper than MAX_DEPTH.  The call stack is not used, because the
-file chooses how deep it goes."""
-function walk_objects(fn, root, path = "")
+file chooses how deep it goes.
+
+`skip(path, obj)` names a subtree the walk neither visits nor enters,
+which is how the byte-level passes leave `/private` and the groups
+this version does not know alone (section 14)."""
+function walk_objects(fn, root, path = ""; skip = nothing)
     stack = Tuple{Any,String,Int}[(root, String(path), 0)]
     visited = 0
     deep = Set{String}()
@@ -474,6 +498,7 @@ function walk_objects(fn, root, path = "")
             obj = hard_child(g, name)
             obj === nothing && continue
             p = base * "/" * name
+            skip !== nothing && skip(p, obj) && continue
             try
                 fn(p, obj)
             catch
@@ -482,6 +507,28 @@ function walk_objects(fn, root, path = "")
         end
     end
     return deep
+end
+
+"""Section 14, of the byte-level rules of sections 18 to 25: "They are
+checked on the public objects only.  `/private` is not checked, and
+neither is any group this version of the format does not know, which
+is reported as W11 and otherwise left alone."
+
+Section 29 goes further for `/private` and forbids a reader to
+interpret it at all.  A producer's private records are in whatever
+representation it chose, so a validator that walked into one would
+reject files that conform.  W11 is reported for the unknown group
+itself by `check_unknown!` and by the support pass, which is the whole
+of what this version has to say about either."""
+function unchecked_group(path::AbstractString, obj)
+    obj isa HDF5.Group || return false
+    parts = split(String(path), '/'; keepempty = false)
+    if length(parts) == 1
+        return parts[1] == "private" || !(parts[1] in ROOT_GROUPS)
+    elseif length(parts) == 3 && parts[1] == "supports"
+        return !(parts[3] in ("node_arrays", "cell_arrays"))
+    end
+    return false
 end
 
 # ------------------------------------------------------- categories
@@ -496,7 +543,6 @@ function collect_categories!(v::Validator)
                 "a category table is a dataset")
             continue
         end
-        too_long_to_look(v, d) && continue
         guard!(v, "/categories/$(name)") do
         ti, recs = read_string_records(d; max_elements = look_limit(v))
         if ti.class !== :string || ti.vlen
@@ -909,7 +955,9 @@ end
 function check_row_support!(v::Validator)
     rsobj = hard_child(v.f, "row_support")
     present = rsobj isa HDF5.Dataset
-    if v.aligned && present
+    if !v.aligned_known
+        # nothing to say: E19 already has it
+    elseif v.aligned && present
         report!(v, "E28", "/row_support",
                 "present in a file with `aligned = true`")
     elseif !v.aligned && !present
@@ -999,12 +1047,15 @@ function check_supports!(v::Validator)
         for n in vchildren!(v, g, path)
             obj = hard_child(g, n)
             obj === nothing && continue
+            # W11 is "an attribute or a group this reader does not
+            # know", and section 28 makes an attribute and a group the
+            # two things a later version may add.  A dataset is
+            # neither, so an unknown one draws no warning here; what
+            # the byte-level rules say about it, they say through
+            # `check_every_dataset!` and through nothing else.
             if obj isa HDF5.Group
                 n in ("node_arrays", "cell_arrays") || report!(v, "W11",
                     "$(path)/$(n)", "a group this reader does not know")
-            elseif !is_scale(obj)
-                n in SUPPORT_DATASETS || report!(v, "W11", "$(path)/$(n)",
-                    "a dataset this reader does not know")
             end
         end
         end
@@ -1430,7 +1481,7 @@ end
 # --------------------------------------- every dataset, byte-level
 
 function check_every_dataset!(v::Validator)
-    walk_objects(v.f) do path, obj
+    walk_objects(v.f; skip = unchecked_group) do path, obj
         obj isa HDF5.Dataset || return
         is_scale(obj) && return
         guard!(v, path) do
@@ -1446,9 +1497,10 @@ function check_every_dataset!(v::Validator)
                         "filter $(fid) is neither gzip nor shuffle")
             end
         end
-        names = axis_scale_names(obj, v.idx)
+        axes = axis_scales(obj, v.idx)
+        names = Union{String,Nothing}[t[2] for t in axes]
         for (axis, n) in pairs(names)
-            k = num_scales(obj, axis - 1)
+            k = axes[axis][1]
             if k < 0
                 report!(v, "E41", path,
                         "axis $(axis - 1): the library would not say how " *
@@ -1468,8 +1520,8 @@ function check_every_dataset!(v::Validator)
                 # with only CLASS is half a scale, and the axis it is
                 # attached to does not carry the thing the rule asks
                 # for.
-                got = attached_scale(obj, axis - 1, v.idx.all)
-                if got !== nothing && !haskey(HDF5.attributes(got[2]), "NAME")
+                sd = axes[axis][3]
+                if sd !== nothing && !haskey(HDF5.attributes(sd), "NAME")
                     report!(v, "E25", path,
                             "axis $(axis - 1) carries a scale `$(n)` with " *
                             "CLASS and no NAME, which is half of what " *
@@ -1490,9 +1542,12 @@ function check_every_dataset!(v::Validator)
             end
         end
         ti = type_info(HDF5.datatype(obj))
-        if ti.class === :string && !ti.vlen &&
+        # A string dataset that is not a category table is a key
+        # column or a slot, and section 7 of the conventions says an
+        # open never reads one.  E26 and W13 on it are the full pass's.
+        if ti.class === :string && !ti.vlen && !v.structural &&
            !startswith(path, "/categories/") &&
-           !startswith(path, "/callables/") && !too_long_to_look(v, obj)
+           !startswith(path, "/callables/")
             _, recs = read_string_records(obj;
                                           max_elements = look_limit(v))
             for r in recs
@@ -1526,20 +1581,14 @@ end
 function default_chunk_for(v::Validator, d::HDF5.Dataset, cdims::Vector{Int})
     ti = type_info(HDF5.datatype(d))
     nrows = 0
-    sc = attached_scale_name(d, 0, v.idx.all)
-    sc === nothing && return nothing
-    for (name, s) in v.idx.all
-        attached = try
-            HDF5.API.h5ds_is_attached(d, s, 0)
-        catch
-            false
-        end
-        if attached
-            sdims, _ = disk_shape(s)
-            nrows = isempty(sdims) ? 0 : sdims[1]
-            break
-        end
-    end
+    axes = axis_scales(d, v.idx)
+    isempty(axes) && return nothing
+    _, sc, sd = axes[1]
+    # Section 23: the row count is the length of the row dimension the
+    # leading axis is attached to, and not the dataset's own extent.
+    (sc === nothing || sd === nothing) && return nothing
+    sdims, _ = disk_shape(sd)
+    nrows = isempty(sdims) ? 0 : sdims[1]
     rest = cdims[2:end]
     return vcat(default_chunk_rows(ti.size, rest, nrows), rest)
 end
@@ -1555,12 +1604,12 @@ function check_unknown!(v::Validator)
     for name in vchildren!(v, v.f, "")
         obj = hard_child(v.f, name)
         obj === nothing && continue
+        # Section 28 adds attributes and groups, never datasets, so
+        # W11 is about those two and an unknown root dataset draws no
+        # warning of its own.
         if obj isa HDF5.Group
             name in ROOT_GROUPS || report!(v, "W11", "/$(name)",
                 "a root group this reader does not know")
-        elseif !is_scale(obj)
-            name == "row_support" || report!(v, "W11", "/$(name)",
-                "a root dataset this reader does not know")
         end
     end
     return v

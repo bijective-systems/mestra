@@ -6,6 +6,33 @@
 # and shuffle, no fill value, and object time tracking off so that two
 # runs produce the same bytes.
 
+"""The HDF5 format bounds every file is created with.
+
+One call decides which object header version the library writes, and
+it is the file access property list's `libver_bounds`, not any of the
+per-object properties.  libhdf5 2.0 changed the default low bound from
+`H5F_LIBVER_EARLIEST` to `H5F_LIBVER_V18`, so a writer that takes the
+default on a 2.x library writes version-2 object headers where a 1.x
+one wrote version 1.  Two things follow, and both are costs this
+format does not want to pay:
+
+  - the root object header then records four timestamps, so two runs
+    of this writer a second apart produce different bytes, and section
+    30 asks a golden file to be byte reproducible.  `obj_track_times`
+    is off on every dataset and group this writer creates, but the
+    root group's header is the library's and the property list it was
+    created from is this one;
+  - every reader pays for it.  `vectors/README.md` rejects the layout
+    for the corpus, and the Phase 3 report measured a C++ validator
+    taking 4.98 s on a thousand-key file in it against 0.68 s in the
+    default one.
+
+Asking for the earliest low bound puts this writer back on the layout
+the corpus files have.  The high bound stays `:latest`, so nothing
+this format uses is refused for being too new.
+"""
+const WRITER_LIBVER = (:earliest, :latest)
+
 """Section 23: the default number of rows in a chunk."""
 function default_chunk_rows(itemsize::Int, rest::Vector{Int}, nrows::Int)
     nrows == 0 && return 1
@@ -148,7 +175,7 @@ function write(ds::Dataset, path::AbstractString; check::Bool = true)
     src = ds.path !== nothing && any_unread(ds) ?
           HDF5.h5open(ds.path, "r") : nothing
     try
-        HDF5.h5open(out, "w") do f
+        HDF5.h5open(out, "w"; libver_bounds = WRITER_LIBVER) do f
             write_file(f, ds, src)
         end
     catch

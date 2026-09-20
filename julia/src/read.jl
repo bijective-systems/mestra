@@ -15,24 +15,69 @@ const ROOT_ATTRS = Set(["format", "writer", "created", "aligned",
 const ROOT_GROUPS = Set(["keys", "scalars", "categories", "supports",
                          "callables", "notes", "private"])
 
+"""Every dimension scale in the file, by link name and by the object
+reference a dataset's DIMENSION_LIST holds.  The map is built once per
+open, during this package's own bounded walk, and every attached scale
+is resolved through it (section 21), so resolving one costs a lookup
+and not a scan of the scale's REFERENCE_LIST."""
 struct ScaleIndex
     all::Vector{Pair{String,HDF5.Dataset}}
+    byref::Dict{HDF5.Reference,Int}
 end
 
-"""The link name of the scale on each C-order axis of `d`, or nothing
-where no single scale is attached."""
-function axis_scale_names(d::HDF5.Dataset, idx::ScaleIndex)
+function ScaleIndex(f::HDF5.File)
+    found = collect_scales(f)
+    all = Pair{String,HDF5.Dataset}[name => d for (name, d, _) in found]
+    byref = Dict{HDF5.Reference,Int}()
+    for (i, (_, _, ref)) in enumerate(found)
+        ref === nothing && continue
+        haskey(byref, ref) || (byref[ref] = i)
+    end
+    return ScaleIndex(all, byref)
+end
+
+"""For each C-order axis of `d`: how many dimension scales are
+attached, the link name of the one scale when exactly one is and this
+file holds it, and that scale's dataset.  A count of -1 says the
+library would not give the dataset's DIMENSION_LIST at all."""
+function axis_scales(d::HDF5.Dataset, idx::ScaleIndex)
+    T = Tuple{Int,Union{String,Nothing},Union{Nothing,HDF5.Dataset}}
     cdims, _ = try
         disk_shape(d)
     catch
-        return Union{String,Nothing}[]
+        return T[]
     end
-    out = Union{String,Nothing}[]
+    dl = dimension_list(d)
+    bad = dl === :unreadable
+    out = T[]
     for axis in 0:(length(cdims) - 1)
-        n = num_scales(d, axis)
-        push!(out, n == 1 ? attached_scale_name(d, axis, idx.all) : nothing)
+        if bad
+            push!(out, (-1, nothing, nothing))
+            continue
+        end
+        refs = axis_refs(dl, axis)
+        if length(refs) == 1
+            i = get(idx.byref, refs[1], 0)
+            push!(out, i == 0 ? (1, nothing, nothing) :
+                       (1, idx.all[i].first, idx.all[i].second))
+        else
+            push!(out, (length(refs), nothing, nothing))
+        end
     end
     return out
+end
+
+"""The link name of the scale on each C-order axis of `d`, or nothing
+where no single scale this file holds is attached."""
+axis_scale_names(d::HDF5.Dataset, idx::ScaleIndex) =
+    Union{String,Nothing}[t[2] for t in axis_scales(d, idx)]
+
+"""The link name of the one scale on C-order axis `axis`, or nothing."""
+function attached_scale_name(d::HDF5.Dataset, axis::Integer,
+                             idx::ScaleIndex)
+    got = axis_scales(d, idx)
+    i = Int(axis) + 1
+    return (1 <= i <= length(got)) ? got[i][2] : nothing
 end
 
 function slot_ldims(d::HDF5.Dataset, idx::ScaleIndex)
@@ -49,8 +94,17 @@ fattr(a::Dict{String,RawAttr}, name) =
 iattr(a::Dict{String,RawAttr}, name) =
     haskey(a, name) && a[name].value isa Real && !(a[name].value isa Bool) ?
     Int(a[name].value) : nothing
+# Section 18 gives a boolean the values 0 and 1 and no other, so an
+# int8 holding anything else decodes to nothing and this returns
+# nothing too: the reader has no value, rather than a value it made up.
 battr(a::Dict{String,RawAttr}, name) =
-    haskey(a, name) ? (a[name].value === true) : nothing
+    haskey(a, name) && a[name].value isa Bool ? a[name].value : nothing
+
+"""True when `name` is there and is not a boolean this format defines,
+which is E19 and which the reader says rather than choosing a meaning
+for it."""
+illegal_bool(a::Dict{String,RawAttr}, name) =
+    haskey(a, name) && !(a[name].value isa Bool)
 
 """
     Mestra.read(path; lazy = true, strict = true) -> Dataset
@@ -67,11 +121,14 @@ With `lazy = false` every stored array is read at once.
 A strict read, which is the default, refuses a file that breaks one of
 the structural rules of `docs/api-conventions.md` section 2 --
 `Mestra.STRUCTURAL_RULES`, which is E01, E16, E19, E25, E26, E29, E30,
-E40 and E41 -- with a `MestraError` naming the first it finds.  Those
-are what a file is made of rather than what it means, so deciding them
-costs attributes, dataspaces, link types and dimension scales and not
-one array element: a strict read still opens a file that declares a
-trillion numbers it does not hold.
+E40 and E41 -- with a `MestraError` carrying the first it found and
+naming every other one in its message.  Those are what a file is made
+of rather than what it means, so deciding them costs attributes,
+dataspaces, link types, dimension-scale structure and the file's
+category tables, and not one array element: a strict read still opens
+a file that declares a trillion numbers it does not hold.  A slot is
+never read to decide them, so this read and `lazy = false` refuse the
+same file with the same rule (`docs/api-conventions.md` section 7).
 
 A semantic fault never stops a read, strict or not: a missing unit, a
 bad split, a support id that does not match its cells are all things a
@@ -87,7 +144,7 @@ function read(path::AbstractString; lazy::Bool = true, strict::Bool = true,
     if strict
         r = validate(String(path); max_elements = max_elements,
                      structural = true)
-        isempty(r.findings) || refuse(first(r.findings), path)
+        isempty(r.findings) || refuse(r.findings, path)
     end
     f = try
         HDF5.h5open(String(path), "r")
@@ -103,13 +160,41 @@ function read(path::AbstractString; lazy::Bool = true, strict::Bool = true,
     end
 end
 
+"""How many structural findings a refusal names one by one before it
+says how many more there are."""
+const REFUSAL_FINDINGS = 8
+
 """How a strict read refuses: the first structural rule it found, the
-object it was about, and what it says."""
-refuse(f::Finding, path) = throw(MestraError(f.rule, f.path,
-    f.message * ". $(basename(String(path))) breaks a rule of section " *
-    "14 that says what a file is made of; `Mestra.report(\"$(path)\")` " *
-    "says what else it breaks, and `Mestra.read(path; strict = false)` " *
-    "opens it anyway"))
+object it was about, what it says, and then every other structural
+rule the file breaks.
+
+Section 30 asks a reader to refuse a hostile file "with the same ids
+rather than return something", and the ids a file must produce are not
+always the one a walk of it reaches first: `wrong_object_kinds` is
+required to name E41 and the first thing wrong with it is a key stored
+as a group (E30).  So the refusal names them all."""
+function refuse(findings::Vector{Finding}, path)
+    head = first(findings)
+    rules = sort(unique([f.rule for f in findings]))
+    base = basename(String(path))
+    said = if length(findings) == 1
+        "$(base) breaks a rule of section 14 that says what a file is " *
+        "made of"
+    else
+        listed = ["$(f.rule) $(f.path)"
+                  for f in findings[2:min(end, REFUSAL_FINDINGS + 1)]]
+        more = length(findings) - 1 - length(listed)
+        "$(base) breaks $(length(rules)) rule(s) of section 14 that say " *
+        "what a file is made of; it also breaks " * join(listed, ", ") *
+        (more > 0 ? ", and $(more) more" : "")
+    end
+    throw(MestraError(head.rule, head.path,
+        head.message * ". " * said *
+        "; `Mestra.report(\"$(path)\")` says what else it breaks, and " *
+        "`Mestra.read(path; strict = false)` opens it anyway"))
+end
+
+refuse(f::Finding, path) = refuse([f], path)
 
 note!(ds::Dataset, rule, path, msg) =
     push!(ds.findings, Finding(rule, String(path), String(msg)))
@@ -131,12 +216,15 @@ end
 
 function read_dataset(f::HDF5.File, path::String, lazy::Bool,
                       max_elements::Int = DEFAULT_MAX_ELEMENTS)
-    idx = ScaleIndex(collect_scales(f))
+    idx = ScaleIndex(f)
     root = own_attrs(f)
     ds = Dataset(writer = something(sattr(root, "writer"), ""),
                  created = something(sattr(root, "created"), ""))
     ds.format = something(sattr(root, "format"), "")
     ds.aligned = something(battr(root, "aligned"), true)
+    illegal_bool(root, "aligned") && note!(ds, "E19", "/",
+        "`aligned` is not a boolean of section 18, whose only values " *
+        "are 0 and 1; this reader has no alignment claim from this file")
     ds.generalisation_group = sattr(root, "generalisation_group")
     ds.path = path
     ds.lazy = lazy
@@ -168,8 +256,20 @@ function read_dataset(f::HDF5.File, path::String, lazy::Bool,
             try
                 ti, recs = read_string_records(d;
                                                max_elements = max_elements)
-                ds.categories[name] = CategoryTable(
-                    name, [String(strip_nul(r)) for r in recs], ti.size)
+                # Section 25: "A reader that cannot recover the bytes
+                # of a string must say so rather than return something
+                # else."  An entry that is not valid UTF-8 is E26, and
+                # the table is not handed back at all, because a Julia
+                # String built from those bytes is something else.
+                if !all(check_string_bytes, recs)
+                    note!(ds, "E26", "/categories/$(name)",
+                          "an entry is not valid UTF-8 or holds a NUL " *
+                          "byte before its trailing padding; this reader " *
+                          "will not hand back a string it cannot recover")
+                else
+                    ds.categories[name] = CategoryTable(
+                        name, [String(strip_nul(r)) for r in recs], ti.size)
+                end
             catch e
                 note!(ds, rule_of(e), "/categories/$(name)", message_of(e))
             end

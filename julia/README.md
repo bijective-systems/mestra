@@ -156,12 +156,23 @@ Strict by default, and what that refuses
 `Mestra.read` refuses a file that breaks one of the structural rules
 of `docs/api-conventions.md` section 2 -- `Mestra.STRUCTURAL_RULES`,
 which is **E01, E16, E19, E25, E26, E29, E30, E40** and **E41** --
-with a `MestraError` naming the first it finds. Those rules are what a
-file is made of rather than what it means, so deciding them costs
-attributes, dataspaces, link types and dimension scales and not one
+with a `MestraError` carrying the first it found and naming every
+other one in its message. It names them all because the identifier a
+file must be refused with is not always the one a walk of it reaches
+first: `vectors/hostile/wrong_object_kinds` must name E41 and the
+first thing wrong with it is a key stored as a group, which is E30.
+
+Those rules are what a file is made of rather than what it means, so
+deciding them costs attributes, dataspaces, link types,
+dimension-scale structure and the file's category tables, and not one
 array element: a strict read still opens a file that declares a
 trillion numbers it does not hold, and `Mestra.read(path;
 max_elements = 8)` opens a file whose smallest array has more.
+Category tables are read in full, because they are small by
+construction and the open needs them to name E10, E26 and E41 on the
+same files the read names them on (`docs/api-conventions.md` section
+7); a slot is never read, so the open and the read refuse the same
+file with the same rule.
 
 A semantic fault never stops a read. A missing unit, a split that
 leaks, a support id that does not match its cells: those are what a
@@ -421,9 +432,22 @@ making a file that breaks a rule on purpose.
 Files this package writes are conforming netCDF-4 files: fixed-length
 NUL-padded UTF-8 strings, dimension scales created and attached with
 the H5DS API, chunking along an unlimited `row`, no filter but gzip and
-shuffle, no fill value, and object time tracking off, so two runs of
-the writer produce the same bytes. `ncdump -h` on one of them lists
-`row`, `node`, `component_1`, `group_member` and the rest by name.
+shuffle, and no fill value. `ncdump -h` on one of them lists `row`,
+`node`, `component_1`, `group_member` and the rest by name.
+
+Two runs of the writer produce the same bytes. That takes two things,
+not one. Object time tracking is off on every dataset and group this
+package creates, and the file is created with the libver bounds
+`Mestra.WRITER_LIBVER`, which is `(:earliest, :latest)`. The second
+one is the whole of what decides which object header version the
+library writes, and libhdf5 2.0 changed its default from `earliest` to
+`v18`: a writer that takes that default writes version-2 object
+headers, whose root one records four timestamps, and a file that
+records when it was written is not byte reproducible. The layout also
+costs every other implementation: the Phase 3 report measured a C++
+validator taking 4.98 s on a thousand-key file in the newer layout
+against 0.68 s in this one. Files this package writes have the same
+object header version as the corpus's golden files, which is 1.
 
 
 Callables, and evaluating a file

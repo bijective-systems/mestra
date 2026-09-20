@@ -663,6 +663,228 @@ end
     @test isempty(Mestra.structural_diff(path, again))
 end
 
+@testset "the hostile subset is refused with the ids it breaks (section 30)" begin
+    # Section 30, of the hostile subset: "Opening the file for its
+    # metadata alone, and any operation that reads a slot, must refuse
+    # with the same ids rather than return something."  So for each of
+    # the fifteen: the validator reports at least the required ids,
+    # and both the metadata open and the read refuse naming them.
+    hostile = joinpath(REPO, "vectors", "hostile")
+    dirs = [d for d in sort(readdir(hostile))
+            if isfile(joinpath(hostile, d, "case.mes"))]
+    @test length(dirs) == 15
+    for d in dirs
+        p = joinpath(hostile, d, "case.mes")
+        want = String.(JSON3.read(read(joinpath(hostile, d,
+                                               "expected.json"),
+                                       String)).required_errors)
+        @test !isempty(want)
+        r = Mestra.validate(p)
+        @test issubset(Set(want), Set(r.errors))
+        for lazy in (true, false)
+            e = refusal(() -> Mestra.read(p; lazy = lazy))
+            @test e !== nothing
+            said = sprint(showerror, e)
+            for id in want
+                @test occursin(id, said)
+            end
+        end
+        # `strict = false` is the documented way past the refusal, for
+        # a file you are inspecting rather than trusting, and it still
+        # opens every one of them
+        @test Mestra.read(p; strict = false) isa Mestra.Dataset
+    end
+end
+
+@testset "a boolean attribute is 0 or 1 and nothing else (section 18)" begin
+    # Section 18: "value 0 for false and 1 for true.  No other value
+    # is legal."  E19 covers "a boolean that is not int8 or whose
+    # value is not 0 or 1".
+    src = case_file("mesh_two_rows")
+    path = joinpath(SCRATCH, "aligned_is_two.mes")
+    cp(src, path; force = true)
+    chmod(path, 0o644)
+    HDF5.h5open(path, "r+") do f
+        HDF5.delete_attribute(f, "aligned")
+        HDF5.write_attribute(f, "aligned", Int8(2))
+    end
+    r = Mestra.validate(path)
+    @test r.errors == ["E19"]
+    # E28 and E37 are both about the claim the file makes, and it has
+    # made none, so E19 says the whole of what is wrong
+    @test !("E28" in r.errors) && !("E37" in r.errors)
+    e = refusal(() -> Mestra.read(path))
+    @test e !== nothing && e.rule == "E19"
+    # and a non-strict read never gives 2 the meaning that would
+    # suppress the /row_support requirement of E28
+    ds = Mestra.read(path; strict = false)
+    @test any(f -> f.rule == "E19" && f.path == "/", ds.findings)
+    # a legal 0 and a legal 1 are still read as the booleans they are
+    for (byte, want) in ((Int8(0), false), (Int8(1), true))
+        q = joinpath(SCRATCH, "aligned_$(byte).mes")
+        cp(src, q; force = true)
+        chmod(q, 0o644)
+        HDF5.h5open(q, "r+") do f
+            HDF5.delete_attribute(f, "aligned")
+            HDF5.write_attribute(f, "aligned", byte)
+        end
+        @test Mestra.read(q; strict = false).aligned == want
+    end
+end
+
+@testset "a conforming file carrying /private is accepted (sections 12, 14, 29)" begin
+    # Section 14, of the byte-level rules of sections 18 to 25: "They
+    # are checked on the public objects only.  `/private` is not
+    # checked".  Section 29 forbids a reader to interpret it at all.
+    # A producer's private records are in whatever representation it
+    # chose, so everything below would be an error in the public tree
+    # and none of it may be one here.
+    src = case_file("mesh_two_rows")
+    path = joinpath(SCRATCH, "with_private.mes")
+    cp(src, path; force = true)
+    chmod(path, 0o644)
+    HDF5.h5open(path, "r+") do f
+        p = HDF5.create_group(f, "private")
+        # a string attribute stored the way section 18 forbids
+        HDF5.attributes(p)["note"] = "a producer's own record"
+        # a dimension scale of its own, and a dataset on it
+        p["epoch"] = Float32[0, 1, 2, 3]
+        HDF5.API.h5ds_set_scale(p["epoch"], "an epoch of our own")
+        p["residual"] = Float32[1, 2, 3, 4]
+        HDF5.API.h5ds_attach_scale(p["residual"], p["epoch"], 0)
+        # a float32 dataset with no scale on it at all, which is E20
+        # and E25 in the public tree
+        p["history"] = Float32[1 2 3; 4 5 6]
+        # and a group inside the group, with a dataset of its own
+        g = HDF5.create_group(p, "stamps")
+        g["when"] = Int32[1, 2, 3]
+    end
+    r = Mestra.validate(path)
+    @test r.errors == String[]
+    @test r.warnings == String[]
+    @test all(f -> !startswith(f.path, "/private"), r.findings)
+    # and a strict read opens it and keeps the group without reading
+    # anything in it as a slot
+    ds = Mestra.read(path)
+    @test ds.private !== nothing
+    @test isempty(ds.findings)
+    @test !haskey(ds.supports[1].node_arrays, "residual")
+    # the same file with the same objects in the public tree is
+    # rejected, so the test is about /private and not about the file
+    public = joinpath(SCRATCH, "with_public_junk.mes")
+    cp(src, public; force = true)
+    chmod(public, 0o644)
+    HDF5.h5open(public, "r+") do f
+        f["supports"]["s0"]["node_arrays"]["history"] =
+            Float32[1 2 3; 4 5 6]
+    end
+    bad = Mestra.validate(public)
+    @test "E25" in bad.errors
+    @test "E20" in bad.errors
+end
+
+"""The HDF5 object header version of every object in a file.
+
+Section 30 asks a golden file to be byte reproducible, and
+`vectors/README.md` rejects the newer object header layout for the
+corpus because its root header records four timestamps.  The version
+is not something section 30's structural equality compares, so it is
+read here directly."""
+function header_versions(path::AbstractString)
+    out = Dict{String,Int}()
+    HDF5.h5open(String(path), "r") do f
+        out["/"] = Int(HDF5.API.h5o_get_native_info(f).hdr.version)
+        Mestra.walk_objects(f) do p, obj
+            out[p] = Int(HDF5.API.h5o_get_native_info(obj).hdr.version)
+        end
+    end
+    return out
+end
+
+@testset "the writer writes the corpus's object header layout (finding 8)" begin
+    # libhdf5 2.0 changed the default low libver bound from
+    # `earliest` to `v18`, so a writer that takes the default writes
+    # version-2 object headers.  The root one then records when the
+    # file was written, which costs byte reproducibility, and every
+    # reader pays for the layout as well.  `Mestra.WRITER_LIBVER` is
+    # the one call that decides it.
+    for name in ("mesh_two_rows", "affine_with_rows", "scalars_only",
+                 "two_supports_unaligned", "labels_tables",
+                 "cascade_varying_geometry")
+        src = case_file(name)
+        dst = joinpath(SCRATCH, "hdr_" * name * ".mes")
+        Mestra.write(Mestra.read(src; lazy = false), dst)
+        @test isempty(Mestra.structural_diff(src, dst))
+        want = header_versions(src)
+        got = header_versions(dst)
+        @test sort(collect(keys(got))) == sort(collect(keys(want)))
+        @test got == want
+        @test all(==(1), values(got))
+    end
+    # and two writes a second apart are the same bytes, which is what
+    # `julia/README.md` claims and what section 30 asks of a generator
+    ds = Mestra.read(case_file("mesh_two_rows"); lazy = false)
+    a = joinpath(SCRATCH, "twice_a.mes")
+    b = joinpath(SCRATCH, "twice_b.mes")
+    Mestra.write(ds, a)
+    sleep(1.1)
+    Mestra.write(ds, b)
+    @test read(a) == read(b)
+end
+
+@testset "an evaluated file carries no /callables (conventions 7)" begin
+    # Evaluating turns every callable slot into a stored slot, so the
+    # result has no callable to keep: the group is absent, not present
+    # and empty, which is what the other three writers leave.
+    for name in ("affine_zero_rows", "affine_with_rows")
+        ds = Mestra.read(case_file(name))
+        out = Mestra.evaluate(ds, Dict("mach" => [0.5, 0.6],
+                                       "alpha" => [4.0, 2.0]))
+        @test isempty(out.callables)
+        path = joinpath(SCRATCH, "nocallables_" * name * ".mes")
+        Mestra.write(out, path)
+        @test Mestra.validate(path).errors == String[]
+        HDF5.h5open(path, "r") do f
+            @test !haskey(f, "callables")
+        end
+        back = Mestra.read(path)
+        @test isempty(back.callables)
+        @test !("callables" in back.container_groups)
+    end
+end
+
+@testset "the open and the read name the same rule (conventions 7)" begin
+    # An open reads attributes, dataspaces, link types and
+    # dimension-scale structure, and may read a category table in
+    # full; it never reads a slot.  The nine structural rules are
+    # decided from exactly that, so whether the caller asked for a
+    # lazy read or an eager one cannot change which rule refuses the
+    # file, on the corpus or on the hostile subset.
+    hostile = joinpath(REPO, "vectors", "hostile")
+    files = vcat([case_file(n) for n in case_names()],
+                 [joinpath(hostile, d, "case.mes")
+                  for d in sort(readdir(hostile))
+                  if isfile(joinpath(hostile, d, "case.mes"))])
+    for p in files
+        lazy = refusal(() -> Mestra.read(p))
+        eager = refusal(() -> Mestra.read(p; lazy = false))
+        @test (lazy === nothing) == (eager === nothing)
+        lazy === nothing && continue
+        @test lazy.rule == eager.rule
+        @test lazy.path == eager.path
+    end
+    # a category table is read in full by the open, so an entry that
+    # is not valid UTF-8 is E26 from the open and not only from the
+    # read (section 25: a reader that cannot recover the bytes of a
+    # string must say so rather than return something else)
+    bad = joinpath(hostile, "string_invalid_utf8", "case.mes")
+    e = refusal(() -> Mestra.read(bad))
+    @test e !== nothing && e.rule == "E26"
+    ds = Mestra.read(bad; strict = false)
+    @test any(f -> f.rule == "E26", ds.findings)
+    @test !haskey(ds.categories, "region")
+end
+
 @testset "gzip and shuffle, the two portable filters (section 23)" begin
     ds = Mestra.Dataset(writer = "mestra.jl test 0",
                         created = "2026-09-19T00:00:00Z")
