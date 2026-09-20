@@ -267,7 +267,7 @@ The public API
                add_mesh_support!, add_axis_support!, add_none_support!,
                add_node_array!, add_cell_array!, add_callable!,
                add_callable_slot!, add_callable_scalar!, set_callable!,
-               set_row_support!
+               set_row_support!, set_notes!, set_private!
     Callables  Callable, to_dict, from_dict, register_callable!,
                callable, build_callable, Affine, affine, evaluate
     Codec      read_dict, write_dict
