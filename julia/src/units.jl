@@ -14,7 +14,18 @@
 mutable struct UnitsCursor
     s::String
     i::Int
+    depth::Int
 end
+
+UnitsCursor(s::AbstractString, i::Int) = UnitsCursor(String(s), i, 0)
+
+"""How deep a units string may nest its parentheses.  A units string
+comes out of a file, so its depth is the file's choice, and the parser
+below is recursive."""
+const MAX_UNITS_DEPTH = 32
+
+"""The longest units string this parser will look at."""
+const MAX_UNITS_BYTES = 4096
 
 peek(c::UnitsCursor) = c.i <= ncodeunits(c.s) ? c.s[c.i] : '\0'
 
@@ -38,6 +49,7 @@ True when the string has the shape of a UDUNITS expression.
 """
 function parse_units(s::AbstractString)
     isempty(s) && return false
+    ncodeunits(s) > MAX_UNITS_BYTES && return false
     c = UnitsCursor(String(s), 1)
     parse_expr!(c) || return false
     skipspace!(c)
@@ -65,8 +77,12 @@ function parse_term!(c::UnitsCursor)
     skipspace!(c)
     ch = peek(c)
     if ch == '('
+        c.depth >= MAX_UNITS_DEPTH && return false
+        c.depth += 1
         advance!(c)
-        parse_expr!(c) || return false
+        ok = parse_expr!(c)
+        c.depth -= 1
+        ok || return false
         skipspace!(c)
         peek(c) == ')' || return false
         advance!(c)

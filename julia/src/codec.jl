@@ -40,27 +40,66 @@ Reconstruct a dictionary from an HDF5 group by the codec of sections
 names of section 18; at the top level `type` and `repr` are the
 callable's own attributes and are skipped too.
 """
-function read_dict(g::HDF5.Group; toplevel::Bool = false)
+function read_dict(ds::Dataset, g::HDF5.Group, path::AbstractString;
+                   toplevel::Bool = false, depth::Int = 0,
+                   max_elements::Integer = DEFAULT_MAX_ELEMENTS)
     out = Dict{String,Any}()
-    for name in keys(HDF5.attributes(g))
+    if depth >= MAX_DEPTH
+        note!(ds, "E41", path,
+              "a dictionary nested deeper than $(MAX_DEPTH); this reader " *
+              "stops here rather than following a file's own depth")
+        return out
+    end
+    for name in attr_names(g)
         name in MACHINERY_ATTRS && continue
         reserved(name) && continue
         toplevel && (name == "type" || name == "repr") && continue
         a = read_raw_attr(g, name)
-        out[name] = decode_dict_attr(a)
+        if !a.readable || !a.scalar
+            note!(ds, "E41", "$(path)@$(name)",
+                  "an attribute this reader would not read: " *
+                  (a.scalar ? "unreadable" : "not a scalar"))
+            continue
+        end
+        try
+            out[name] = decode_dict_attr(a)
+        catch e
+            note!(ds, rule_of(e), "$(path)@$(name)", message_of(e))
+        end
     end
-    for name in keys(g)
+    for (name, kind) in child_links(g)
         reserved(name) && continue
-        obj = g[name]
+        if kind !== :hard
+            note!(ds, "E40", "$(path)/$(name)",
+                  "a $(kind) link; this reader follows hard links only")
+            continue
+        end
+        obj = hard_child(g, name)
+        obj === nothing && continue
         if obj isa HDF5.Group
-            out[name] = read_dict(obj)
+            out[name] = read_dict(ds, obj, "$(path)/$(name)";
+                                  depth = depth + 1,
+                                  max_elements = max_elements)
         else
             is_scale(obj) && continue
-            out[name] = read_dict_dataset(obj)
+            try
+                out[name] = read_dict_dataset(obj;
+                                              max_elements = max_elements)
+            catch e
+                note!(ds, rule_of(e), "$(path)/$(name)", message_of(e))
+            end
         end
     end
     return out
 end
+
+"""
+    read_dict(group) -> Dict{String,Any}
+
+The same, for a group in hand and with nothing to report findings to.
+"""
+read_dict(g::HDF5.Group; kwargs...) =
+    read_dict(Dataset(), g, try HDF5.name(g) catch; "?" end; kwargs...)
 
 function decode_dict_attr(a::RawAttr)
     if a.ti.class === :string
@@ -77,8 +116,9 @@ function decode_dict_attr(a::RawAttr)
     throw(MestraError("E32", "an attribute of a type the codec cannot hold"))
 end
 
-function read_dict_dataset(d::HDF5.Dataset)
-    ti, raw, _ = read_raw_dataset(d)
+function read_dict_dataset(d::HDF5.Dataset;
+                           max_elements::Integer = DEFAULT_MAX_ELEMENTS)
+    ti, raw, _ = read_raw_dataset(d; max_elements = max_elements)
     cdims, _ = disk_shape(d)
     if ti.class === :string
         ti.vlen && throw(MestraError("E19",
