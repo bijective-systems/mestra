@@ -15,6 +15,12 @@ ones the file's own dimension scales give it, which is the check that
 catches a reader taking a dimension name from the NAME attribute
 instead of the link name.
 
+The hostile subset of section 30 is compared by bytes alone. Nothing
+walks those files and nothing opens them with a netCDF reader: they
+are malformed on purpose, one of them holds thirty thousand nested
+groups, and a tool that walked them would be doing the very thing
+section 29 tells a reader not to do.
+
 One line per case; the exit status is non-zero if anything differs
 or fails to open.
 """
@@ -302,6 +308,62 @@ def main(argv):
             else:
                 print("%-28s ok    %s" % (name, how))
 
+        hostile_dir = os.path.join(root, "hostile")
+        fresh_hostile = os.path.join(tmp, "hostile")
+        have = sorted(os.listdir(hostile_dir)) if os.path.isdir(
+            hostile_dir) else []
+        have = [c for c in have
+                if os.path.isdir(os.path.join(hostile_dir, c))]
+        for name in sorted(set(have) - set(generate.HOSTILE)):
+            print("%-28s FAIL  committed but not produced by the "
+                  "generator" % name)
+            failures += 1
+        for name in sorted(generate.HOSTILE):
+            notes = []
+            a = os.path.join(hostile_dir, name, "case.mes")
+            b = os.path.join(fresh_hostile, name, "case.mes")
+            aj = os.path.join(hostile_dir, name, "expected.json")
+            bj = os.path.join(fresh_hostile, name, "expected.json")
+            if not os.path.exists(a):
+                print("%-28s FAIL  missing from the corpus" % name)
+                failures += 1
+                continue
+            with open(aj, "rb") as fh:
+                ja = fh.read()
+            with open(bj, "rb") as fh:
+                jb = fh.read()
+            if ja != jb:
+                notes.append("expected.json differs")
+            with open(a, "rb") as fh:
+                ba = fh.read()
+            with open(b, "rb") as fh:
+                bb = fh.read()
+            if ba == bb:
+                how = "bytes equal (%d kB)" % (len(ba) // 1024)
+            else:
+                how = "bytes differ"
+                notes.append(
+                    "%d of %d bytes differ; these files are compared "
+                    "by bytes alone, because walking them is what "
+                    "section 29 forbids"
+                    % (sum(1 for x, y in zip(ba, bb) if x != y),
+                       max(len(ba), len(bb))))
+            exp = json.loads(ja.decode("utf-8"))
+            for field, want in (("allow_extra", True),
+                                ("timeout_seconds", 10)):
+                if exp.get(field) != want:
+                    notes.append("%s is %r, section 30 says %r"
+                                 % (field, exp.get(field), want))
+            if not exp.get("required_errors"):
+                notes.append("required_errors is empty")
+            if notes:
+                failures += 1
+                print("%-28s FAIL  %s" % ("hostile/" + name, how))
+                for note in notes:
+                    print("%-28s       %s" % ("", note))
+            else:
+                print("%-28s ok    %s" % ("hostile/" + name, how))
+
         mf = os.path.join(root, "manifest.json")
         with open(mf, "rb") as fh:
             ma = fh.read()
@@ -316,7 +378,8 @@ def main(argv):
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-    print("%d case(s), %d failure(s)" % (len(generate.CASES), failures))
+    print("%d case(s), %d hostile file(s), %d failure(s)"
+          % (len(generate.CASES), len(generate.HOSTILE), failures))
     return 1 if failures else 0
 
 
