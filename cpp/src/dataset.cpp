@@ -37,6 +37,28 @@ void check_builder_name(const std::string& path, const std::string& name) {
   }
 }
 
+// E11: a scalar carries units, and "1" is how this format spells a
+// dimensionless quantity, so an empty string is a caller who meant to
+// say something and did not.  Refused here rather than at write time,
+// because conventions section 1 asks a builder to refuse at build
+// time whatever the validator would refuse at read time, and section 6
+// asks it to say which argument to change.
+void check_builder_units(const std::string& path, const std::string& units) {
+  if (units.empty()) {
+    refuse("E11", path,
+           "a scalar carries units; pass units (\"1\" for a "
+           "dimensionless one)");
+  }
+}
+
+const ArraySlot* slot_named(const std::vector<ArraySlot>& v,
+                            const std::string& wanted) {
+  for (const ArraySlot& a : v) {
+    if (a.name == wanted) return &a;
+  }
+  return nullptr;
+}
+
 void put_i64_le(Sha256& h, std::int64_t v) {
   unsigned char bytes[8];
   std::uint64_t u = static_cast<std::uint64_t>(v);
@@ -106,6 +128,24 @@ std::string support_id_digest(
     for (const double v : *axis_coordinates) put_f64_le(h, v);
   }
   return h.hex();
+}
+
+const ArraySlot* Support::node_array(const std::string& wanted) const {
+  return slot_named(node_arrays, wanted);
+}
+
+const ArraySlot* Support::cell_array(const std::string& wanted) const {
+  return slot_named(cell_arrays, wanted);
+}
+
+ArraySlot* Support::node_array(const std::string& wanted) {
+  return const_cast<ArraySlot*>(
+      static_cast<const Support*>(this)->node_array(wanted));
+}
+
+ArraySlot* Support::cell_array(const std::string& wanted) {
+  return const_cast<ArraySlot*>(
+      static_cast<const Support*>(this)->cell_array(wanted));
 }
 
 std::string Support::computed_support_id() const {
@@ -303,6 +343,7 @@ Scalar& Dataset::add_scalar(const std::string& name,
                             std::vector<double> values,
                             const std::string& units) {
   check_builder_name("/scalars/" + name, name);
+  check_builder_units("/scalars/" + name, units);
   Scalar s;
   s.name = name;
   s.units = units;
@@ -779,6 +820,7 @@ Scalar& add_callable_scalar(Dataset& d, const std::string& name,
                             const std::string& callable_id,
                             const std::string& output) {
   check_builder_name("/scalars/" + name, name);
+  check_builder_units("/scalars/" + name, units);
   Scalar s;
   s.name = name;
   s.units = units;

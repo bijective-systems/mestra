@@ -1082,13 +1082,15 @@ void Validator::keys() {
         sides[unit->i64[i]].insert(split_key->i64[i]);
       }
       // Name the leaked unit and then say why it matters, which is
-      // what turns a warning into something a user acts on
-      // (conventions section 6, modelled on Python's W01).
+      // what turns a warning into something a user acts on.
+      // Conventions section 6 makes Python's W01 the model message for
+      // every language, so the entry is named bare and not quoted; a
+      // unit with no name in the table falls back to its id.
       const auto table = category_tables_.find(unit->category);
       auto name_of = [&table, this](std::int64_t id) {
         if (table != category_tables_.end() && id >= 0 &&
             static_cast<std::size_t>(id) < table->second.size()) {
-          return "\"" + table->second[static_cast<std::size_t>(id)] + "\"";
+          return table->second[static_cast<std::size_t>(id)];
         }
         return internal::format_i64(id);
       };
