@@ -375,7 +375,45 @@ classdef ConventionsTest < matlab.unittest.TestCase
                     sprintf('%s: %s', name{1}, strjoin(r.errors, ',')));
                 testCase.verifyEmpty(r.warnings, ...
                     sprintf('%s: %s', name{1}, strjoin(r.warnings, ',')));
+                testCase.verifyFalse( ...
+                    ConventionsTest.hasRootGroup(out, 'callables'), ...
+                    sprintf(['%s: an evaluated file has no /callables ' ...
+                             'group at all'], name{1}));
             end
+        end
+
+        function anEvaluatedFileHasNoCallablesGroup(testCase)
+        %anEvaluatedFileHasNoCallablesGroup  Section 7: evaluating
+        %   turns every callable slot into a stored slot, so the
+        %   result has no callable to keep and `/callables` is absent
+        %   from the file, not present and empty.  Finding 7 of the
+        %   Phase 3 report is four implementations leaving three
+        %   different things there; this is the one they settled on.
+            file = fullfile(corpusRoot(), 'callable_two_slots', 'case.mes');
+            e = CorpusTest.expected('callable_two_slots');
+            entry = e.evaluation;
+            if iscell(entry), entry = entry{1}; else, entry = entry(1); end
+            d = mestra.read(file);
+            testCase.verifyNotEmpty(d.callables, ...
+                'the file it came from has a callable');
+            evaluated = mestra.evaluate(d, CorpusTest.keysTable(entry.keys));
+            testCase.verifyEmpty(evaluated.callables);
+            testCase.verifyFalse(ismember('callables', ...
+                                          evaluated.groupsPresent), ...
+                'the group the source carried does not come with it');
+            for slot = evaluated.slots()
+                testCase.verifyEqual(slot.slot.source, 'data', ...
+                    'every callable slot now holds data');
+            end
+            out = [tempname() '.mes'];
+            cleanup = onCleanup( ...
+                @() ConventionsTest.removeIfPresent(out)); %#ok<NASGU>
+            mestra.write(evaluated, out);
+            testCase.verifyFalse( ...
+                ConventionsTest.hasRootGroup(out, 'callables'));
+            % And the file it came from still has its callable: the
+            % dataset evaluate was given is not changed.
+            testCase.verifyNotEmpty(d.callables);
         end
 
         function aStrictReadRefusesAStructuralFault(testCase)
@@ -417,6 +455,15 @@ classdef ConventionsTest < matlab.unittest.TestCase
         %   rules of section 2 of docs/api-conventions.md are decided
         %   from attributes and dataspaces, so the open reaches the
         %   same verdict without reading an array.
+        %
+        %   Section 7 names the one place the two part company: an
+        %   open never reads a dataset inside a callable's dictionary,
+        %   so a dictionary holding a dataset above the element cap is
+        %   E41 from the read and nothing from the open.  No file in
+        %   any corpus is one, so the last file below is built here,
+        %   and the exemption is checked rather than assumed.  The
+        %   open still walks the dictionary, which is why a dictionary
+        %   nested past the cap is still E41 from both.
             files = {};
             for name = CorpusTest.allCases()
                 files{end + 1} = CorpusTest.caseFile(name{1}); %#ok<AGROW>
@@ -427,6 +474,14 @@ classdef ConventionsTest < matlab.unittest.TestCase
             for name = HostileTest.allCases()
                 files{end + 1} = HostileTest.caseFile(name{1}); %#ok<AGROW>
             end
+            oversized = [tempname() '.mes'];
+            cleanup = onCleanup( ...
+                @() ConventionsTest.removeIfPresent(oversized)); %#ok<NASGU>
+            ConventionsTest.putOversizedDictionaryDataset( ...
+                fullfile(corpusRoot(), 'affine_zero_rows', 'case.mes'), ...
+                oversized);
+            files{end + 1} = oversized;
+            exempted = 0;
             for i = 1:numel(files)
                 file = files{i};
                 opened = ConventionsTest.identifierOf(@() mestra.open(file));
@@ -434,12 +489,28 @@ classdef ConventionsTest < matlab.unittest.TestCase
                 if isempty(opened) && strcmp(read, 'mestra:E41')
                     % Section 29 puts the element cap on an eager read
                     % alone, so an open that returns here is right.
+                    exempted = exempted + 1;
                     continue
                 end
                 testCase.verifyEqual(opened, read, sprintf( ...
                     '%s: the open says "%s" and the read says "%s"', ...
                     file, opened, read));
             end
+            testCase.verifyEqual(exempted, 1, ...
+                ['the built file is the only one the element cap parts, ' ...
+                 'and it does']);
+
+            % The open reads no dictionary and says so by leaving it
+            % empty, rather than handing back one with its arrays
+            % missing.  The read has it.
+            file = fullfile(corpusRoot(), 'callable_two_slots', 'case.mes');
+            testCase.verifyEqual( ...
+                mestra.open(file).callable('m2').dict.Count, uint64(0));
+            testCase.verifyGreaterThan( ...
+                mestra.read(file).callable('m2').dict.Count, 0);
+            testCase.verifyEqual(mestra.open(file).callable('m2').type, ...
+                mestra.read(file).callable('m2').type, ...
+                'and names it from its attributes either way');
         end
 
         function aSemanticFaultNeverStopsARead(testCase)
@@ -638,6 +709,36 @@ classdef ConventionsTest < matlab.unittest.TestCase
     end
 
     methods (Static)
+
+        function tf = hasRootGroup(path, name)
+        %hasRootGroup  True when the file carries that root group.
+            listing = h5info(path, '/');
+            tf = false;
+            for i = 1:numel(listing.Groups)
+                if strcmp(listing.Groups(i).Name, ['/' name])
+                    tf = true;
+                    return
+                end
+            end
+        end
+
+        function putOversizedDictionaryDataset(src, dst)
+        %putOversizedDictionaryDataset  A copy of SRC whose callable's
+        %   dictionary holds one dataset above the element cap,
+        %   declared and never written, so the file stays small.
+            copyfile(src, dst);
+            fileattrib(dst, '+w');
+            fid = H5F.open(dst, 'H5F_ACC_RDWR', 'H5P_DEFAULT');
+            closer = onCleanup(@() H5F.close(fid)); %#ok<NASGU>
+            listing = h5info(dst, '/callables');
+            gid = H5G.open(fid, listing.Groups(1).Name);
+            n = mestra.limits().maxElements + 1000;
+            did = mestra.internal.H5.createDataset(gid, 'oversized', ...
+                                                   'float64', n, n, 1024);
+            H5D.close(did);
+            H5G.close(gid);
+        end
+
         function id = identifierOf(thunk)
         %identifierOf  The identifier a call refused with, or ''.
             id = '';

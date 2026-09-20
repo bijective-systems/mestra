@@ -25,6 +25,9 @@ function previous = limits(varargin)
 %   Going past one raises mestra:E41 in MESTRA.READ, MESTRA.OPEN and
 %   the dataset's readRows method, and is the error E41 in
 %   MESTRA.VALIDATE, which carries on with the rest of the file.
+%   maxElements is the exception: it is the cap on one eager read, so
+%   MESTRA.OPEN meets it only on a category table, which it reads, and
+%   not on a slot or a dictionary dataset, which it does not.
 %
 %   Example
 %
