@@ -1684,4 +1684,102 @@ end
     @test bitequal(out["cl"][1], 1.45)
 end
 
+# -------------------------------------------------- docs/examples
+
+"""The lines of a README's "Expected output" block, which is the whole
+of what its example prints."""
+function expected_output(readme::AbstractString)
+    lines = split(Base.read(readme, String), '\n')
+    at = findfirst(i -> strip(lines[i]) == "Expected output" &&
+                        startswith(lines[i + 1], "---"),
+                   1:(length(lines) - 1))
+    at === nothing && error("$(readme) has no `Expected output` section")
+    out = String[]
+    for line in lines[(at + 2):end]
+        if isempty(strip(line))
+            isempty(out) && continue
+            break
+        end
+        startswith(line, "    ") || break
+        push!(out, String(rstrip(line[5:end])))
+    end
+    isempty(out) && error("$(readme): the `Expected output` section is empty")
+    return out
+end
+
+# Every number these examples print matches the README's block byte for
+# byte.  These lines cannot, because the block is Python's output and
+# Julia spells the same value differently: `true` for `True`, a symbol
+# for the name of an axis, `["a"]` for `['a']`, `String[]` for an empty
+# list of strings, and a refusal that names the path as well as the
+# rule.  The README's line is the key and this language's is the value,
+# so that every difference between the two is in one place.
+julia_spelling = Dict(
+    "aligned: True nodes: 6 cells: 2" =>
+        "aligned: true nodes: 6 cells: 2",
+    "valid: True" => "valid: true",
+    "2 rows, aligned: True" => "2 rows, aligned: true",
+    "ok: True" => "ok: true",
+    "pressure ('row', 'node', 'component') Pa" =>
+        "pressure (:row, :node, :component) Pa",
+    "pressure ('row', 'node', 'component') Pa row" =>
+        "pressure (:row, :node, :component) Pa row",
+    "pressure ('row', 'draw', 'node', 'component') draw" =>
+        "pressure (:row, :draw, :node, :component) draw",
+    "keys: [('mach', 'condition'), ('member', 'group')]" =>
+        "keys: [(\"mach\", :condition), (\"member\", :group)]",
+    "scalars: ['cl']" => "scalars: [\"cl\"]",
+    "  node arrays: ['pressure']" => "  node arrays: [\"pressure\"]",
+    "  cell arrays: ['region']" => "  cell arrays: [\"region\"]",
+    "region is a label over ['inlet', 'outlet']" =>
+        "region is a label over [\"inlet\", \"outlet\"]",
+    "rows: 0 callables: ['m1']" => "rows: 0 callables: [\"m1\"]",
+    "the split in the file leaks: ['wing_b']" =>
+        "the split in the file leaks: [\"wing_b\"]",
+    "train rows [0, 1, 2, 3] members ['wing_a', 'wing_b']" =>
+        "train rows [0, 1, 2, 3] members [\"wing_a\", \"wing_b\"]",
+    "test rows [4, 5] members ['wing_c']" =>
+        "test rows [4, 5] members [\"wing_c\"]",
+    "errors: [] warnings: ['W01']" =>
+        "errors: String[] warnings: [\"W01\"]",
+    "pressure: [0.5 1.1 3.7 4.3 6.9 7.5]" =>
+        "pressure: [0.5, 1.1, 3.7, 4.3, 6.9, 7.5]",
+    "draw 0 of row 0: [100. 101. 102. 103. 104. 105.]" =>
+        "draw 0 of row 0: [100.0, 101.0, 102.0, 103.0, 104.0, 105.0]",
+    "refused: E11: cl: a scalar carries units; pass units= (\"1\" for a " *
+    "dimensionless one)" =>
+        "refused: mestra: E11 /scalars/cl: a scalar carries units; pass " *
+        "units = \"1\" for a dimensionless one")
+
+@testset "the examples of docs/examples print what their READMEs say" begin
+    examples = joinpath(REPO, "docs", "examples")
+    dirs = sort([joinpath(examples, d) for d in readdir(examples)
+                 if isfile(joinpath(examples, d, "julia.jl"))])
+    @test length(dirs) == 7
+    # no line of the table above is stale: every one of them is a line
+    # some README still asks for
+    asked = Set(l for dir in dirs
+                for l in expected_output(joinpath(dir, "README.md")))
+    @test isempty(setdiff(Base.keys(julia_spelling), asked))
+    for dir in dirs
+        @testset "$(basename(dir))" begin
+            script = joinpath(dir, "julia.jl")
+            body = [l for l in eachline(script)
+                    if !isempty(strip(l)) && !startswith(strip(l), "#")]
+            @test length(body) < 30
+            # Each one runs in a directory of its own, because several
+            # write a file into the working directory.
+            wd = mktempdir()
+            log = joinpath(wd, "printed")
+            cmd = `$(Base.julia_cmd()) --startup-file=no
+                   --project=$(Base.active_project()) $script`
+            run(pipeline(setenv(cmd; dir = wd); stdout = log))
+            printed = [String(rstrip(l)) for l in eachline(log)]
+            want = [get(julia_spelling, l, l)
+                    for l in expected_output(joinpath(dir, "README.md"))]
+            @test printed == want
+        end
+    end
+end
+
 end # testset Mestra
