@@ -21,7 +21,7 @@ member = Mestra.values(d, d.keys["member"])
 names = d.categories["member"].entries
 println("unit of generalisation: ", d.generalisation_group)
 println("the split in the file leaks: ",
-        sort([names[u + 1] for u in keys(Mestra.split_leaks(d))]))
+        sort(String.(collect(keys(Mestra.split_leaks(d))))))
 parts = Mestra.grouped_split(d, ["train" => 0.67, "test" => 0.33]; seed = 0)
 for part in ("train", "test")
     rows = parts[part]

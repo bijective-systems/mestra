@@ -10,6 +10,17 @@ from mestra.cli import main
 from tests import corpus
 
 
+def test_version(capsys):
+    import pytest
+
+    import mestra
+    with pytest.raises(SystemExit) as left:
+        main(["--version"])
+    assert left.value.code == 0
+    assert capsys.readouterr().out == "mestra %s (format %s)\n" % (
+        mestra.__version__, mestra.FORMAT)
+
+
 def test_validate_a_clean_file(capsys):
     status = main(["validate", corpus.case_path("mesh_two_rows")])
     out = capsys.readouterr().out

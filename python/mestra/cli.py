@@ -25,6 +25,7 @@ import sys
 from collections.abc import Sequence
 from typing import Any
 
+from . import FORMAT, __version__
 from .errors import MestraError
 from .model import Dataset
 from .reader import read
@@ -60,6 +61,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         prog="mestra", description="Read and check mestra files.",
         epilog=LIBRARY,
         formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--version", action="version",
+                        version="mestra %s (format %s)"
+                        % (__version__, FORMAT))
     commands = parser.add_subparsers(dest="command")
     check = commands.add_parser(
         "validate", help="report every rule of section 14 a file "

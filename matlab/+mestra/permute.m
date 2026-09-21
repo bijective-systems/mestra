@@ -17,7 +17,9 @@ function out = permute(array, names, wanted)
 %   one, so a two-dimensional field can be asked for with a component
 %   axis.  A name in NAMES that WANTED leaves out is dropped when its
 %   length is one and is an error otherwise, so nothing is silently
-%   folded away.
+%   folded away.  'instance' in WANTED means the group axis, the one
+%   name in NAMES that begins with 'group:', as it does in the corpus
+%   and in the builders' Dims.
 %
 %   Example
 %
@@ -34,6 +36,7 @@ function out = permute(array, names, wanted)
     if isstring(wanted), wanted = cellstr(wanted); end
     names = reshape(names, 1, []);
     wanted = reshape(wanted, 1, []);
+    wanted = instanceAlias(names, wanted);
 
     nd = max(numel(names), 1);
     sz = size(array);
@@ -90,4 +93,18 @@ function out = permute(array, names, wanted)
     end
     permuted = builtin('permute', array, order);
     out = reshape(permuted, outSize);
+end
+
+function wanted = instanceAlias(names, wanted)
+%instanceAlias  'instance' in WANTED stands for the group axis.
+    at = find(strcmp(wanted, 'instance'));
+    if isempty(at), return, end
+    groups = names(strncmp(names, 'group:', 6));
+    if numel(groups) ~= 1
+        error('mestra:dims', ...
+              ['an axis called "instance" means the group axis, and ' ...
+               'this array has %d axes named "group:<key>"; name the ' ...
+               'axis as the array does'], numel(groups));
+    end
+    wanted(at) = groups(1);
 end

@@ -1,10 +1,11 @@
-mestra: specification, draft version 0
-======================================
+mestra: specification, version 0
+================================
 
-Date: 2026-09-19, revised 2026-09-21. Status: draft for discussion.
-Normative language ("must", "may") is used so that the rules are
-unambiguous, but nothing in this draft is frozen. The spec text is
-CC-BY-4.0.
+Date: 2026-09-19, revised 2026-09-21. Status: version 0 is what the
+0.1.0 implementations read and write, and the root attribute `format`
+names it as "mestra/0". From here a change within version 0 follows
+section 28, and a change that would make a version-0 file mean
+something else is version 1. The spec text is CC-BY-4.0.
 
 This document defines a data model and its serialisation. It does not
 define a mesh format for solvers, a model format for fitted surrogate

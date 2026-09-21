@@ -1562,7 +1562,11 @@ end
 
     @test isempty(Mestra.split_leaks(sc))
     leaky = Mestra.read(case_file("warn_w01"); lazy = false)
-    @test !isempty(Mestra.split_leaks(leaky))
+    leaks = Mestra.split_leaks(leaky)
+    # conventions section 4: units by name, parts by name, sorted
+    @test Set(keys(leaks)) == Set(["wing_a", "wing_b"])
+    @test all(v == sort(v) && length(v) > 1 for v in Base.values(leaks))
+    @test all(x isa String for v in Base.values(leaks) for x in v)
     # J10: an empty answer means no leak and nothing else
     e = refusal(() -> Mestra.split_leaks(lt))
     @test e !== nothing
