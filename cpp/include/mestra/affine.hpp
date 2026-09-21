@@ -9,6 +9,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "mestra/callable.hpp"
@@ -26,6 +27,14 @@ struct AffineOutput {
   std::optional<std::vector<double>> uncertainty;   // (n_out_flat)
   std::optional<double> level;
   std::optional<std::string> method;
+
+  AffineOutput() = default;
+  // The three things every output has, so that `{A, b, shape}` still
+  // spells one; the band is set afterwards when there is one.
+  AffineOutput(std::vector<double> matrix, std::vector<double> offset,
+               std::vector<std::int64_t> dims)
+      : A(std::move(matrix)), b(std::move(offset)), shape(std::move(dims)) {}
+
   std::size_t out_flat() const;      // product of `shape`, 1 when empty
   bool has_band() const { return uncertainty.has_value(); }
 };
