@@ -350,14 +350,32 @@ def test_a_grouped_split_refuses_a_negative_fraction():
 
 
 def test_a_leaking_split_is_named():
+    """Conventions section 4: units by name, parts by name."""
     with mestra.read(corpus.case_path("warn_w01")) as ds:
         leaks = post.split_leaks(ds)
+        parts = ds.categories[ds.keys["split"].category].entries
     assert set(leaks) == {"wing_a", "wing_b"}
+    for sides in leaks.values():
+        assert len(sides) > 1 and sides == sorted(sides)
+        assert set(sides) <= set(parts)
 
 
 def test_a_split_that_does_not_leak():
     with mestra.read(corpus.case_path("scalars_only")) as ds:
         assert post.split_leaks(ds) == {}
+
+
+def test_split_leaks_refuses_a_file_it_cannot_answer_for():
+    """An empty answer means no leak and nothing else."""
+    with mestra.read(corpus.case_path("family_static")) as ds:
+        with pytest.raises(MestraError) as caught:      # no split key
+            post.split_leaks(ds)
+        assert caught.value.rule == "E03"
+    with mestra.read(corpus.case_path("mesh_two_rows")) as ds:
+        ds.generalisation_group = None                    # no unit
+        with pytest.raises(MestraError) as caught:
+            post.split_leaks(ds)
+        assert caught.value.rule == "E39"
 
 
 def test_post_processing_runs_on_the_corpus():

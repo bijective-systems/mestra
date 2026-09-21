@@ -11,6 +11,7 @@ __pycache__/
 cpp/build*/
 build/
 *.egg-info/
+dist/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

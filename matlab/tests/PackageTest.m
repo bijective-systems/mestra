@@ -128,6 +128,14 @@ classdef PackageTest < matlab.unittest.TestCase
             oneComponent = reshape(1:12, [1 3 4]);
             d = mestra.permute(oneComponent, names, {'row', 'node'});
             testCase.verifyEqual(size(d), [4 3]);
+            % 'instance' stands for the one group axis, as in Dims
+            grouped = {'component', 'node', 'group:member'};
+            e = mestra.permute(oneComponent, grouped, {'instance', 'node'});
+            testCase.verifyEqual(size(e), [4 3]);
+            testCase.verifyEqual(e(3, 2), oneComponent(1, 2, 3));
+            testCase.verifyError(@() mestra.permute(a, names, ...
+                                                   {'instance', 'node'}), ...
+                                 'mestra:dims');
             testCase.verifyError(@() mestra.permute(a, names, {'row'}), ...
                 'mestra:dims');
         end

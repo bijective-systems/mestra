@@ -573,9 +573,8 @@ function split_leaks(ds::Dataset)
     out = Dict{Any,Vector{String}}()
     gv = values(ds, ds.keys[g])
     sv = values(ds, ds.keys[skey])
-    table = ds.keys[skey].category
-    names = table !== nothing && haskey(ds.categories, table) ?
-            ds.categories[table].entries : String[]
+    names = category_entries(ds, ds.keys[skey])
+    unames = category_entries(ds, ds.keys[g])
     bag = Dict{Any,Set{String}}()
     for (i, u) in pairs(gv)
         i <= length(sv) || break
@@ -583,8 +582,20 @@ function split_leaks(ds::Dataset)
         label = 0 <= s < length(names) ? names[s + 1] : string(s)
         push!(get!(bag, u, Set{String}()), label)
     end
+    # Conventions section 4: the unit by its category name, the parts
+    # by theirs, both as the validator's W01 message spells them.
     for (u, parts) in bag
-        length(parts) > 1 && (out[u] = sort(collect(parts)))
+        length(parts) > 1 || continue
+        unit = u isa Integer && 0 <= u < length(unames) ? unames[u + 1] : u
+        out[unit] = sort(collect(parts))
     end
     return out
+end
+
+"""A key's category table entries, or none when it has no table."""
+function category_entries(ds::Dataset, k::KeyColumn)
+    table = k.category
+    table !== nothing && haskey(ds.categories, table) ||
+        return String[]
+    return ds.categories[table].entries
 end

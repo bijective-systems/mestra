@@ -93,8 +93,13 @@ node, trajectory)`. `grouped_split(dataset, fractions, seed)` assigns
 whole units of generalisation to parts, never returns an empty part
 when there are at least as many units as parts, takes a seed with a
 documented default, and refuses without a declared unit of
-generalisation. A language without the helpers says so in its README
-under a heading of its own.
+generalisation. `split_leaks(dataset)` names the units of
+generalisation that lie on both sides of a split: the unit by its
+category name, each with the names of the split parts it lies in,
+sorted; it refuses a file with no unit of generalisation or no split
+key, because an empty answer means no leak and nothing else. A
+language without the helpers says so in its README under a heading of
+its own.
 
 
 5. Validator output

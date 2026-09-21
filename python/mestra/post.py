@@ -552,30 +552,53 @@ def _trajectories(labels: np.ndarray, table: Any) -> list[str]:
 # -------------------------------------------------------------- splitting
 
 def split_leaks(dataset: Dataset,
-                split: str | None = None) -> dict[Any, list[int]]:
+                split: str | None = None) -> dict[Any, list[Any]]:
     """The generalisation units a split places on both sides (W01).
 
-    An empty result means the split is a generalisation test.
+    Keyed by the unit's category name (its integer when the unit key
+    has no table), each with the names of the split parts it lies in,
+    sorted. An empty result means the split is a generalisation test;
+    a file with no unit of generalisation, or no split key, is
+    refused rather than answered with an empty result that would say
+    the same thing.
     """
     unit = dataset.generalisation_group
     if not unit or unit not in dataset.keys:
-        return {}
-    keys = [dataset.keys[split]] if split else \
-        dataset.keys_of_role("split")
+        raise MestraError(
+            "E39", "this file names no unit of generalisation, so "
+            "nothing can leak across its split; call "
+            "set_generalisation_group first", "/")
+    if split is not None:
+        if split not in dataset.keys:
+            raise MestraError(
+                "", "no key called %r; this file has %s"
+                % (split, _listed(dataset.key_names())), split)
+        keys = [dataset.keys[split]]
+    else:
+        keys = dataset.keys_of_role("split")
     if not keys:
-        return {}
+        raise MestraError(
+            "E03", "this file declares no key of role split, so there "
+            "is no split for a unit to leak across", "/keys")
     labels = np.asarray(dataset.keys[unit].read().values)
-    out: dict[Any, list[int]] = {}
+    out: dict[Any, list[Any]] = {}
     table = dataset.categories.get(dataset.keys[unit].category or "")
     for key in keys:
+        parts = dataset.categories.get(key.category or "")
         values = np.asarray(key.read().values)
         for one in np.unique(labels):
             sides = np.unique(values[labels == one])
             if len(sides) > 1:
-                name = table[int(one)] if table and \
-                    0 <= int(one) < len(table) else int(one)
-                out[name] = [int(s) for s in sides]
+                out[_entry(table, one)] = sorted(
+                    (_entry(parts, s) for s in sides), key=str)
     return out
+
+
+def _entry(table: Any, value: Any) -> Any:
+    """A category's name, or its integer when there is no table."""
+    if table is not None and 0 <= int(value) < len(table):
+        return table[int(value)]
+    return int(value)
 
 
 def grouped_split(dataset: Dataset,
