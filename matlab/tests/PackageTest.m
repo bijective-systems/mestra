@@ -106,7 +106,7 @@ classdef PackageTest < matlab.unittest.TestCase
                 struct('A', [2.0 0.1], 'b', 0.05, 'shape', [])));
             t = table(0.5, 4.0, 'VariableNames', {'mach', 'alpha'});
             out = a.call(t);
-            bLast = out('cl').data(1);
+            bLast = out('cl').mean.data(1);
             bFirst = 0.05 + 2.0 * 0.5 + 0.1 * 4.0;
             testCase.verifyEqual(typecast(bLast, 'uint64'), ...
                                  typecast(1.45, 'uint64'), ...
@@ -142,10 +142,12 @@ classdef PackageTest < matlab.unittest.TestCase
             a = mestra.Affine({'mach', 'alpha'}, outputs);
             t = table(0.5, 4.0, 'VariableNames', {'mach', 'alpha'});
             out = a.call(t);
-            cl = out('cl');
+            cl = out('cl').mean;
             testCase.verifyEqual(cl.data(1), 1.45, ...
                 'b is added last, which makes this exactly 1.45');
-            p = out('pressure');
+            testCase.verifyEmpty(out('cl').uncertainty, ...
+                'no band on this output');
+            p = out('pressure').mean;
             testCase.verifyEqual(p.shape, [1 6 1]);
             wanted = [0.5 1.1 3.7 4.3 6.9 7.5];
             for i = 1:6
@@ -164,9 +166,68 @@ classdef PackageTest < matlab.unittest.TestCase
             t = table(0.5, 4.0, 'VariableNames', {'mach', 'alpha'});
             fromB = b.call(t);
             fromA = a.call(t);
-            testCase.verifyEqual(fromB('cl').data, fromA('cl').data);
+            testCase.verifyEqual(fromB('cl').mean.data, fromA('cl').mean.data);
             testCase.verifyTrue(mestra.Registry.isKnown('affine'));
             testCase.verifyEqual(a.type(), 'affine');
+        end
+
+        function affineCarriesAConstantBand(testCase)
+        %affineCarriesAConstantBand  Section 27: uncertainty, level
+        %   and method, all three or none, the same in every row.
+            outputs = struct( ...
+                'cl', struct('A', [2.0 0.1], 'b', 0.05, 'shape', [], ...
+                             'uncertainty', 0.02, 'level', 0.95, ...
+                             'method', 'constant band'), ...
+                'pressure', struct('A', [1 0; 2 0; 3 0.5; 4 0.5; 5 1; 6 1], ...
+                                   'b', [0; 0.1; 0.2; 0.3; 0.4; 0.5], ...
+                                   'shape', [6 1], ...
+                                   'uncertainty', ...
+                                   [0.05; 0.1; 0.15; 0.2; 0.25; 0.3], ...
+                                   'level', 0.68, 'method', 'constant band'));
+            a = mestra.Affine({'mach', 'alpha'}, outputs);
+            t = table([0.5; 0.6], [4.0; 5.0], ...
+                      'VariableNames', {'mach', 'alpha'});
+            out = a.call(t);
+            cl = out('cl');
+            testCase.verifyEqual(cl.uncertainty.data, [0.02; 0.02]);
+            testCase.verifyEqual(cl.level, 0.95);
+            testCase.verifyEqual(cl.method, 'constant band');
+            p = out('pressure');
+            testCase.verifyEqual(p.uncertainty.shape, [2 6 1]);
+            testCase.verifyEqual(p.uncertainty.data(2, 6, 1), 0.3);
+            testCase.verifyEqual(p.level, 0.68);
+            b = mestra.Affine.fromDict(a.toDict());
+            back = b.call(t);
+            testCase.verifyEqual(back('cl').uncertainty.data, ...
+                                 cl.uncertainty.data);
+            testCase.verifyEqual(back('pressure').method, 'constant band');
+            bad = struct('cl', struct('A', [2.0 0.1], 'b', 0.05, ...
+                                      'shape', [], 'level', 0.95));
+            testCase.verifyError(@() mestra.Affine({'mach', 'alpha'}, bad), ...
+                                 'mestra:affine');
+        end
+
+        function aPredictionIsAMeanAndAtMostABand(testCase)
+        %aPredictionIsAMeanAndAtMostABand  Section 10: the record a
+        %   callable returns, and what it refuses.
+            m = mestra.Array([1; 2]);
+            plain = mestra.Callable.prediction(m);
+            testCase.verifyEmpty(plain.uncertainty);
+            testCase.verifyEmpty(plain.level);
+            banded = mestra.Callable.prediction(m, mestra.Array([0.1; 0.2]), ...
+                                                0.95, 'm');
+            testCase.verifyEqual(banded.level, 0.95);
+            u = mestra.Array([0.1; 0.2]);
+            testCase.verifyError(@() mestra.Callable.prediction(m, u, 1.96, 'm'), ...
+                                 'mestra:prediction');
+            testCase.verifyError(@() mestra.Callable.prediction(m, u, 0.95, ''), ...
+                                 'mestra:prediction');
+            testCase.verifyError(@() mestra.Callable.prediction( ...
+                m, mestra.Array(0.1), 0.95, 'm'), 'mestra:prediction');
+            testCase.verifyError(@() mestra.Callable.prediction( ...
+                m, mestra.Array([-0.1; 0.2]), 0.95, 'm'), 'mestra:prediction');
+            testCase.verifyError(@() mestra.Callable.prediction(m, [], 0.95), ...
+                                 'mestra:prediction');
         end
 
         function affineRefusesExtraKeys(testCase)

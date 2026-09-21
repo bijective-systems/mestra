@@ -22,7 +22,7 @@ somebody's code.
 What is in it
 -------------
 
-75 cases, one directory each, holding exactly the two files section
+80 cases, one directory each, holding exactly the two files section
 30 requires:
 
     cases/<case>/case.mes        the golden file
@@ -43,14 +43,17 @@ sorted by name. The cases fall into five groups:
     callable filling two slots, two supports, a row-varying field in
     an unaligned file, draws with their summaries, labels with and
     without a category table, a family with time, a derived array,
-    a support of kind none, a compressed field, a file carrying
+    a support of kind none, a compressed field, a stored band beside
+    its field, the affine callable with a band, a file carrying
     /notes and /private, and `wide_keys`, whose 4200 row-dimensioned
     datasets are past the ceiling that one dimension scale had
     before section 21 fixed how a scale is created;
   - one file per error identifier of section 14, named `err_<id>`,
     each violating that rule and, where the rule cannot be reached
     alone, saying so in its description. E37 has two, `err_e37` and
-    `err_e37_false`, one for each direction of the rule;
+    `err_e37_false`, one for each direction of the rule, and E12 has
+    three: a statistic with no `of`, a stored band with no level, and
+    a callable slot that declares a draw;
   - one file per warning identifier, named `warn_<id>`, the same way.
 
 E07 and W09 were retired on 2026-09-20 and have no case. Their

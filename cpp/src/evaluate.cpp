@@ -24,8 +24,35 @@ void ensure_builtin_types() {
   (void)once;
 }
 
-void materialise(ArraySlot* slot, const Array& produced,
+// Section 10: which part of the record fills a slot is its statistic.
+// A band slot takes the uncertainty and, with it, the level and the
+// method the record states.
+const Array& part_of(const Prediction& record,
+                     const std::optional<std::string>& statistic,
+                     const std::string& where, std::optional<double>* level,
+                     std::optional<std::string>* method) {
+  const std::string s = statistic.value_or("value");
+  if (s == "band") {
+    if (!record.uncertainty.has_value()) {
+      throw Error("E12", "the band slot \"" + where +
+                             "\" takes the uncertainty of its output and "
+                             "the callable returned none; a band without a "
+                             "level cannot be stored, so drop the slot or "
+                             "give the model a band");
+    }
+    *level = record.level;
+    *method = record.method;
+    return *record.uncertainty;
+  }
+  if (s == "value" || s == "mean") return record.mean;
+  throw Error("E12", "a callable serves value, mean and band slots; \"" +
+                         where + "\" is " + s);
+}
+
+void materialise(ArraySlot* slot, const Prediction& record,
                  const std::string& where) {
+  const Array& produced =
+      part_of(record, slot->statistic, where, &slot->level, &slot->method);
   if (produced.dims.empty() || produced.dims.front() != "row") {
     throw Error("", "the callable filling \"" + where +
                         "\" returned no row dimension");
@@ -118,7 +145,7 @@ Dataset evaluate(const Dataset& d, const KeysTable& keys) {
   }
 
   auto outputs_for = [&](const std::string& id, const std::string& output,
-                         const std::string& where) -> const Array& {
+                         const std::string& where) -> const Prediction& {
     const auto it = produced.find(id);
     if (it == produced.end()) {
       throw Error("E14", "the slot \"" + where + "\" names the callable \"" +
@@ -134,9 +161,9 @@ Dataset evaluate(const Dataset& d, const KeysTable& keys) {
       continue;
     }
     const std::string output = s.output.value_or(s.name);
-    const Array& a = outputs_for(s.callable_id(), output,
-                                 "/scalars/" + s.name);
-    s.values = a.f64;
+    const std::string where = "/scalars/" + s.name;
+    const Prediction& record = outputs_for(s.callable_id(), output, where);
+    s.values = part_of(record, s.statistic, where, &s.level, &s.method).f64;
     s.source = "data";
     s.output.reset();
   }

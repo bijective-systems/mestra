@@ -85,6 +85,8 @@ struct Scalar {
   std::optional<std::string> statistic;
   std::optional<std::string> of;
   std::optional<double> quantile;
+  std::optional<double> level;           // on a band: its coverage
+  std::optional<std::string> method;     // on a band: how it was made
   std::vector<double> values;
   AttrMap extra;
 
@@ -115,6 +117,8 @@ struct ArraySlot {
   std::optional<std::string> statistic;
   std::optional<std::string> of;
   std::optional<double> quantile;
+  std::optional<double> level;           // on a band: its coverage
+  std::optional<std::string> method;     // on a band: how it was made
   std::optional<std::string> category;   // a label's table
   std::optional<bool> recomputed;        // weight and normal
   std::optional<std::string> derived_from;

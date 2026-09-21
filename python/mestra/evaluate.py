@@ -43,7 +43,7 @@ from typing import Any
 
 import numpy as np
 
-from .callables import keys_table, table_length
+from .callables import Prediction, keys_table, table_length
 from .errors import MestraError
 from .model import (
     ArraySlot,
@@ -188,7 +188,34 @@ def _fill(slot: Any, produced: Mapping[str, Any], rows: int,
         raise MestraError(
             "E14", "the callable %s produced no output called %r"
             % (slot.callable_id, output), slot.name)
-    array = np.asarray(values[output], dtype="<f8")
+    record = values[output]
+    if not isinstance(record, Prediction):
+        raise MestraError(
+            "section 10", "a callable returns a Prediction per output; "
+            "%s returned %s for %r"
+            % (slot.callable_id, type(record).__name__, output),
+            slot.name)
+    # Section 10: which part of the record fills the slot is its
+    # statistic. A band slot takes the uncertainty and, with it, the
+    # level and the method the record states.
+    if slot.statistic == "band":
+        if record.uncertainty is None:
+            raise MestraError(
+                "E12", "this band slot takes the uncertainty of output "
+                "%r and the callable %s returned none; a band without "
+                "a level cannot be stored, so drop the slot or give "
+                "the model a band" % (output, slot.callable_id),
+                slot.name)
+        array = record.uncertainty
+        made.level = record.level
+        made.method = record.method
+    elif slot.statistic in (None, "value", "mean"):
+        array = record.mean
+    else:
+        raise MestraError(
+            "E12", "a callable serves value, mean and band slots; this "
+            "one is %s" % slot.statistic, slot.name)
+    array = np.asarray(array, dtype="<f8")
     _check_shape(slot, array, rows, kind)
     made.data = MemorySource(array)
     made.source = "data"

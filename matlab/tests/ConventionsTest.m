@@ -275,6 +275,58 @@ classdef ConventionsTest < matlab.unittest.TestCase
             testCase.verifyEqual(q(1, 3), 3.7, 'AbsTol', 1e-12);
         end
 
+        function aBandSlotTakesTheUncertaintyAndItsLevel(testCase)
+        %aBandSlotTakesTheUncertaintyAndItsLevel  Specification
+        %   section 10: which part of a record fills a slot is its
+        %   statistic, and evaluation writes level and method on the
+        %   band.
+            file = fullfile(corpusRoot(), 'affine_band', 'case.mes');
+            d = mestra.read(file);
+            t = table([0.1; 0.9], [-2.0; 10.0], ...
+                      'VariableNames', {'mach', 'alpha'});
+            e = mestra.evaluate(d, t);
+            band = e.scalar('cl_band');
+            testCase.verifyEqual(band.source, 'data');
+            testCase.verifyEqual(band.statistic, 'band');
+            testCase.verifyEqual(band.level, 0.95);
+            testCase.verifyEqual(band.method, 'constant band');
+            testCase.verifyEqual(band.values, [0.02 0.02]);
+            pb = e.nodeArray('s0', 'pressure_band');
+            testCase.verifyEqual(pb.level, 0.68);
+            q = mestra.permute(pb.values, pb.dims, {'row', 'node'});
+            testCase.verifyEqual(q(2, 6), 0.3);
+            testCase.verifyEmpty(e.scalar('cl').level);
+            out = [tempname() '.mes'];
+            cleanup = onCleanup(@() ...
+                ConventionsTest.removeIfPresent(out)); %#ok<NASGU>
+            mestra.write(e, out);
+            r = mestra.validate(out);
+            testCase.verifyEmpty(r.errors, strjoin(r.errors, ','));
+            testCase.verifyEmpty(r.warnings, strjoin(r.warnings, ','));
+            back = mestra.read(out);
+            testCase.verifyEqual(back.scalar('cl_band').level, 0.95);
+            testCase.verifyEqual(back.scalar('cl_band').method, ...
+                                 'constant band');
+        end
+
+        function aBandSlotNeedsARecordWithABand(testCase)
+        %aBandSlotNeedsARecordWithABand  A band slot served by an
+        %   output with no uncertainty cannot be filled.
+            A = mestra.Affine({'mach'}, struct('cl', ...
+                struct('A', 2.0, 'b', 0.05, 'shape', [])));
+            d = mestra.Dataset();
+            d.writer = 'mestra matlab tests';
+            d.created = '2026-09-19T00:00:00Z';
+            d.addKey('mach', [], 'condition', '1', ...
+                     'Lower', 0.1, 'Upper', 0.9);
+            d.addCallable('m1', A);
+            d.addScalar('cl', [], '1', 'Callable', 'm1', 'Output', 'cl');
+            d.addScalar('cl_band', [], '1', 'Callable', 'm1', ...
+                        'Output', 'cl', 'Statistic', 'band', 'Of', 'cl');
+            t = table(0.5, 'VariableNames', {'mach'});
+            testCase.verifyError(@() mestra.evaluate(d, t), 'mestra:E12');
+        end
+
         % ------------------------------------- 2. writing
 
         function writeRefusesAFileItsOwnValidatorRejects(testCase)

@@ -513,6 +513,22 @@ def mesh_base(f, o):
     for aname, avalue in g("pressure_extra", []):
         sattr(p, aname, avalue)
 
+    band = g("band", None)
+    if band is not None:
+        pb = dataset(node_arrays, "pressure_band", band["values"], "<f8",
+                     [row, node, component_1], n_rows=n_rows)
+        sattr(pb, "role", "field")
+        sattr(pb, "varies", "row")
+        sattr(pb, "units", "Pa")
+        iattr(pb, "components", 1)
+        sattr(pb, "source", "data")
+        sattr(pb, "statistic", "band")
+        sattr(pb, "of", "pressure")
+        if band.get("level") is not None:
+            fattr(pb, "level", band["level"])
+        if band.get("method") is not None:
+            sattr(pb, "method", band["method"])
+
     cell_arrays = sup.create_group("cell_arrays")
     r = dataset(cell_arrays, "region", [[0], [1]], "<i4",
                 [cell, component_1])
@@ -627,10 +643,18 @@ def affine_base(f, o):
     fattr(mach, "lower", 0.1)
     fattr(mach, "upper", 0.9)
 
-    cl = f.create_group("scalars").create_group("cl")
+    scalars = f.create_group("scalars")
+    cl = scalars.create_group("cl")
     sattr(cl, "units", "1")
     sattr(cl, "source", g("cl_source", "callable:m1"))
     sattr(cl, "output", "cl")
+    if g("band", False):
+        clb = scalars.create_group("cl_band")
+        sattr(clb, "units", "1")
+        sattr(clb, "source", "callable:m1")
+        sattr(clb, "output", "cl")
+        sattr(clb, "statistic", "band")
+        sattr(clb, "of", "cl")
 
     sup = f.create_group("supports").create_group("s0")
     node, _cell = write_mesh_cells(sup, o)
@@ -643,13 +667,26 @@ def affine_base(f, o):
     iattr(c, "components", 2)
     sattr(c, "source", "data")
 
-    p = sup.create_group("node_arrays").create_group("pressure")
+    node_arrays = sup.create_group("node_arrays")
+    p = node_arrays.create_group("pressure")
     sattr(p, "role", "field")
     sattr(p, "varies", "row")
     sattr(p, "units", "Pa")
     iattr(p, "components", 1)
     sattr(p, "source", g("pressure_source", "callable:m1"))
     sattr(p, "output", "pressure")
+    for aname, avalue in g("pressure_extra", []):
+        sattr(p, aname, avalue)
+    if g("band", False):
+        pb = node_arrays.create_group("pressure_band")
+        sattr(pb, "role", "field")
+        sattr(pb, "varies", "row")
+        sattr(pb, "units", "Pa")
+        iattr(pb, "components", 1)
+        sattr(pb, "source", "callable:m1")
+        sattr(pb, "output", "pressure")
+        sattr(pb, "statistic", "band")
+        sattr(pb, "of", "pressure")
 
     m1 = f.create_group("callables").create_group("m1")
     if g("type", "affine") is not None:
@@ -665,31 +702,68 @@ def affine_base(f, o):
         gslot = outputs.create_group(slot)
         for name in ("A", "b", "shape"):
             codec_array(gslot, name, AFFINE[slot][name])
+        if g("band", False):
+            # Section 25: a number or a string is an attribute on the
+            # enclosing group; the band itself is a dataset.
+            codec_array(gslot, "uncertainty",
+                        AFFINE_BAND[slot]["uncertainty"])
+            fattr(gslot, "level", AFFINE_BAND[slot]["level"])
+            sattr(gslot, "method", AFFINE_BAND[slot]["method"])
     return sup
 
 
 AFFINE_AT = [{"mach": 0.5, "alpha": 4.0}]
 
+#: The band of section 27's worked example: a constant per output.
+AFFINE_BAND = {
+    "cl": {"uncertainty": np.array([0.02]), "level": 0.95,
+           "method": "constant band"},
+    "pressure": {"uncertainty": np.array([0.05, 0.10, 0.15, 0.20, 0.25,
+                                          0.30]),
+                 "level": 0.68, "method": "constant band"},
+}
 
-def affine_evaluation(cid, keys, outputs, slots, table):
+
+def with_band(outputs, bands):
+    """The affine outputs with the band keys merged in, as the codec
+    round trip must return them."""
+    out = {}
+    for name in outputs:
+        entry = dict(outputs[name])
+        if name in bands:
+            entry.update(bands[name])
+        out[name] = entry
+    return out
+
+
+def affine_evaluation(cid, keys, outputs, slots, table, bands=None):
     """A worked evaluation of section 27 as an expected.json entry.
     `slots` maps the callable's output name to the slot path and
     `table` is the keys table, one dictionary per table row. The row
     index in each probe is the index into that table, not the index
-    of any row stored in the file."""
+    of any row stored in the file. `bands` maps an output name to the
+    path of the band slot it also fills, whose value is the output's
+    constant `uncertainty` in every row."""
     probes = []
+
+    def add(path, r, y):
+        if y.ndim == 0:
+            probes.append({"slot": path, "row": r, "value": fnum(y)})
+        else:
+            for n in range(y.shape[0]):
+                for c in range(y.shape[1]):
+                    probes.append({"slot": path, "row": r, "node": n,
+                                   "component": c,
+                                   "value": fnum(y[n, c])})
+
     for output in sorted(slots):
         for r, at in enumerate(table):
-            y = evaluate_affine(outputs[output], keys, at)
-            if y.ndim == 0:
-                probes.append({"slot": slots[output], "row": r,
-                               "value": fnum(y)})
-            else:
-                for n in range(y.shape[0]):
-                    for c in range(y.shape[1]):
-                        probes.append({"slot": slots[output], "row": r,
-                                       "node": n, "component": c,
-                                       "value": fnum(y[n, c])})
+            add(slots[output], r, evaluate_affine(outputs[output], keys, at))
+    for output in sorted(bands or {}):
+        shape = [int(n) for n in outputs[output]["shape"]]
+        band = np.asarray(outputs[output]["uncertainty"]).reshape(shape)
+        for r in range(len(table)):
+            add(bands[output], r, band)
     return {"callable": cid,
             "keys": dict((k, [fnum(at[k]) for at in table])
                          for k in keys),
@@ -2096,13 +2170,21 @@ WRONG_SID = "0" * 64
 
 
 def mk(builder, options, description, errors=(), warnings=(),
-       support_ids=None, probes=(), codec=None):
+       support_ids=None, probes=(), codec=None, evaluation=()):
     """A case that is one base file with one thing changed."""
     def build(f):
         builder(f, options)
         return expect(description, errors, warnings, support_ids,
-                      probes, codec)
+                      probes, codec, evaluation)
     return build
+
+
+#: A stored band beside the two-row pressure field: (row, node,
+#: component), one entry per node, the same in both rows.
+PRESSURE_BAND = np.array([[[0.5 + 0.1 * n] for n in range(6)]
+                          for _ in range(2)])
+PRESSURE_BAND_NEGATIVE = PRESSURE_BAND.copy()
+PRESSURE_BAND_NEGATIVE[1, 2, 0] = -0.7
 
 
 CASES = {
@@ -2127,6 +2209,44 @@ CASES = {
     "two_supports_row_varying": case_two_supports_row_varying,
     "notes_and_private": case_notes_and_private,
     "wide_keys": case_wide_keys,
+    "band_stored": mk(
+        mesh_base, {"band": {"values": PRESSURE_BAND, "level": 0.95,
+                             "method": "half-width of a 95 % interval "
+                                       "from the residuals of the "
+                                       "solver's mesh study"}},
+        "A stored field with its band beside it: a band slot is the "
+        "half-width of the interval around the base slot it names "
+        "with `of`, at the coverage its `level` states, made as its "
+        "`method` says.",
+        support_ids={"s0": MESH_SID},
+        probes=[
+            probe("/supports/s0/node_arrays/pressure", PRESSURE_2,
+                  row=1, node=3, component=0),
+            probe("/supports/s0/node_arrays/pressure_band",
+                  PRESSURE_BAND, row=1, node=3, component=0),
+            probe("/supports/s0/node_arrays/pressure_band",
+                  PRESSURE_BAND, row=0, node=5, component=0),
+        ]),
+    "affine_band": mk(
+        affine_base, {"band": True},
+        "The affine callable of section 27 with a constant band on "
+        "both outputs. Two band slots take the `uncertainty` of the "
+        "output they name and, once evaluated, carry its `level` and "
+        "`method`.",
+        support_ids={"s0": MESH_SID},
+        probes=[
+            probe("/callables/m1/outputs/pressure/uncertainty",
+                  AFFINE_BAND["pressure"]["uncertainty"], index=2),
+        ],
+        codec={"m1": tagged(affine_dict(
+            outputs=with_band(AFFINE, AFFINE_BAND)))},
+        evaluation=[affine_evaluation(
+            "m1", AFFINE_KEYS, with_band(AFFINE, AFFINE_BAND),
+            {"cl": "/scalars/cl",
+             "pressure": "/supports/s0/node_arrays/pressure"},
+            AFFINE_AT,
+            bands={"cl": "/scalars/cl_band",
+                   "pressure": "/supports/s0/node_arrays/pressure_band"})]),
     "compressed_field": mk(
         mesh_base, {"pressure_gzip": 4, "pressure_shuffle": True,
                     "cl_gzip": 4},
@@ -2218,6 +2338,19 @@ CASES = {
         "A slot that declares a statistic and does not say what it is "
         "a statistic of.",
         errors=["E12"], support_ids={"s0": MESH_SID}),
+    "err_e12_band": mk(
+        mesh_base, {"band": {"values": PRESSURE_BAND, "level": None,
+                             "method": "constant band"}},
+        "A stored band with no level, so the coverage it claims is "
+        "unknown.",
+        errors=["E12"], support_ids={"s0": MESH_SID}),
+    "err_e12_callable": mk(
+        affine_base, {"pressure_extra": [("statistic", "draw")]},
+        "A slot served by a callable that declares the statistic "
+        "draw, which a callable does not produce: it returns a mean "
+        "and at most a band.",
+        errors=["E12"], support_ids={"s0": MESH_SID},
+        codec={"m1": tagged(affine_dict())}),
     "err_e13": mk(
         mesh_base, {"pressure_role": "derived"},
         "A derived array with neither derived_from nor recipe.",
@@ -2462,6 +2595,11 @@ CASES = {
         mesh_base, {"created": "19/09/2026"},
         "A created attribute that is not an ISO 8601 UTC timestamp.",
         warnings=["W14"], support_ids={"s0": MESH_SID}),
+    "warn_w16": mk(
+        mesh_base, {"band": {"values": PRESSURE_BAND_NEGATIVE,
+                             "level": 0.95, "method": "constant band"}},
+        "A band holding a negative value, which no half-width is.",
+        warnings=["W16"], support_ids={"s0": MESH_SID}),
     "warn_w15": mk(
         two_support_base, {"n_rows": 3, "aligned": False,
                            "row_support": [0, 0, 0]},

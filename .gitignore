@@ -8,7 +8,7 @@ __pycache__/
 !vectors/**/*.h5
 
 # C++ build trees
-cpp/build/
+cpp/build*/
 build/
 *.egg-info/
 .pytest_cache/

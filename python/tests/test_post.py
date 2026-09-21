@@ -34,6 +34,39 @@ def transient():
     return ds
 
 
+def test_a_prediction_from_stored_data_and_from_a_callable():
+    """A viewer asks one question of a stored slot and of a served
+    one, and gets the same record (section 10)."""
+    with mestra.read(corpus.case_path("band_stored")) as ds:
+        record = post.prediction(ds, "pressure")
+        assert record.mean.shape == (2, 6, 1)
+        assert record.uncertainty[1, 3, 0] == 0.8
+        assert record.level == 0.95
+        assert record.method.startswith("half-width of a 95 % interval")
+        with pytest.raises(MestraError):          # name the base slot
+            post.prediction(ds, "pressure_band")
+        with pytest.raises(MestraError):          # stored data, no keys
+            post.prediction(ds, "pressure", keys={"mach": [0.5]})
+    with mestra.read(corpus.case_path("mesh_two_rows")) as ds:
+        plain = post.prediction(ds, "cl")
+        assert plain.mean.tolist() == [0.25, 0.55]
+        assert plain.uncertainty is None
+    with mestra.read(corpus.case_path("affine_band")) as ds:
+        served = post.prediction(ds, "cl", keys={"mach": [0.5],
+                                                 "alpha": [4.0]})
+        assert served.mean.tolist() == [1.45]
+        assert served.uncertainty.tolist() == [0.02]
+        assert served.level == 0.95
+        with pytest.raises(MestraError):          # no rows and no keys
+            post.prediction(ds, "cl")
+    with mestra.read(corpus.case_path("affine_with_rows")) as ds:
+        on_rows = post.prediction(ds, "pressure")     # the file's rows
+        assert on_rows.mean.shape == (2, 6, 1)
+    with mestra.read(corpus.case_path("draws_and_summaries")) as ds, \
+            pytest.raises(MestraError):           # a std is not a mean
+        post.prediction(ds, "pressure_std")
+
+
 def test_statistics_per_row():
     stats = post.field_statistics(transient(), "u")
     assert list(stats.rows) == [0, 1, 2, 3, 4]

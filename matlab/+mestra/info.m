@@ -202,6 +202,12 @@ function s = slotLine(slot, dims, rowCount)
     if isfield(slot, 'statistic') && ~isempty(slot.statistic)
         bits{end + 1} = ['statistic ' slot.statistic];
     end
+    if isfield(slot, 'level') && ~isempty(slot.level)
+        bits{end + 1} = sprintf('level %g', slot.level);
+    end
+    if isfield(slot, 'method') && ~isempty(slot.method)
+        bits{end + 1} = ['method "' slot.method '"'];
+    end
     src = slot.source;
     if numel(src) > 9 && strncmp(src, 'callable:', 9)
         bits{end + 1} = ['source callable ' src(10:end)];

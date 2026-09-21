@@ -7,6 +7,7 @@
 #include <limits>
 #include <map>
 
+#include "mestra/affine.hpp"
 #include "mestra/io.hpp"
 #include "mestra/weights.hpp"
 #include "names.hpp"
@@ -69,6 +70,67 @@ Found find_slot(const Dataset& d, const std::string& what,
                      "; give the whole path to say which");
   }
   return found;
+}
+
+// The file's own key columns as a keys table (section 26).
+KeysTable own_keys(const Dataset& d) {
+  KeysTable t;
+  for (const Key& k : d.keys) {
+    if (k.dtype == DType::String) {
+      t.add_text_column(k.name, k.str);
+    } else if (k.dtype == DType::Float64) {
+      t.add_column(k.name, k.f64);
+    } else {
+      std::vector<double> values;
+      values.reserve(k.i64.size());
+      for (const std::int64_t v : k.i64) {
+        values.push_back(static_cast<double>(v));
+      }
+      t.add_column(k.name, std::move(values));
+    }
+  }
+  return t;
+}
+
+// The record a callable gives for `output`, with the file's own rows
+// as the keys table when the caller gave none.
+Prediction served(const Dataset& d, const std::string& id,
+                  const std::string& output, const std::string& where,
+                  const KeysTable* keys) {
+  Affine::register_type();
+  const StoredCallable* stored = nullptr;
+  for (const StoredCallable& c : d.callables) {
+    if (c.id == id) stored = &c;
+  }
+  if (stored == nullptr) {
+    throw Error("E14", "the slot \"" + where + "\" names the callable \"" +
+                           id + "\", which the file does not hold");
+  }
+  const std::unique_ptr<Callable> object =
+      CallableRegistry::from_dict(stored->type, stored->dict);
+  if (!object) {
+    refuse("prediction", "no factory is registered for the callable type \"" +
+                             stored->type + "\"; the dictionary may be "
+                             "copied but not interpreted");
+  }
+  KeysTable own;
+  if (keys == nullptr) {
+    if (d.n_rows == 0) {
+      refuse("prediction", "this file has no rows to evaluate \"" + where +
+                               "\" on; pass a keys table with one column "
+                               "per key");
+    }
+    own = own_keys(d);
+    keys = &own;
+  }
+  const Outputs out = object->call(*keys);
+  if (!out.has(output)) {
+    throw Error("E14", "the callable \"" + id + "\" produced no output "
+                       "called \"" + output + "\"");
+  }
+  Prediction record = out.at(output);
+  record.check(where);
+  return record;
 }
 
 std::size_t element_count(const Support& s, Location where) {
@@ -307,6 +369,93 @@ FieldStatistics field_statistics(const Dataset& d, const std::string& slot,
     out.deviation.push_back(std::sqrt(variance));
   }
   return out;
+}
+
+Prediction prediction(const Dataset& d, const std::string& slot,
+                      const KeysTable* keys) {
+  // A scalar by name or by path, else an array as the other helpers
+  // find one.
+  const Scalar* scalar = nullptr;
+  for (const Scalar& s : d.scalars) {
+    if (s.name == slot || "/scalars/" + s.name == slot) scalar = &s;
+  }
+  Found found;
+  if (scalar == nullptr) found = find_slot(d, "prediction", slot);
+
+  const std::optional<std::string>& statistic =
+      scalar != nullptr ? scalar->statistic : found.slot->statistic;
+  const std::optional<std::string>& of =
+      scalar != nullptr ? scalar->of : found.slot->of;
+  const std::string s = statistic.value_or("value");
+  if (s == "band") {
+    refuse("prediction", "\"" + slot + "\" is the band of \"" +
+                             of.value_or("") +
+                             "\"; name the base slot and the band comes "
+                             "with it");
+  }
+  if (s != "value" && s != "mean") {
+    refuse("prediction", "\"" + slot + "\" holds the " + s + " of \"" +
+                             of.value_or("") +
+                             "\", which is stored data about stored data "
+                             "and not a prediction; name the base slot");
+  }
+
+  const bool is_callable =
+      scalar != nullptr ? scalar->is_callable() : found.slot->is_callable();
+  const std::string where =
+      scalar != nullptr ? "/scalars/" + scalar->name
+                        : slot_path(*found.support, *found.slot);
+  if (is_callable) {
+    const std::string id =
+        scalar != nullptr ? scalar->callable_id() : found.slot->callable_id();
+    const std::string output =
+        scalar != nullptr ? scalar->output.value_or(scalar->name)
+                          : found.slot->output.value_or(found.slot->name);
+    return served(d, id, output, where, keys);
+  }
+  if (keys != nullptr) {
+    refuse("prediction", "\"" + slot + "\" holds stored data, which has "
+                             "values on its own rows only; pass no keys "
+                             "table, or name a slot a callable serves");
+  }
+
+  Prediction record;
+  if (scalar != nullptr) {
+    record.mean.dtype = DType::Float64;
+    record.mean.shape = {scalar->values.size()};
+    record.mean.dims = {"row"};
+    record.mean.f64 = scalar->values;
+    for (const Scalar& other : d.scalars) {
+      if (other.statistic.value_or("") == "band" &&
+          other.of.value_or("") == scalar->name && !other.is_callable()) {
+        Array band;
+        band.dtype = DType::Float64;
+        band.shape = {other.values.size()};
+        band.dims = {"row"};
+        band.f64 = other.values;
+        record.uncertainty = std::move(band);
+        record.level = other.level;
+        record.method = other.method;
+        break;
+      }
+    }
+  } else {
+    record.mean = found.slot->data;
+    const std::vector<ArraySlot>& siblings =
+        found.where == Location::Node ? found.support->node_arrays
+                                      : found.support->cell_arrays;
+    for (const ArraySlot& other : siblings) {
+      if (other.statistic.value_or("") == "band" &&
+          other.of.value_or("") == found.slot->name && !other.is_callable()) {
+        record.uncertainty = other.data;
+        record.level = other.level;
+        record.method = other.method;
+        break;
+      }
+    }
+  }
+  record.check(where);
+  return record;
 }
 
 }  // namespace mestra

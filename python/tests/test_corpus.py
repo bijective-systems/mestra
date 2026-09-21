@@ -19,15 +19,14 @@ VALID = corpus.valid_case_names()
 
 
 def test_the_corpus_is_where_it_should_be():
-    """Seventy-five cases since the third reconciliation, which added
-    `compressed_field`, `wide_keys`, `notes_and_private`, `err_e42`
-    and `err_e43`. Three of the five are valid files, so the cases a
-    reader and a writer must handle end to end went from thirty to
-    thirty-three. `wide_keys` is generated on demand, as
-    vectors/README.md says: `python vectors/generate.py --wide`."""
-    assert len(CASES) == 75
-    assert len(VALID) == 33
-    assert len(WITH_CODEC) == 5
+    """Eighty cases: the band added five, of which `band_stored`,
+    `affine_band` and `warn_w16` are files a reader accepts and
+    `err_e12_band` and `err_e12_callable` are not. `wide_keys` is
+    generated on demand, as vectors/README.md says:
+    `python vectors/generate.py --wide`."""
+    assert len(CASES) == 80
+    assert len(VALID) == 36
+    assert len(WITH_CODEC) == 7
 
 
 @pytest.mark.parametrize("name", CASES)
@@ -123,7 +122,9 @@ def test_evaluation_through_the_callable(name):
             values = ds.callables[entry["callable"]](table)
             for probe in entry["probes"]:
                 slot = _slot_of(ds, probe["slot"])
-                array = values[slot.output]
+                record = values[slot.output]
+                array = (record.uncertainty if slot.statistic == "band"
+                         else record.mean)
                 index = [probe["row"]]
                 if "node" in probe:
                     index += [probe["node"], probe["component"]]

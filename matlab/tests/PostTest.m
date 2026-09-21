@@ -185,6 +185,39 @@ classdef PostTest < matlab.unittest.TestCase
 
         % ------------------------------- 4. post-processing
 
+        function aPredictionFromStoredDataAndFromACallable(testCase)
+        %aPredictionFromStoredDataAndFromACallable  One question of a
+        %   stored slot and of a served one, the same record.
+            d = mestra.read(fullfile(corpusRoot(), 'band_stored', 'case.mes'));
+            r = mestra.prediction(d, 'pressure');
+            testCase.verifyEqual(r.mean.shape, [2 6 1]);
+            testCase.verifyEqual(r.uncertainty.data(2, 4, 1), 0.8);
+            testCase.verifyEqual(r.level, 0.95);
+            testCase.verifyTrue(startsWith(r.method, ...
+                                'half-width of a 95 % interval'));
+            testCase.verifyError(@() mestra.prediction(d, 'pressure_band'), ...
+                                 'mestra:prediction');
+            testCase.verifyError(@() mestra.prediction(d, 'pressure', ...
+                table(0.5, 'VariableNames', {'mach'})), 'mestra:prediction');
+            two = mestra.read(fullfile(corpusRoot(), 'mesh_two_rows', ...
+                                       'case.mes'));
+            plain = mestra.prediction(two, 'cl');
+            testCase.verifyEqual(plain.mean.data, [0.25; 0.55]);
+            testCase.verifyEmpty(plain.uncertainty);
+            m = mestra.read(fullfile(corpusRoot(), 'affine_band', 'case.mes'));
+            t = table(0.5, 4.0, 'VariableNames', {'mach', 'alpha'});
+            served = mestra.prediction(m, 'cl', t);
+            testCase.verifyEqual(served.mean.data, 1.45);
+            testCase.verifyEqual(served.uncertainty.data, 0.02);
+            testCase.verifyEqual(served.level, 0.95);
+            testCase.verifyError(@() mestra.prediction(m, 'cl'), ...
+                                 'mestra:prediction');
+            withRows = mestra.read(fullfile(corpusRoot(), ...
+                                            'affine_with_rows', 'case.mes'));
+            onRows = mestra.prediction(withRows, 'pressure');
+            testCase.verifyEqual(onRows.mean.shape, [2 6 1]);
+        end
+
         function fieldStatisticsHasNoGroupingColumnWithoutBy(testCase)
         %fieldStatisticsHasNoGroupingColumnWithoutBy  Section 4: no
         %   column at all, and never one called after somebody

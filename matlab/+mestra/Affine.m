@@ -7,9 +7,15 @@ classdef Affine < mestra.Callable
 %       y = A x + b
 %
 %   and y is reshaped to the slot's shape in C order.  It is
-%   deterministic and produces no draws.  It exists so that the
-%   protocol, the codec and evaluation can be conformance tested in
-%   every language with no proprietary model.
+%   deterministic.  It exists so that the protocol, the codec and
+%   evaluation can be conformance tested in every language with no
+%   proprietary model.
+%
+%   An output may carry a constant band, the same in every row, given
+%   as the fields uncertainty (n_out_flat values), level (the coverage
+%   in (0, 1)) and method (one sentence), all three or none.  The
+%   prediction for that output then has the band as its uncertainty
+%   (section 10).
 %
 %   Summation order.  The dot product is accumulated over the keys in
 %   the declared key order and b is added last, with no fused
@@ -29,7 +35,7 @@ classdef Affine < mestra.Callable
 %                                     'b', [0; 0.1; 0.2; 0.3; 0.4; 0.5], ...
 %                                     'shape', [6 1])));
 %       out = A.call(table(0.5, 4.0, 'VariableNames', {'mach', 'alpha'}));
-%       out('cl').data      % 1.45
+%       out('cl').mean.data      % 1.45
 %
 %   See also mestra.Callable, mestra.Registry, mestra.evaluate.
 
@@ -40,7 +46,8 @@ classdef Affine < mestra.Callable
         keys
 
         % A containers.Map from the value of a slot's `output`
-        % attribute to a struct with fields A, b and shape.
+        % attribute to a struct with fields A, b and shape, and, when
+        % the output carries a band, uncertainty, level and method.
         outputs
 
         % An optional one-line description.
@@ -52,7 +59,8 @@ classdef Affine < mestra.Callable
         %Affine  Build an affine callable.
         %   `outputs` is a struct or a containers.Map whose entries
         %   each have A (n_out_flat by n_keys), b (n_out_flat) and
-        %   shape (the slot's dimensions after the row dimension).
+        %   shape (the slot's dimensions after the row dimension), and
+        %   optionally uncertainty, level and method together.
             if nargin == 0, return, end
             if ischar(keys), keys = {keys}; end
             if isstring(keys), keys = cellstr(keys); end
@@ -93,9 +101,11 @@ classdef Affine < mestra.Callable
         %call  Evaluate every output on a keys table.
         %   `keysTable` is a MATLAB table whose variable names are the
         %   key names (section 26).  The result is a containers.Map
-        %   from output name to a mestra.Array with the file's own
-        %   axis order: (row, node | cell, component) for an array
-        %   slot and (row) for a scalar slot.
+        %   from output name to a prediction (mestra.Callable.prediction)
+        %   whose mean is a mestra.Array with the file's own axis
+        %   order: (row, node | cell, component) for an array slot and
+        %   (row) for a scalar slot, and whose uncertainty is the
+        %   output's constant band in every row when it has one.
             if ~istable(keysTable)
                 error('mestra:keysTable', ...
                       'the keys table must be a MATLAB table (section 26)');
@@ -135,16 +145,14 @@ classdef Affine < mestra.Callable
                         y(r, j) = acc + b(j);
                     end
                 end
-                if isempty(shape)
-                    out(names{i}) = mestra.Array(y(:), nRows);
+                meanValue = mestra.Affine.rowsToArray(y, shape, nRows);
+                if isfield(entry, 'uncertainty')
+                    u = repmat(entry.uncertainty(:)', nRows, 1);
+                    band = mestra.Affine.rowsToArray(u, shape, nRows);
+                    out(names{i}) = mestra.Callable.prediction( ...
+                        meanValue, band, entry.level, entry.method);
                 else
-                    full = zeros([nRows shape]);
-                    subs = repmat({':'}, 1, numel(shape));
-                    for r = 1:nRows
-                        full(r, subs{:}) = ...
-                            mestra.Affine.cReshape(y(r, :), shape);
-                    end
-                    out(names{i}) = mestra.Array(full, [nRows shape]);
+                    out(names{i}) = mestra.Callable.prediction(meanValue);
                 end
             end
         end
@@ -162,6 +170,14 @@ classdef Affine < mestra.Callable
                 one('b') = mestra.Array(entry.b(:), numel(entry.b));
                 shape = int64(entry.shape(:));
                 one('shape') = mestra.Array(shape, numel(shape));
+                if isfield(entry, 'uncertainty')
+                    % Section 25: the band is a dataset, and the level
+                    % and the method are attributes on the entry.
+                    one('uncertainty') = mestra.Array( ...
+                        entry.uncertainty(:), numel(entry.uncertainty));
+                    one('level') = entry.level;
+                    one('method') = entry.method;
+                end
                 outs(names{i}) = one;
             end
             d('outputs') = outs;
@@ -194,9 +210,11 @@ classdef Affine < mestra.Callable
             slotNames = outs.keys();
             for i = 1:numel(slotNames)
                 one = outs(slotNames{i});
-                entry.A = mestra.Affine.plain(one('A'));
-                entry.b = mestra.Affine.plain(one('b'));
-                entry.shape = double(mestra.Affine.plain(one('shape')));
+                fields = one.keys();
+                entry = struct();
+                for j = 1:numel(fields)
+                    entry.(fields{j}) = mestra.Affine.plain(one(fields{j}));
+                end
                 built(slotNames{i}) = entry;
             end
             obj = mestra.Affine(keyList, built);
@@ -221,12 +239,37 @@ classdef Affine < mestra.Callable
             out = builtin('permute', out, numel(shape):-1:1);
         end
 
+        function a = rowsToArray(y, shape, nRows)
+        %rowsToArray  A (rows, n_out_flat) block as a mestra.Array with
+        %   the file's shape: (rows) for a scalar slot, (rows, shape)
+        %   otherwise, each row reshaped in C order.
+            if isempty(shape)
+                a = mestra.Array(y(:), nRows);
+                return
+            end
+            full = zeros([nRows shape]);
+            subs = repmat({':'}, 1, numel(shape));
+            for r = 1:nRows
+                full(r, subs{:}) = mestra.Affine.cReshape(y(r, :), shape);
+            end
+            a = mestra.Array(full, [nRows shape]);
+        end
+
         function entry = normalise(entry, nKeys, name)
         %normalise  Check and square up one output entry.
             if ~isstruct(entry) || ...
                ~all(isfield(entry, {'A', 'b', 'shape'}))
                 error('mestra:affine', ...
                       'output "%s" needs A, b and shape', name);
+            end
+            known = {'A', 'b', 'shape', 'uncertainty', 'level', 'method'};
+            extra = setdiff(fieldnames(entry), known);
+            if ~isempty(extra)
+                error('mestra:affine', ...
+                      ['output "%s" holds A, b and shape, and a band as ' ...
+                       'uncertainty, level and method, and nothing ' ...
+                       'else; this one also holds %s (section 27)'], ...
+                      name, strjoin(extra, ', '));
             end
             entry.A = double(entry.A);
             entry.b = double(entry.b(:));
@@ -244,6 +287,36 @@ classdef Affine < mestra.Callable
                 error('mestra:affine', ...
                       'output "%s" has b of length %d where %d is needed', ...
                       name, numel(entry.b), nOut);
+            end
+            bandFields = {'uncertainty', 'level', 'method'};
+            has = isfield(entry, bandFields);
+            if any(has)
+                if ~all(has)
+                    error('mestra:affine', ...
+                          ['a band on output "%s" is all three of ' ...
+                           'uncertainty, level and method (section 27)'], ...
+                          name);
+                end
+                entry.uncertainty = double(entry.uncertainty(:));
+                if numel(entry.uncertainty) ~= nOut
+                    error('mestra:affine', ...
+                          ['output "%s" has an uncertainty of length %d ' ...
+                           'where %d is needed'], name, ...
+                          numel(entry.uncertainty), nOut);
+                end
+                if ~isnumeric(entry.level) || ~isscalar(entry.level) || ...
+                        ~(entry.level > 0 && entry.level < 1)
+                    error('mestra:affine', ...
+                          ['output "%s" has a level that is not a ' ...
+                           'coverage in (0, 1)'], name);
+                end
+                entry.level = double(entry.level);
+                if isstring(entry.method), entry.method = char(entry.method); end
+                if ~ischar(entry.method) || isempty(entry.method)
+                    error('mestra:affine', ...
+                          'output "%s" has a method that is not one sentence', ...
+                          name);
+                end
             end
         end
     end

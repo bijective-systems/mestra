@@ -54,9 +54,10 @@ _KEY_ORDER = ("role", "units", "lower", "upper", "category",
               "trajectory_group", "parent")
 _ARRAY_ORDER = ("role", "varies", "units", "components", "source",
                 "output", "category", "statistic", "of", "quantile",
+                "level", "method",
                 "recomputed", "derived_from", "recipe", "reference")
 _SCALAR_ORDER = ("units", "source", "output", "statistic", "of",
-                 "quantile")
+                 "quantile", "level", "method")
 
 
 def write(dataset: Dataset, path: str, check: bool = True) -> None:

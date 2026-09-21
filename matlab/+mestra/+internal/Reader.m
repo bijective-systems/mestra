@@ -637,6 +637,8 @@ classdef Reader
                 rec(1).statistic = R().str(oid, 'statistic');
                 rec(1).of = R().str(oid, 'of');
                 rec(1).quantile = R().num(oid, 'quantile');
+                rec(1).level = R().num(oid, 'level');
+                rec(1).method = R().str(oid, 'method');
                 rec(1).values = [];
                 rec(1).dtype = '';
                 rec(1).dims = {};
@@ -655,6 +657,8 @@ classdef Reader
             rec(1).statistic = R().str(did, 'statistic');
             rec(1).of = R().str(did, 'of');
             rec(1).quantile = R().num(did, 'quantile');
+            rec(1).level = R().num(did, 'level');
+            rec(1).method = R().str(did, 'method');
             rec(1).dtype = info.type;
             rec(1).chunk = info.chunk;
             rec(1).filters = info.filters;
@@ -777,6 +781,8 @@ classdef Reader
             rec(1).recipe = R().str(oid, 'recipe');
             rec(1).reference = R().str(oid, 'reference');
             rec(1).quantile = R().num(oid, 'quantile');
+            rec(1).level = R().num(oid, 'level');
+            rec(1).method = R().str(oid, 'method');
             rec(1).components = R().num(oid, 'components');
             rec(1).recomputed = R().num(oid, 'recomputed');
             if ~isempty(rec(1).recomputed)

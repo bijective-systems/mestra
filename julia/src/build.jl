@@ -205,12 +205,15 @@ to guess at.
 """
 function add_scalar!(ds::Dataset, name::AbstractString, values;
                      units = nothing, statistic = nothing,
-                     of = nothing, quantile = nothing, deflate = nothing,
+                     of = nothing, quantile = nothing, level = nothing,
+                     method = nothing, deflate = nothing,
                      shuffle::Bool = false)
     units isa AbstractString || throw(MestraError("E11",
         "/scalars/" * String(name),
         "a scalar carries units; pass units = \"1\" for a dimensionless " *
         "one"))
+    check_statistic(statistic, of, quantile, level, method, false,
+                    "/scalars/" * String(name))
     vals = convert(Vector{Float64}, collect(values))
     if isempty(ds.keys) && isempty(ds.scalars)
         ds.nrows = length(vals)
@@ -221,6 +224,7 @@ function add_scalar!(ds::Dataset, name::AbstractString, values;
         "one value per row"))
     s = Slot(name, :scalar; units = units, source = "data",
              statistic = statistic, of = of, quantile = quantile,
+             level = level, method = method,
              ldims = [:row], dshape = [length(vals)], eltype = Float64,
              deflate = deflate, shuffle = shuffle,
              data = vals, path = "/scalars/" * String(name))
@@ -343,12 +347,14 @@ function make_array_slot(ds::Dataset, sup::Support, name::AbstractString,
                          data, location::Symbol; role::Symbol = :field,
                          units = nothing, dims = nothing, varies = nothing,
                          components = nothing, statistic = nothing,
-                         of = nothing, quantile = nothing, category = nothing,
+                         of = nothing, quantile = nothing, level = nothing,
+                         method = nothing, category = nothing,
                          recomputed = nothing, derived_from = nothing,
                          recipe = nothing, reference = nothing,
                          eltype = nothing, deflate = nothing,
                          shuffle = false)
     path = array_path(sup, name, location)
+    check_statistic(statistic, of, quantile, level, method, false, path)
     role in ARRAY_ROLES || throw(MestraError("E02", path,
         "`$(role)` is not an array role of section 3; pass `role` as one " *
         "of " * join(string.(ARRAY_ROLES), ", ")))
@@ -382,6 +388,7 @@ function make_array_slot(ds::Dataset, sup::Support, name::AbstractString,
                 varies = varies, units = units,
                 components = dshape[end],
                 statistic = statistic, of = of, quantile = quantile,
+                level = level, method = method,
                 category = category, recomputed = recomputed,
                 derived_from = derived_from, recipe = recipe,
                 reference = reference,
@@ -504,10 +511,14 @@ function add_callable_slot!(ds::Dataset, sup::Support, name::AbstractString;
                             units::AbstractString, components::Integer,
                             callable = nothing, id = nothing,
                             output::AbstractString,
-                            varies::AbstractString = "row")
+                            varies::AbstractString = "row",
+                            statistic = nothing, of = nothing)
     id = callable_name(callable, id, array_path(sup, name, location))
+    check_statistic(statistic, of, nothing, nothing, nothing, true,
+                    array_path(sup, name, location))
     s = Slot(name, location; support = sup.name, role = role, varies = varies,
              units = units, components = components,
+             statistic = statistic, of = of,
              source = "callable:" * String(id), output = String(output),
              path = "/supports/$(sup.name)/" *
                     (location === :cell ? "cell_arrays/" : "node_arrays/") *
@@ -523,14 +534,58 @@ A scalar slot served by a callable.  `id` is accepted for `callable`.
 """
 function add_callable_scalar!(ds::Dataset, name::AbstractString;
                               units::AbstractString, callable = nothing,
-                              id = nothing, output::AbstractString)
+                              id = nothing, output::AbstractString,
+                              statistic = nothing, of = nothing)
     id = callable_name(callable, id, "/scalars/" * String(name))
-    s = Slot(name, :scalar; units = units,
+    check_statistic(statistic, of, nothing, nothing, nothing, true,
+                    "/scalars/" * String(name))
+    s = Slot(name, :scalar; units = units, statistic = statistic, of = of,
              source = "callable:" * String(id), output = String(output),
              path = "/scalars/" * String(name))
     ds.scalars[String(name)] = s
     push!(ds.container_groups, "scalars")
     return s
+end
+
+"""E02 and E12 at build time: a statistic with what it needs (section
+9), and on a slot a callable serves, one a callable produces (section
+10)."""
+function check_statistic(statistic, of, quantile, level, method,
+                         served::Bool, path)
+    if statistic != "band" && (level !== nothing || method !== nothing)
+        throw(MestraError("E12", path,
+            "`level` and `method` belong to a band; pass statistic = " *
+            "\"band\" with `of` naming the base quantity"))
+    end
+    statistic === nothing && return
+    statistic in STATISTICS || throw(MestraError("E02", path,
+        "`$(statistic)` is not a statistic of section 9; pass one of " *
+        join(STATISTICS, ", ")))
+    statistic == "quantile" && quantile === nothing &&
+        throw(MestraError("E12", path,
+            "a quantile statistic carries its quantile; pass `quantile`"))
+    !(statistic in ("value", "draw")) && of === nothing &&
+        throw(MestraError("E12", path,
+            "a $(statistic) names the quantity it is a statistic of; pass " *
+            "`of`"))
+    served && statistic in ("std", "quantile", "draw") &&
+        throw(MestraError("E12", path,
+            "a callable returns a mean and at most a band (section 10), " *
+            "so a slot it serves is value, mean or band; store a " *
+            "$(statistic) as data"))
+    if statistic == "band" && !served
+        level === nothing && throw(MestraError("E12", path,
+            "a band states the coverage it claims; pass `level` in " *
+            "(0, 1), for example 0.95"))
+        0 < level < 1 || throw(MestraError("E12", path,
+            "`level` is the coverage a band claims, a fraction in (0, 1), " *
+            "and $(level) is not; a 1.96-sigma Gaussian band is 0.95"))
+        (method === nothing || isempty(method)) &&
+            throw(MestraError("E12", path,
+                "a band says how it was made; pass `method` with one " *
+                "sentence"))
+    end
+    return
 end
 
 """

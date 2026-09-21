@@ -55,9 +55,10 @@ _ROOT_GROUPS = ("keys", "scalars", "categories", "supports",
 _KEY_ATTRS = ("role", "units", "lower", "upper", "category",
               "trajectory_group", "parent")
 _SCALAR_ATTRS = ("units", "source", "output", "statistic", "of",
-                 "quantile")
+                 "quantile", "level", "method")
 _ARRAY_ATTRS = ("role", "varies", "units", "components", "source",
-                "output", "statistic", "of", "quantile", "category",
+                "output", "statistic", "of", "quantile", "level", "method",
+                "category",
                 "recomputed", "derived_from", "recipe", "reference")
 _SUPPORT_ATTRS = ("kind", "n_nodes", "n_cells", "support_id")
 _SUPPORT_MEMBERS = ("node", "cell", "cell_plus_one", "index", "row",
@@ -73,9 +74,10 @@ _ATTR_KIND = {
     "varies": "string", "kind": "string", "support_id": "string",
     "derived_from": "string", "recipe": "string", "reference": "string",
     "trajectory_group": "string", "parent": "string", "type": "string",
-    "repr": "string",
+    "repr": "string", "method": "string",
     "n_nodes": "integer", "n_cells": "integer", "components": "integer",
     "lower": "float", "upper": "float", "quantile": "float",
+    "level": "float",
     "aligned": "boolean", "recomputed": "boolean",
 }
 
@@ -741,6 +743,7 @@ class _FileValidator:
                 self._rows(member, where, self.n_rows,
                            one_dimensional=True)
                 self._finite(member, where)
+                self._band(member, where)
             elif "components" in attrs:
                 self.warn("W11", where, "components is not used on a "
                                         "scalar")
@@ -1031,6 +1034,7 @@ class _FileValidator:
             self._label(member, where)
         if role in ("field", "derived"):
             self._finite(member, where)
+            self._band(member, where)
         return role
 
     def _array_dtype(self, dset: h5py.Dataset, where: str,
@@ -1338,8 +1342,8 @@ class _FileValidator:
                            % (name, dtype))
             elif not np.isfinite(np.asarray(obj.attrs[name])).all():
                 self.error("E19", path, "the attribute %s declares a "
-                                        "bound or a quantile and must "
-                                        "be finite" % name)
+                                        "bound, a level or a quantile "
+                                        "and must be finite" % name)
             return
         if dtype not in (np.dtype("int64"), np.dtype("float64"),
                          np.dtype("int8")):
@@ -1571,7 +1575,9 @@ class _FileValidator:
                                      "which output fills it")
 
     def _statistic(self, obj: Any, where: str) -> None:
-        """E12: statistic, of and quantile together (section 9)."""
+        """E12: a statistic with what it needs (section 9), and on a
+        slot a callable serves, one a callable produces (section
+        10)."""
         attrs = _names(obj)
         if "statistic" not in attrs:
             return
@@ -1580,12 +1586,50 @@ class _FileValidator:
             self.error("E02", where, "%r is not a statistic of section "
                                      "9" % statistic)
             return
+        served = False
+        if "source" in attrs:
+            source = read_attr(obj, "source")
+            served = isinstance(source, str) and \
+                source.startswith("callable:")
         if statistic == "quantile" and "quantile" not in attrs:
             self.error("E12", where, "a quantile statistic carries its "
                                      "quantile")
         if statistic not in ("value", "draw") and "of" not in attrs:
             self.error("E12", where, "a %s names the quantity it is a "
                                      "statistic of" % statistic)
+        if served and statistic in ("std", "quantile", "draw"):
+            self.error("E12", where, "a callable returns a mean and at "
+                                     "most a band (section 10), so a "
+                                     "slot it serves is value, mean or "
+                                     "band, not %s" % statistic)
+        if statistic == "band" and not served:
+            if "level" not in attrs:
+                self.error("E12", where, "a band states the coverage it "
+                                         "claims with level")
+            else:
+                level = read_attr(obj, "level")
+                if isinstance(level, float) and not 0.0 < level < 1.0:
+                    self.error("E12", where, "level is a coverage "
+                                             "fraction in (0, 1), and "
+                                             "this is %r" % level)
+            if "method" not in attrs:
+                self.error("E12", where, "a band says how it was made "
+                                         "with method")
+
+    def _band(self, dset: h5py.Dataset, where: str) -> None:
+        """W16: a negative value in a band (section 9)."""
+        if "statistic" not in _names(dset) or \
+                read_attr(dset, "statistic") != "band":
+            return
+        if dset.dtype.kind != "f" or not dset.size:
+            return
+        values = self.values(dset, where)
+        if values is None or values.dtype.kind != "f":
+            return
+        leading = _logical(dset, self.scales)
+        said = w16(values, leading[0] if leading else "index")
+        if said:
+            self.warn("W16", where, said)
 
     def _float64(self, dset: h5py.Dataset, where: str,
                  what: str) -> bool:
@@ -1736,6 +1780,20 @@ def w03(values: np.ndarray, axis: str) -> str | None:
             "floating-point data, %s"
             % (_count(int(bad.sum()), "a non-finite value",
                       "non-finite values"), _at(axis, rows)))
+
+
+def w16(values: np.ndarray, axis: str) -> str | None:
+    """W16: negative values in a band, which is a half-width."""
+    if values.dtype.kind != "f" or not values.size:
+        return None
+    bad = values < 0
+    if not bad.any():
+        return None
+    rows = sorted({int(at[0]) for at in np.argwhere(bad)})
+    return ("%s below zero in a band, which is a half-width and is "
+            "never negative, %s"
+            % (_count(int(bad.sum()), "a value", "values"),
+               _at(axis, rows)))
 
 
 def w04(values: np.ndarray, lower: Any, upper: Any) -> str | None:

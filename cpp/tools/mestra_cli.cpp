@@ -250,6 +250,8 @@ void print_slot(const char* kind, const mestra::ArraySlot& a) {
   if (a.quantile.has_value()) {
     std::cout << " quantile=" << number_text(*a.quantile);
   }
+  if (a.level.has_value()) std::cout << " level=" << number_text(*a.level);
+  if (a.method.has_value()) std::cout << " method=\"" << *a.method << "\"";
   if (a.derived_from.has_value()) {
     std::cout << " derived_from=" << *a.derived_from;
   }
@@ -298,6 +300,10 @@ int cmd_info(const std::string& path) {
     if (s.of.has_value()) std::cout << " of=" << *s.of;
     if (s.quantile.has_value()) {
       std::cout << " quantile=" << number_text(*s.quantile);
+    }
+    if (s.level.has_value()) std::cout << " level=" << number_text(*s.level);
+    if (s.method.has_value()) {
+      std::cout << " method=\"" << *s.method << "\"";
     }
     std::cout << "\n";
   }

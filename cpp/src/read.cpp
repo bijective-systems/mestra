@@ -156,6 +156,8 @@ void fill_slot_attributes(const Attrs& at, ArraySlot* slot) {
   slot->statistic = at.text("statistic");
   slot->of = at.text("of");
   slot->quantile = at.real("quantile");
+  slot->level = at.real("level");
+  slot->method = at.text("method");
   slot->category = at.text("category");
   slot->recomputed = at.boolean("recomputed");
   slot->derived_from = at.text("derived_from");
@@ -271,6 +273,8 @@ Dataset read_impl(const std::string& path, bool with_data) {
     s.statistic = at.text("statistic");
     s.of = at.text("of");
     s.quantile = at.real("quantile");
+    s.level = at.real("level");
+    s.method = at.text("method");
     s.extra = at.unknown(internal::known_scalar_attribute);
     if (m.is_dataset) {
       const DsetInfo info = f.dataset_info(p);

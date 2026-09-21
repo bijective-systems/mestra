@@ -167,10 +167,10 @@ same support_id as the training file; the slots pressure, heat_flux
 (node arrays on S) and CL (scalar) carry their attributes and
 `source = callable:m1`; `/callables/m1` holds the callable's
 dictionary under its `type`. Evaluating the file on a keys table gives
-a file with the same slots holding data, including pressure with a
-`draw` dimension where statistic = draw and mean and std as derived
-summaries; the draw count, seed, and batch size were the callable's
-own settings.
+a file with the same slots holding data, including pressure with its
+band beside it (statistic = band, `of` pressure), whose level and
+method the callable stated; how the callable arrived at the band was
+its own business.
 
 Five callables, one each for x, y, z, pressure, and shear, sharing
 support S and overlapping key bounds, are five slots referencing five

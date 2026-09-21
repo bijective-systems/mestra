@@ -1,6 +1,8 @@
 """Post-processing written against the format and nothing else.
 
-Four operations that need no knowledge of where a file came from:
+Five operations that need no knowledge of where a file came from:
+one slot as a prediction, its mean with its band, whether the slot
+holds data or a callable serves it;
 statistics of a field or a scalar, grouped by a label or a key;
 integration of a field over a support or one region of it, with the
 weights section 3 says are computed from the connectivity;
@@ -25,11 +27,13 @@ from typing import Any
 
 import numpy as np
 
+from .callables import Prediction, keys_table
 from .errors import MestraError
 from .model import ArraySlot, Dataset, Key, ScalarSlot, Support
 from .weights import compute_weights, measures
 
 __all__ = [
+    "prediction",
     "Statistics",
     "field_statistics",
     "integrate",
@@ -81,6 +85,98 @@ def find_array(dataset: Dataset, name: str,
             "as well, as in \"%s/%s\"" % (len(found), name,
                                           found[0][0].name, name), name)
     return found[0]
+
+
+def _slot_by_name(dataset: Dataset, name: str
+                  ) -> tuple[Support | None, Any]:
+    """A scalar by name, or an array by `find_array`'s spellings."""
+    if "/" not in name and name in dataset.scalars:
+        return None, dataset.scalars[name]
+    return find_array(dataset, name)
+
+
+# ---------------------------------------------------------- prediction
+
+def prediction(dataset: Dataset, slot: str,
+               keys: Any = None) -> Prediction:
+    """One slot as a prediction: its mean with its band.
+
+    `slot` names a scalar or an array (as `find_array` spells it)
+    whose statistic is `value` or `mean`, or none. For a stored slot
+    the mean is its data and the band is the `band` slot at the same
+    location that names it with `of`, if there is one; `keys` must
+    then be omitted, because stored data has values on its own rows
+    only. For a slot a callable serves, the callable is called on
+    `keys`, or on the file's own key columns when `keys` is omitted,
+    and its record for the slot's output is returned as it is
+    (section 10). Either way the caller gets the same record and
+    never has to know which it was.
+    """
+    support, found = _slot_by_name(dataset, slot)
+    if found.statistic == "band":
+        raise MestraError(
+            "", "%r is the band of %r; name the base slot and the band "
+            "comes with it" % (slot, found.of), slot)
+    if found.statistic not in (None, "value", "mean"):
+        raise MestraError(
+            "", "%r holds the %s of %r, which is stored data about "
+            "stored data and not a prediction; name the base slot"
+            % (slot, found.statistic, found.of), slot)
+    if found.is_callable:
+        identifier = found.callable_id or ""
+        if identifier not in dataset.callables:
+            raise MestraError(
+                "E14", "this slot names the callable %r and the file "
+                "does not hold it" % identifier, slot)
+        if keys is None:
+            if not dataset.n_rows:
+                raise MestraError(
+                    "", "this file has no rows to evaluate %r on; pass "
+                    "keys= with one column per key" % slot, slot)
+            keys = {name: dataset.keys[name].read().values
+                    for name in dataset.key_names()}
+        records = dataset.callables[identifier](keys_table(keys))
+        output = found.output or found.name
+        if output not in records:
+            raise MestraError(
+                "E14", "the callable %s produced no output called %r"
+                % (identifier, output), slot)
+        record = records[output]
+        if not isinstance(record, Prediction):
+            raise MestraError(
+                "section 10", "a callable returns a Prediction per "
+                "output; %s returned %s" % (identifier,
+                                             type(record).__name__),
+                slot)
+        return record
+    if keys is not None:
+        raise MestraError(
+            "", "%r holds stored data, which has values on its own rows "
+            "only; omit keys=, or name a slot a callable serves" % slot,
+            slot)
+    mean = np.asarray(found.read().values)
+    band = _band_of(dataset, support, found)
+    if band is None:
+        return Prediction(mean)
+    return Prediction(mean, np.asarray(band.read().values),
+                      level=band.level, method=band.method)
+
+
+def _band_of(dataset: Dataset, support: Support | None,
+             base: Any) -> Any:
+    """The band slot at the same location as `base` that names it."""
+    candidates: list[Any]
+    if support is None:
+        candidates = list(dataset.scalars.values())
+    else:
+        arrays = (support.node_arrays if base.location == "node"
+                  else support.cell_arrays)
+        candidates = list(arrays.values())
+    for slot in candidates:
+        if slot.statistic == "band" and slot.of == base.name \
+                and not slot.is_callable:
+            return slot
+    return None
 
 
 def _array_names(dataset: Dataset, support: str | None) -> list[str]:

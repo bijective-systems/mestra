@@ -208,8 +208,9 @@ domain the model is valid over, and its slots carry their units and
 their shape and say `source = callable:m1`.
 
 A callable is four things and nothing more: call it with a keys table
-and get values back, turn it into a dictionary, rebuild it from one,
-and optionally describe itself in a line. Everything else it knows,
+and get one prediction per output back, a mean and, when the model
+has one, a band; turn it into a dictionary; rebuild it from one; and
+optionally describe itself in a line. Everything else it knows,
 including its algorithm and its fitted state, lives inside that
 dictionary and is nobody else's business. That is what keeps a
 proprietary model and an open format compatible: the `type` string is
@@ -231,20 +232,27 @@ The example: `examples/callables-and-evaluation/`. A zero-row file
 with two callable slots, evaluated on one keys table.
 
 
-7. Uncertainty as draws
------------------------
+7. Uncertainty: a band, or draws
+--------------------------------
 
 A model's output is stored with the same roles as data, plus a
-`statistic` saying what the numbers are: `value`, `mean`, `std`,
-`quantile` or `draw` (SPEC section 9). Anything but `value` and `draw`
-names the quantity it summarises with `of`.
+`statistic` saying what the numbers are: `value`, `mean`, `band`,
+`std`, `quantile` or `draw` (SPEC section 9). Anything but `value` and
+`draw` names the quantity it summarises with `of`.
 
-A draw is a whole field at once, joint across the nodes, so the draws
-of a field carry an extra `draw` axis between the row and the node.
-Summaries are derived from the draws by an open routine, which means
-the numbers on a report can be recomputed from the file. How many
-draws there were, from what seed, in what batches, is the producer's
-record and not part of the format.
+A band is the one representation a callable returns: the half-width
+of the interval around the mean, at the coverage its `level` states
+(0.95 for a 1.96-sigma Gaussian band), made as its `method` says. It
+is taken as given, because the error a model knows about is not
+always something it sampled. `prediction(ds, "pressure")` returns the
+mean with its band whether the slot holds data or a callable serves
+it, which is what lets one viewer show both.
+
+Draws are stored data: a whole field at once, joint across the nodes,
+so the draws of a field carry an extra `draw` axis between the row
+and the node, and the summaries beside them can be recomputed from
+the file. How many draws there were, from what seed, in what batches,
+is the producer's record and not part of the format.
 
 The example: `examples/uncertainty-as-draws/`. Four draws per row, and
 the mean and standard deviation beside them.

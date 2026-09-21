@@ -1,7 +1,7 @@
 mestra: specification, draft version 0
 ======================================
 
-Date: 2026-09-19, revised 2026-09-20. Status: draft for discussion.
+Date: 2026-09-19, revised 2026-09-21. Status: draft for discussion.
 Normative language ("must", "may") is used so that the rules are
 unambiguous, but nothing in this draft is frozen. The spec text is
 CC-BY-4.0.
@@ -265,30 +265,48 @@ quantify anything.
 Where it is carried, model outputs are stored as arrays and scalars
 with the same roles as data, plus:
 
-  statistic    value | mean | std | quantile | draw
+  statistic    value | mean | band | std | quantile | draw
   of           the name of the base quantity this is a statistic of
+  level        a number in (0, 1) when statistic = band: the coverage
+               the band claims
+  method       a string when statistic = band: how the band was made
   quantile     a number in (0, 1) when statistic = quantile
 
-The slot's `statistic` and `of` are what say which of these an output
-is. A producer may serve none of `value`, `mean`, `std`, `quantile`
-and `draw`, some of them, or all five; a reader learns which from the
-slot's attributes and never has to ask the producer. These five are
-the summaries the format names. Any other summary is a derived array
-carrying `derived_from` and a `recipe` (section 3), so that every
-number in a file says where it came from.
+The slot's `statistic` and `of` are what say which of these a slot
+is; a reader learns it from the attributes and never has to ask the
+producer. These six are the statistics the format names. Any other
+summary is a derived array carrying `derived_from` and a `recipe`
+(section 3), so that every number in a file says where it came from.
 
-Draws carry the `draw` dimension. A draw is one whole field or one
-whole scalar: draw k of pressure is a complete field over every node,
-so whatever dependence the producer has across nodes is preserved in
-the file instead of being collapsed to a per-node number that cannot
-be put back. How many draws, from which seed, in what batches, are
-the producer's business and its records, not the format's; the file
-may repeat them as optional metadata, and nothing in the format
-depends on them.
+The band. A band is the half-width of a symmetric interval around its
+base quantity: the producer's claim is that the true value lies
+between `mean - band` and `mean + band` for the fraction `level` of
+cases. It has the shape and the units of its base quantity and it is
+never negative (W16). It is the one representation of uncertainty a
+callable returns (section 10), and it is taken as given: the producer
+puts into it everything it knows about its own error, sampled or not,
+so a reader draws the band it finds and does not recompute one from
+anything else in the file. `method` says in words how the band was
+made, for instance from the spread of samples pushed through a
+nonlinear map with a truncation term added; the numbers behind that
+sentence are the producer's own records. `level` is a fraction and
+not a multiple of a standard deviation: under a Gaussian assumption a
+one-sigma band is 0.6827 and a 1.96-sigma band is 0.95, and a producer
+that assumes something else states the coverage its band has.
 
-Where a file carries both draws and a summary of them, the summary is
-derived from the draws by an open routine, so it can be recomputed
-from the file.
+Draws, standard deviations and quantiles are stored data about stored
+data. Draws carry the `draw` dimension. A draw is one whole field or
+one whole scalar: draw k of pressure is a complete field over every
+node, so whatever dependence the producer has across nodes is
+preserved in the file instead of being collapsed to a per-node number
+that cannot be put back. How many draws, from which seed, in what
+batches, are the producer's business and its records, not the
+format's; the file may repeat them as optional metadata, and nothing
+in the format depends on them. Where a file carries both draws and a
+summary of them, the summary is derived from the draws by an open
+routine, so it can be recomputed from the file. Nothing ties draws to
+a callable: a producer that samples stores its samples as data, and
+what it has learned from them, if it states it, is a band.
 
 
 10. Callables
@@ -297,11 +315,22 @@ from the file.
 A callable is any object that conforms to four things and nothing
 more:
 
-  call        keys in, values out: given a keys table (one column per
-              key the file declares, any number of rows), return the
-              values for the slots it serves, shaped as those slots
-              would be stored: (row, [draw], node | cell, component)
-              for arrays, (row) for scalars
+  call        keys in, predictions out: given a keys table (one
+              column per key the file declares, any number of rows),
+              return one prediction per output it serves. A
+              prediction is a record of four things:
+                mean         required: the point prediction, shaped
+                             as the slot would be stored, that is
+                             (row, node | cell, component) for an
+                             array and (row) for a scalar
+                uncertainty  optional: a band (section 9), the
+                             half-width of the interval around
+                             `mean`, of the same shape and units and
+                             never negative
+                level        required with `uncertainty`: the
+                             coverage the band claims, in (0, 1)
+                method       required with `uncertainty`: how the
+                             band was made, in words
   to_dict     a nested dictionary of arrays, numbers, and strings
               that fully represents it
   from_dict   the inverse, dispatched on a `type` string
@@ -317,19 +346,29 @@ Any array or scalar slot may hold stored data or a reference to a
 callable. The slot's attributes (role, units, components, statistic)
 describe what the slot is in either case; its location and its support
 are given by where it sits in the file and are not attributes (section
-19); the
-content attribute `source` is `data` or `callable:<id>`, and for
-callables that serve several slots, `output` names which of the
-callable's outputs fills this slot. Named outputs are the whole of a
-callable's contract: it does not declare which statistic an output
-is, and the format never asks it to. What an output means is the
-slot's `statistic` and `of` (section 9), so a producer may serve none
-of `value`, `mean`, `std`, `quantile` and `draw`, some of them, or
-all five, with the same four-thing protocol in every case. A callable
-is stored once under
-`/callables/<id>` and may be referenced by any number of slots. A slot
-holding data is a dataset; a slot served by a callable is a group with
-the same attributes and no data (section 19).
+19); the content attribute `source` is `data` or `callable:<id>`, and
+`output` names which of the callable's outputs fills the slot. Which
+part of that output fills it is the slot's `statistic`: a slot whose
+statistic is `value` or `mean`, or that has none, takes the output's
+`mean`; a slot whose statistic is `band` takes its `uncertainty`, and
+evaluation writes the record's `level` and `method` onto the slot. So
+a callable that serves `pressure` and `pressure_band`, both with
+`output = pressure`, fills both from one record, and `of` links the
+band to its base exactly as it does for stored data. A callable serves
+nothing else: `std`, `quantile` and `draw` are stored data about
+stored data (section 9), and a callable slot with one of them is E12.
+A band slot whose output carries no `uncertainty` is an error at
+evaluation, since the file would otherwise hold a band with no level.
+
+The record is the whole of a callable's contract. Every output is a
+prediction of the same four things whatever the model, so a tool that
+shows a stored mean with its band shows a callable's the same way and
+never has to know what is inside the callable; how the band was
+computed is the callable's own business and its `method` line. A
+callable is stored once under `/callables/<id>` and may be referenced
+by any number of slots. A slot holding data is a dataset; a slot
+served by a callable is a group with the same attributes and no data
+(section 19).
 
 A file with callable slots may have zero rows, and may also have rows
 (section 22). With zero rows its key columns
@@ -419,7 +458,8 @@ dimension scale, named as section 21 requires.
                                lower?, upper?, category?,
                                trajectory_group?, parent?
     /scalars/<name>            (row)  attrs: units, source, output?,
-                               statistic?, of?, quantile?
+                               statistic?, of?, level?, method?,
+                               quantile?
                                a group with the same attributes and no
                                data when source is a callable
     /categories/<name>         (category_<name>)  fixed-length strings
@@ -440,7 +480,8 @@ dimension scale, named as section 21 requires.
       /node_arrays/<name>      (row|group|-, [draw], node, component)
                                attrs: role, units, varies, components,
                                source,
-                               output?, statistic?, of?, quantile?,
+                               output?, statistic?, of?, level?,
+                               method?, quantile?,
                                category?, recomputed?,
                                derived_from?, recipe?, reference?
                                a group with the same attributes and no
@@ -490,10 +531,15 @@ Errors (the file is rejected):
   E11  units absent from a field or a scalar. Units on a key, on
        coordinates and on a derived array are E39; `weight` and
        `normal` do not require units at all
-  E12  a quantile statistic without a quantile, or a statistic
-       other than `value` or `draw` without `of`. A slot whose
+  E12  a statistic without what it needs: a quantile statistic
+       without a quantile; a statistic other than `value` or `draw`
+       without `of`; a `band` statistic on a stored slot without
+       `level` in (0, 1) or without `method`; or a slot served by a
+       callable whose statistic is `std`, `quantile` or `draw`,
+       which a callable does not produce (section 10). A slot whose
        statistic is `draw` holds the base quantity itself and does
-       not name it again
+       not name it again. A band slot served by a callable carries
+       `level` and `method` once it is evaluated and not before
   E13  a derived array without `derived_from` and `recipe`
   E14  a slot whose `source` names a callable id that does not exist
   E15  a callable group without `type`
@@ -634,6 +680,8 @@ Warnings (the file is accepted; the reader must report):
   W15  a support that no row references. It is decidable only in a
        file that carries `/row_support`; in an aligned file every row
        is on the one support and the rule does not apply
+  W16  a negative value in a band, with the row and name. A band is a
+       half-width (section 9)
 
 
 15. Conformance
@@ -796,9 +844,21 @@ Uncertainty:
 
   - Representing uncertainty at all is optional; a file that carries none
     is an ordinary file (section 9).
-  - A slot's `statistic` and `of` say what the slot means, and a producer
-    may serve any subset of `value`, `mean`, `std`, `quantile` and `draw`
-    (sections 9 and 14).
+  - A slot's `statistic` and `of` say what the slot means (sections 9
+    and 14).
+  - A callable returns, per output, a mean and at most one band with its
+    level and method, and serves no other statistic; std, quantile and
+    draw are stored data about stored data. One record for every model
+    is what lets a tool show a stored prediction and a callable's the
+    same way (sections 9 and 10).
+  - A band is a half-width at a stated coverage and is taken as given,
+    because the error a model knows about is not always something it
+    sampled: a spread of samples through a truncated map cannot see the
+    truncation, and a reader that rebuilt a band from samples would
+    understate it (section 9).
+  - `band` was added to the statistics before any version-0 file was in
+    use, which is why section 28's rule on new statistics is not broken
+    by it (sections 9 and 28).
   - A slot whose statistic is `draw` holds the base quantity itself and
     carries no `of` (section 14).
   - The `draw` dimension is present only when the slot holds draws
@@ -914,7 +974,7 @@ way (E19).
   integer   H5T_STD_I64LE (int64), scalar dataspace.
   float     H5T_IEEE_F64LE (float64), scalar dataspace. NaN and the
             infinities may appear in datasets; an attribute that
-            declares a bound or a quantile must be finite.
+            declares a bound, a level or a quantile must be finite.
   string    a fixed-length HDF5 string, scalar dataspace, with
             character set H5T_CSET_UTF8 and padding H5T_STR_NULLPAD.
 
@@ -1015,7 +1075,8 @@ make the shape of every slot decidable without reading it:
     never has to guess whether a trailing axis is a component axis;
   - the draw dimension is present only when the slot holds draws,
     that is when `statistic` is `draw`. A slot with `statistic` of
-    `value`, `mean`, `std` or `quantile` has no draw dimension.
+    `value`, `mean`, `band`, `std` or `quantile` has no draw
+    dimension.
 
 A dataset under /scalars has exactly one dimension, `row`. A dataset
 under /keys has exactly one dimension, `row`. Neither carries a
@@ -1064,7 +1125,8 @@ Required attributes, by object:
                           optional parent (string) on a group key
   /scalars/<name>         units (string), source (string), components
                           is not used; output (string) when source is
-                          a callable; optional statistic, of, quantile
+                          a callable; optional statistic, of, level,
+                          method, quantile
   /categories/<name>      no required attribute
   /row_support            no required attribute
   /supports/<s>           kind (string), n_nodes (integer), n_cells
@@ -1084,7 +1146,8 @@ Required attributes, by object:
                           value is `row=<i>` or
                           `group:<k>=<category name>` (section 5);
                           output (string) when source is a callable;
-                          optional statistic, of, quantile
+                          optional statistic, of, level, method,
+                          quantile
   /callables/<id>         type (string), optional repr (string)
 
 `components` is required on every array slot, and for a slot that
@@ -1673,9 +1736,10 @@ Its `type` is the string `affine`. Its dictionary is exactly:
             UTF-8 string dataset. This is the declared key order, and
             x is built by taking those keys from the keys table in
             that order.
-  outputs   a dictionary with one entry per slot the callable serves.
-            The entry's name is the value of the slot's `output`
-            attribute. Each entry is a dictionary with exactly:
+  outputs   a dictionary with one entry per output the callable
+            serves. The entry's name is the value of the slots'
+            `output` attribute. Each entry is a dictionary with
+            exactly:
       A       float64, shape (n_out_flat, n_keys)
       b       float64, shape (n_out_flat,)
       shape   int64, one-dimensional: the slot's dimensions after the
@@ -1683,18 +1747,30 @@ Its `type` is the string `affine`. Its dictionary is exactly:
               or axis support that is [node count, component count].
               For a scalar slot it is the empty int64 array, shape
               (0,).
+            and, when the output carries a band, all three of:
+      uncertainty  float64, shape (n_out_flat,): the band, the same
+                   for every row
+      level        a float in (0, 1)
+      method       a string
 
 n_out_flat is the product of `shape`, and the empty product is 1, so a
 scalar slot has n_out_flat = 1. n_keys is the length of `keys`. There
 is nothing else in the dictionary; a writer must not add to it and a
-reader must refuse an `affine` dictionary with any other key.
+reader must refuse an `affine` dictionary with any other key, or with
+one or two of the three band keys.
 
 Evaluation. For a keys table with R rows, build X of shape
 (R, n_keys) from the declared keys as float64, compute
 Y = X A' + b broadcast over rows, giving (R, n_out_flat), and reshape
-each row of Y to `shape` in C order. The slot's stored form is then
-(row, node | cell, component) for an array and (row) for a scalar. An
-`affine` callable never sets `statistic` to `draw`.
+each row of Y to `shape` in C order. That is the `mean` of the
+output's prediction (section 10), in the stored form (row, node |
+cell, component) for an array and (row) for a scalar. When the entry
+carries a band, the prediction's `uncertainty` is `uncertainty`
+reshaped to `shape` the same way and repeated for each of the R rows,
+with `level` and `method` as stored; otherwise the prediction has no
+uncertainty. The band is a constant so that evaluation stays exact and
+the implementations can be compared on it bit for bit; it stands in
+for whatever a real model knows about its own error.
 
 The dot product is accumulated over the keys in the declared key
 order and b is added last, and no fused multiply-add is used. The
@@ -1721,6 +1797,16 @@ On the one-row keys table mach = 0.5, alpha = 4.0:
   pressure  = [0.5, 1.1, 3.7, 4.3, 6.9, 7.5], as shape (1, 6, 1)
 
 docs/examples/affine_zero_rows.mes is this callable, written out.
+
+With a band. vectors/cases/affine_band is the same callable with a
+band on both outputs: cl carries uncertainty [0.02] at level 0.95 and
+pressure carries [0.05, 0.10, 0.15, 0.20, 0.25, 0.30] at level 0.68,
+each with the method "constant band". The file adds two slots, cl_band
+and pressure_band, with `statistic = band`, `of` naming the base slot
+and the same `output` as it. On the one-row table above cl and
+pressure are unchanged, cl_band is 0.02 and pressure_band is the
+vector just given, and the evaluated file carries `level` and
+`method` on both band slots.
 
 
 28. Version handling

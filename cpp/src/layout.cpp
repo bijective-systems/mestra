@@ -104,7 +104,7 @@ bool known_key_attribute(const std::string& name) {
 
 bool known_scalar_attribute(const std::string& name) {
   return one_of(name, {"units", "source", "output", "statistic", "of",
-                       "quantile"});
+                       "quantile", "level", "method"});
 }
 
 bool known_support_attribute(const std::string& name) {
@@ -113,8 +113,9 @@ bool known_support_attribute(const std::string& name) {
 
 bool known_array_attribute(const std::string& name) {
   return one_of(name, {"role", "varies", "units", "components", "source",
-                       "output", "statistic", "of", "quantile", "category",
-                       "recomputed", "derived_from", "recipe", "reference"});
+                       "output", "statistic", "of", "quantile", "level",
+                       "method", "category", "recomputed", "derived_from",
+                       "recipe", "reference"});
 }
 
 bool known_callable_attribute(const std::string& name) {

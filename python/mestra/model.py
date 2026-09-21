@@ -70,7 +70,7 @@ ARRAY_ROLES: dict[str, int | None] = {
 }
 
 #: Section 9.
-STATISTICS = ("value", "mean", "std", "quantile", "draw")
+STATISTICS = ("value", "mean", "band", "std", "quantile", "draw")
 
 #: Section 19: which keys are stored as integers.
 _INTEGER_KEY_ROLES = ("categorical", "group", "split", "status")
@@ -433,6 +433,7 @@ class Slot:
                  source: str = "data", output: str | None = None,
                  statistic: str | None = None, of: str | None = None,
                  quantile: float | None = None,
+                 level: float | None = None, method: str | None = None,
                  data: _Source | None = None,
                  storage: Storage | None = None,
                  extra: Mapping[str, Any] | None = None) -> None:
@@ -443,6 +444,10 @@ class Slot:
         self.statistic = statistic
         self.of = of
         self.quantile = quantile
+        #: The coverage a band claims and how it was made (section 9);
+        #: None on anything that is not a band.
+        self.level = level
+        self.method = method
         self.data = data
         self.storage = storage or Storage()
         self.extra = dict(extra or {})
@@ -736,6 +741,8 @@ class Support:
                        statistic: str | None = None,
                        of: str | None = None,
                        quantile: float | None = None,
+                       level: float | None = None,
+                       method: str | None = None,
                        recomputed: bool | None = None,
                        derived_from: str | None = None,
                        recipe: str | None = None,
@@ -765,8 +772,8 @@ class Support:
             self.node_arrays, "node", name, values, units=units,
             dims=dims, role=role, varies=varies, components=components,
             category=category, categories=categories,
-            statistic=statistic, of=of, quantile=quantile,
-            recomputed=recomputed, derived_from=derived_from,
+            statistic=statistic, of=of, quantile=quantile, level=level,
+            method=method, recomputed=recomputed, derived_from=derived_from,
             recipe=recipe, reference=reference,
             callable_id=callable_id, output=output, dtype=dtype, **rest)
 
@@ -780,6 +787,8 @@ class Support:
                        statistic: str | None = None,
                        of: str | None = None,
                        quantile: float | None = None,
+                       level: float | None = None,
+                       method: str | None = None,
                        recomputed: bool | None = None,
                        derived_from: str | None = None,
                        recipe: str | None = None,
@@ -793,8 +802,8 @@ class Support:
             self.cell_arrays, "cell", name, values, units=units,
             dims=dims, role=role, varies=varies, components=components,
             category=category, categories=categories,
-            statistic=statistic, of=of, quantile=quantile,
-            recomputed=recomputed, derived_from=derived_from,
+            statistic=statistic, of=of, quantile=quantile, level=level,
+            method=method, recomputed=recomputed, derived_from=derived_from,
             recipe=recipe, reference=reference,
             callable_id=callable_id, output=output, dtype=dtype, **rest)
 
@@ -853,7 +862,8 @@ class Support:
             category = category or name
             self.dataset.add_category_table(category, categories)
         _check_statistic(statistic, rest.get("of"), rest.get("quantile"),
-                         name)
+                         name, rest.get("level"), rest.get("method"),
+                         served=callable_id is not None)
         if callable_id is not None:
             if self.dataset is None or \
                     callable_id not in self.dataset.callables:
@@ -1298,12 +1308,14 @@ class Dataset:
                    output: str | None = None,
                    statistic: str | None = None, of: str | None = None,
                    quantile: float | None = None,
+                   level: float | None = None, method: str | None = None,
                    **rest: Any) -> ScalarSlot:
         """Add a per-row quantity of interest:
         `add_scalar(name, values, units)`.
 
         Pass `values` for stored data, or use `add_callable_slot` for
-        a slot a callable serves.
+        a slot a callable serves. A band (`statistic="band"`) names
+        its base with `of` and states its `level` and `method`.
         """
         _check_name(name)
         if name in self.scalars:
@@ -1314,7 +1326,8 @@ class Dataset:
             raise MestraError(
                 "E11", "a scalar carries units; pass units= (\"1\" for "
                 "a dimensionless one)", name)
-        _check_statistic(statistic, of, quantile, name)
+        _check_statistic(statistic, of, quantile, name, level, method,
+                         served=callable_id is not None)
         if callable_id is not None:
             if callable_id not in self.callables:
                 raise MestraError(
@@ -1324,7 +1337,8 @@ class Dataset:
             slot = ScalarSlot(name, units=units,
                               source="callable:" + callable_id,
                               output=output or name, statistic=statistic,
-                              of=of, quantile=quantile, **rest)
+                              of=of, quantile=quantile, level=level,
+                              method=method, **rest)
             self.scalars[name] = slot
             return slot
         if values is None:
@@ -1339,7 +1353,7 @@ class Dataset:
                 "have %d. Pass one value per row" % array.ndim, name)
         slot = ScalarSlot(name, units=units, data=MemorySource(array),
                           statistic=statistic, of=of, quantile=quantile,
-                          **rest)
+                          level=level, method=method, **rest)
         self._note_rows(int(array.shape[0]), name)
         self.scalars[name] = slot
         return slot
@@ -1628,6 +1642,10 @@ def _slot_attributes(slot: Slot) -> dict[str, Any]:
             out[name] = value
     if slot.quantile is not None:
         out["quantile"] = float(slot.quantile)
+    if slot.level is not None:
+        out["level"] = float(slot.level)
+    if slot.method is not None:
+        out["method"] = slot.method
     return out
 
 
@@ -1737,8 +1755,18 @@ def _check_key_table(dataset: Dataset, role: str, category: str | None,
 
 
 def _check_statistic(statistic: str | None, of: str | None,
-                     quantile: float | None, name: str) -> None:
-    """E02 and E12: a statistic with what it needs (section 9)."""
+                     quantile: float | None, name: str,
+                     level: float | None = None,
+                     method: str | None = None,
+                     served: bool = False) -> None:
+    """E02 and E12: a statistic with what it needs (section 9), and
+    on a slot a callable serves, one a callable produces (section
+    10)."""
+    if statistic != "band" and (level is not None or method is not None):
+        raise MestraError(
+            "E12", "level and method belong to a band; pass "
+            "statistic=\"band\" with of= naming the base quantity",
+            name)
     if statistic is None:
         return
     if statistic not in STATISTICS:
@@ -1753,6 +1781,25 @@ def _check_statistic(statistic: str | None, of: str | None,
         raise MestraError(
             "E12", "a %s names the quantity it is a statistic of; pass "
             "of=" % statistic, name)
+    if served and statistic in ("std", "quantile", "draw"):
+        raise MestraError(
+            "E12", "a callable returns a mean and at most a band "
+            "(section 10), so a slot it serves is value, mean or band; "
+            "store a %s as data" % statistic, name)
+    if statistic == "band" and not served:
+        if level is None:
+            raise MestraError(
+                "E12", "a band states the coverage it claims; pass "
+                "level= in (0, 1), for example 0.95", name)
+        if not (0.0 < float(level) < 1.0):
+            raise MestraError(
+                "E12", "level is the coverage a band claims, a fraction "
+                "in (0, 1), and %r is not; a 1.96-sigma Gaussian band "
+                "is 0.95" % (level,), name)
+        if not method:
+            raise MestraError(
+                "E12", "a band says how it was made; pass method= with "
+                "one sentence", name)
 
 
 def _callable_id(dataset: Dataset | None, obj: Any, name: str) -> str:

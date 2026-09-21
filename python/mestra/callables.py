@@ -1,11 +1,16 @@
 """The callable protocol, its registry, and the `affine` reference.
 
 A callable is four things and nothing more (SPEC.md section 10):
-`__call__` takes a keys table and returns the values for the slots it
-serves, `to_dict` represents it as a nested dictionary, `from_dict`
+`__call__` takes a keys table and returns one `Prediction` per output
+it serves, `to_dict` represents it as a nested dictionary, `from_dict`
 is the inverse dispatched on a `type` string, and `__repr__` is an
 optional one-line description. Everything else it knows is inside its
 own dictionary and is its own business.
+
+A `Prediction` is a mean and, when the model has one, a band: the
+half-width `uncertainty` of the interval around the mean at coverage
+`level`, made as `method` says. How the band was computed is the
+model's business; what it claims is on the record.
 
 Adding a type is a subclass and one registration call:
 
@@ -23,6 +28,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, ClassVar
 
 import numpy as np
@@ -30,6 +36,7 @@ import numpy as np
 from .errors import MestraError
 
 __all__ = [
+    "Prediction",
     "Callable",
     "Affine",
     "OpaqueCallable",
@@ -95,10 +102,69 @@ def table_length(table: Mapping[str, np.ndarray]) -> int:
     return 0
 
 
+# -------------------------------------------------------- the record
+
+@dataclass(frozen=True)
+class Prediction:
+    """What a callable returns for one output (section 10).
+
+    `mean` is the point prediction, shaped as the slot is stored:
+    (row, node | cell, component) for an array, (row) for a scalar.
+    `uncertainty` is optional: a band, the half-width of the interval
+    around `mean` at coverage `level`, of the same shape, made as
+    `method` says. The three go together, and a band that is missing
+    its level or its method is refused here rather than in a file.
+
+        Prediction(mean)
+        Prediction(mean, band, level=0.95, method="...")
+    """
+
+    mean: np.ndarray
+    uncertainty: np.ndarray | None = None
+    level: float | None = None
+    method: str | None = None
+
+    def __post_init__(self) -> None:
+        mean = np.asarray(self.mean, dtype="<f8")
+        object.__setattr__(self, "mean", mean)
+        if self.uncertainty is None:
+            if self.level is not None or self.method is not None:
+                raise MestraError(
+                    "section 10", "level and method go with an "
+                    "uncertainty; a prediction without one has neither")
+            return
+        band = np.asarray(self.uncertainty, dtype="<f8")
+        if band.shape != mean.shape:
+            raise MestraError(
+                "section 10", "a band has the shape of its mean; the "
+                "mean is %s and the band %s"
+                % (mean.shape, band.shape))
+        if self.level is None or not (0.0 < float(self.level) < 1.0):
+            raise MestraError(
+                "section 10", "a band states the coverage it claims as "
+                "level in (0, 1), and this one gives %r" % (self.level,))
+        if not self.method:
+            raise MestraError(
+                "section 10", "a band says how it was made; give method "
+                "one sentence")
+        if bool((band < 0).any()):
+            raise MestraError(
+                "section 10", "a band is a half-width and is never "
+                "negative")
+        object.__setattr__(self, "uncertainty", band)
+        object.__setattr__(self, "level", float(self.level))
+        object.__setattr__(self, "method", str(self.method))
+
+    @property
+    def has_uncertainty(self) -> bool:
+        """True when the record carries a band."""
+        return self.uncertainty is not None
+
+
 # ---------------------------------------------------------- the protocol
 
 class Callable(ABC):
-    """Keys in, values out, plus a dictionary that represents it.
+    """Keys in, predictions out, plus a dictionary that represents it.
 
     A subclass sets `type` to the string that names it in a file and
     implements the three methods below.
@@ -109,13 +175,14 @@ class Callable(ABC):
     type: ClassVar[str] = ""
 
     @abstractmethod
-    def __call__(self, keys: Any) -> dict[str, np.ndarray]:
-        """The values for the slots this callable serves.
+    def __call__(self, keys: Any) -> dict[str, Prediction]:
+        """One prediction per output this callable serves.
 
         `keys` is a keys table (section 26). The result is a mapping
-        from the `output` name of a slot to an array shaped as that
-        slot would be stored: (row, [draw], node | cell, component)
-        for an array and (row) for a scalar.
+        from an output name to a `Prediction` whose `mean` is shaped
+        as the slot would be stored, (row, node | cell, component)
+        for an array and (row) for a scalar, with a band when the
+        model has one.
         """
 
     @abstractmethod
@@ -179,7 +246,7 @@ class OpaqueCallable:
         self._dict = dict(d)
         self._repr = repr_line
 
-    def __call__(self, keys: Any) -> dict[str, np.ndarray]:
+    def __call__(self, keys: Any) -> dict[str, Prediction]:
         raise MestraError(
             "section 10", "this reader does not own the callable type "
             "%r, so it can copy it but not evaluate it" % self.type)
@@ -200,6 +267,10 @@ class OpaqueCallable:
 
 # ------------------------------------------------------------- affine
 
+_AFFINE_KEYS = frozenset(["A", "b", "shape"])
+_BAND_KEYS = frozenset(["uncertainty", "level", "method"])
+
+
 @register_callable
 class Affine(Callable):
     """y = A x + b per slot: the one callable type this package
@@ -207,12 +278,13 @@ class Affine(Callable):
 
     It exists so that the protocol, the codec and evaluation can be
     conformance tested with no proprietary model. It is
-    deterministic and produces no draws.
+    deterministic. An output may carry a constant band, the same in
+    every row, given as `uncertainty`, `level` and `method` together.
 
         m = Affine(["mach", "alpha"],
                    {"cl": {"A": [[2.0, 0.1]], "b": [0.05],
                            "shape": []}})
-        m({"mach": [0.5], "alpha": [4.0]})["cl"]
+        m({"mach": [0.5], "alpha": [4.0]})["cl"].mean
     """
 
     type: ClassVar[str] = "affine"
@@ -223,12 +295,19 @@ class Affine(Callable):
         self.keys = [str(k) for k in keys]
         self.outputs: dict[str, dict[str, np.ndarray]] = {}
         for name, entry in outputs.items():
-            extra = set(entry) - {"A", "b", "shape"}
+            extra = set(entry) - _AFFINE_KEYS - _BAND_KEYS
             if extra:
                 raise MestraError(
                     "section 27", "an affine output holds A, b and "
-                    "shape and nothing else; this one also holds %s"
+                    "shape, and a band as uncertainty, level and "
+                    "method, and nothing else; this one also holds %s"
                     % ", ".join(sorted(extra)), str(name))
+            band_keys = set(entry) & _BAND_KEYS
+            if band_keys and band_keys != _BAND_KEYS:
+                raise MestraError(
+                    "section 27", "a band on an affine output is all "
+                    "three of uncertainty, level and method; this one "
+                    "has %s" % ", ".join(sorted(band_keys)), str(name))
             shape = np.asarray(entry["shape"], dtype="<i8").reshape(-1)
             matrix = np.asarray(entry["A"], dtype="<f8")
             offset = np.asarray(entry["b"], dtype="<f8").reshape(-1)
@@ -242,13 +321,33 @@ class Affine(Callable):
                 raise MestraError(
                     "section 27", "b is (%d,) for this output and the "
                     "file gives %s" % (flat, offset.shape), str(name))
-            self.outputs[str(name)] = {"A": matrix, "b": offset,
-                                       "shape": shape}
+            made: dict[str, Any] = {"A": matrix, "b": offset,
+                                    "shape": shape}
+            if band_keys:
+                band = np.asarray(entry["uncertainty"],
+                                  dtype="<f8").reshape(-1)
+                if band.shape != (flat,):
+                    raise MestraError(
+                        "section 27", "uncertainty is (%d,) for this "
+                        "output and the file gives %s"
+                        % (flat, band.shape), str(name))
+                level = float(entry["level"])
+                if not (0.0 < level < 1.0):
+                    raise MestraError(
+                        "section 27", "level is a coverage in (0, 1), "
+                        "and this output gives %r" % (level,), str(name))
+                method = str(entry["method"])
+                if not method:
+                    raise MestraError(
+                        "section 27", "method is one sentence, not the "
+                        "empty string", str(name))
+                made.update(uncertainty=band, level=level, method=method)
+            self.outputs[str(name)] = made
         self._repr = repr_line
 
     # -- the protocol
 
-    def __call__(self, keys: Any) -> dict[str, np.ndarray]:
+    def __call__(self, keys: Any) -> dict[str, Prediction]:
         """Evaluate every output on a keys table (section 27)."""
         table = keys_table(keys)
         missing = [k for k in self.keys if k not in table]
@@ -261,15 +360,17 @@ class Affine(Callable):
         columns = np.empty((rows, len(self.keys)), dtype="<f8")
         for at, name in enumerate(self.keys):
             columns[:, at] = np.asarray(table[name], dtype="<f8")
-        return {name: self._evaluate(entry, columns)
+        return {name: self._predict(entry, columns)
                 for name, entry in self.outputs.items()}
 
     def to_dict(self) -> dict[str, Any]:
         """The dictionary of section 27, and nothing else."""
         return {
             "keys": list(self.keys),
-            "outputs": {name: {"A": entry["A"], "b": entry["b"],
-                               "shape": entry["shape"]}
+            "outputs": {name: {key: entry[key]
+                               for key in ("A", "b", "shape",
+                                           "uncertainty", "level",
+                                           "method") if key in entry}
                         for name, entry in self.outputs.items()},
         }
 
@@ -292,8 +393,20 @@ class Affine(Callable):
 
     # -- the arithmetic, in the order section 27 fixes
 
+    @classmethod
+    def _predict(cls, entry: Mapping[str, Any],
+                 columns: np.ndarray) -> Prediction:
+        """The mean, and the constant band repeated over the rows."""
+        mean = cls._evaluate(entry, columns)
+        if "uncertainty" not in entry:
+            return Prediction(mean)
+        band = np.asarray(entry["uncertainty"]).reshape(mean.shape[1:])
+        return Prediction(
+            mean, np.broadcast_to(band, mean.shape).copy(),
+            level=entry["level"], method=entry["method"])
+
     @staticmethod
-    def _evaluate(entry: Mapping[str, np.ndarray],
+    def _evaluate(entry: Mapping[str, Any],
                   columns: np.ndarray) -> np.ndarray:
         """Y = X A' + b, accumulated in the declared key order.
 

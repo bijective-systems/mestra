@@ -14,6 +14,11 @@ function out = evaluate(dataset, keysTable)
 %   have a column; other columns are passed through to the callables,
 %   which read the columns they declare and ignore the rest.
 %
+%   A callable returns one prediction per output (section 10).  A slot
+%   whose statistic is value or mean, or none, takes the prediction's
+%   mean; a slot whose statistic is band takes its uncertainty and is
+%   given the prediction's level and method.
+%
 %   DATASET is not changed.  A slot that already held data is carried
 %   over unchanged when it does not vary along `row`; when it does,
 %   its row count must match the table, and an error names the slot if
@@ -166,7 +171,37 @@ function slot = fill(d, results, slot, path, keysTable, nRows, fileDims, ...
         error('mestra:evaluate', ...
               'the callable "%s" produces no output named "%s"', id, output);
     end
-    value = produced(output);
+    record = produced(output);
+    if ~isstruct(record) || ~isfield(record, 'mean')
+        error('mestra:evaluate', ...
+              ['the callable "%s" returned something that is not a ' ...
+               'prediction for output "%s"; a callable returns a struct ' ...
+               'with mean, uncertainty, level and method per output ' ...
+               '(section 10)'], id, output);
+    end
+    % Section 10: which part of the record fills the slot is its
+    % statistic.  A band slot takes the uncertainty and, with it, the
+    % level and the method the record states.
+    statistic = '';
+    if isfield(slot, 'statistic'), statistic = slot.statistic; end
+    if strcmp(statistic, 'band')
+        if isempty(record.uncertainty)
+            error('mestra:E12', ...
+                  ['E12: %s: this band slot takes the uncertainty of ' ...
+                   'output "%s" and the callable "%s" returned none; a ' ...
+                   'band without a level cannot be stored, so drop the ' ...
+                   'slot or give the model a band'], path, output, id);
+        end
+        value = record.uncertainty;
+        slot.level = record.level;
+        slot.method = record.method;
+    elseif isempty(statistic) || any(strcmp(statistic, {'value', 'mean'}))
+        value = record.mean;
+    else
+        error('mestra:E12', ...
+              ['E12: %s: a callable serves value, mean and band slots; ' ...
+               'this one is %s'], path, statistic);
+    end
     slot.source = 'data';
     slot.output = '';
     slot.dtype = 'float64';

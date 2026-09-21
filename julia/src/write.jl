@@ -417,6 +417,8 @@ function slot_attrs(obj, s::Slot)
         write_string_attr(obj, "statistic", s.statistic)
     s.of === nothing || write_string_attr(obj, "of", s.of)
     s.quantile === nothing || write_float_attr(obj, "quantile", s.quantile)
+    s.level === nothing || write_float_attr(obj, "level", s.level)
+    s.method === nothing || write_string_attr(obj, "method", s.method)
     s.category === nothing || write_string_attr(obj, "category", s.category)
     s.recomputed === nothing ||
         write_bool_attr(obj, "recomputed", s.recomputed)

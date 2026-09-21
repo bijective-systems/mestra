@@ -121,6 +121,8 @@ function slot_line(s::Slot)
     s.role === nothing || push!(parts, String(s.role))
     push!(parts, "units " * something(s.units, "-"))
     s.statistic === nothing || push!(parts, "statistic " * s.statistic)
+    s.level === nothing || push!(parts, "level " * string(s.level))
+    s.method === nothing || push!(parts, "method \"" * s.method * "\"")
     push!(parts, is_callable_slot(s) ?
           "callable " * callable_id(s) * " -> " * something(s.output, "-") :
           "data")

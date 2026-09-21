@@ -41,12 +41,47 @@ std::size_t AffineOutput::out_flat() const {
   return n;
 }
 
+namespace {
+
+// Section 27: a band is all three of uncertainty, level and method,
+// the uncertainty is one value per output element, and the level is a
+// coverage.
+void check_band(const std::string& name, const AffineOutput& o) {
+  const int parts = (o.uncertainty.has_value() ? 1 : 0) +
+                    (o.level.has_value() ? 1 : 0) +
+                    (o.method.has_value() ? 1 : 0);
+  if (parts == 0) return;
+  if (parts != 3) {
+    throw Error("", "a band on the affine output \"" + name +
+                        "\" is all three of uncertainty, level and method");
+  }
+  if (o.uncertainty->size() != o.out_flat()) {
+    throw Error("", "the affine output \"" + name +
+                        "\" has an uncertainty of " +
+                        std::to_string(o.uncertainty->size()) +
+                        " values where its shape needs " +
+                        std::to_string(o.out_flat()));
+  }
+  if (!(*o.level > 0.0 && *o.level < 1.0)) {
+    throw Error("", "the affine output \"" + name +
+                        "\" has a level that is not a coverage in (0, 1)");
+  }
+  if (o.method->empty()) {
+    throw Error("", "the affine output \"" + name +
+                        "\" has a method that is not one sentence");
+  }
+}
+
+}  // namespace
+
 Affine::Affine(std::vector<std::string> keys,
                std::map<std::string, AffineOutput, BytesLess> outputs,
                std::string repr_line)
     : keys_(std::move(keys)),
       outputs_(std::move(outputs)),
-      repr_(std::move(repr_line)) {}
+      repr_(std::move(repr_line)) {
+  for (const auto& entry : outputs_) check_band(entry.first, entry.second);
+}
 
 Outputs Affine::call(const KeysTable& table) const {
   const std::size_t rows = table.rows();
@@ -107,7 +142,27 @@ Outputs Affine::call(const KeysTable& table) const {
       a.dims.push_back("node");
       a.dims.push_back("component");
     }
-    out.set(entry.first, std::move(a));
+    Prediction p;
+    p.mean = std::move(a);
+    if (o.has_band()) {
+      // The band is a constant, repeated for each of the rows, so that
+      // evaluation stays exact (section 27).
+      Array u;
+      u.dtype = DType::Float64;
+      u.shape = p.mean.shape;
+      u.dims = p.mean.dims;
+      u.f64.resize(rows * flat);
+      for (std::size_t r = 0; r < rows; ++r) {
+        for (std::size_t i = 0; i < flat; ++i) {
+          u.f64[r * flat + i] = (*o.uncertainty)[i];
+        }
+      }
+      p.uncertainty = std::move(u);
+      p.level = o.level;
+      p.method = o.method;
+    }
+    p.check(entry.first);
+    out.set(entry.first, std::move(p));
   }
   return out;
 }
@@ -139,6 +194,17 @@ Dict Affine::to_dict() const {
     shape.shape = {o.shape.size()};
     shape.i64 = o.shape;
     one.set("shape", Value::numbers(shape));
+    if (o.has_band()) {
+      // Section 25: the band is a dataset, and the level and the
+      // method are attributes on the entry.
+      Array u;
+      u.dtype = DType::Float64;
+      u.shape = {o.uncertainty->size()};
+      u.f64 = *o.uncertainty;
+      one.set("uncertainty", Value::numbers(u));
+      one.set("level", Value::real(*o.level));
+      one.set("method", Value::text(*o.method));
+    }
     outputs.set(entry.first, Value::dict(std::move(one)));
   }
   d.set("outputs", Value::dict(std::move(outputs)));
@@ -176,7 +242,9 @@ Affine Affine::from_dict(const Dict& d) {
     }
     const Dict& o = one.as_dict();
     for (const auto& k : o) {
-      if (k.first != "A" && k.first != "b" && k.first != "shape") {
+      if (k.first != "A" && k.first != "b" && k.first != "shape" &&
+          k.first != "uncertainty" && k.first != "level" &&
+          k.first != "method") {
         throw Error("", "the affine output \"" + entry.first +
                             "\" has the extra key \"" + k.first + "\"");
       }
@@ -189,6 +257,12 @@ Affine Affine::from_dict(const Dict& d) {
     out.A = o.at("A").as_array().f64;
     out.b = o.at("b").as_array().f64;
     out.shape = o.at("shape").as_array().i64;
+    if (o.has("uncertainty")) {
+      out.uncertainty = o.at("uncertainty").as_array().f64;
+    }
+    if (o.has("level")) out.level = o.at("level").as_float();
+    if (o.has("method")) out.method = o.at("method").as_text();
+    check_band(entry.first, out);
     a.outputs_[entry.first] = std::move(out);
   }
   return a;
