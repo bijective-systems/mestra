@@ -15,9 +15,22 @@ option(MESTRA_BUILD_TESTS "Build the mestra test suite" ON)
 option(MESTRA_SANITIZE "Build with the address and undefined sanitizers" OFF)
 
 # Everything built here -- the library, the tool, the tests and the
-# examples -- compiles under these and is warning-free.
-set(MESTRA_WARNINGS -Wall -Wextra -Wpedantic -Wshadow -Wconversion
-                    -Wsign-conversion)
+# examples -- compiles under these and is warning-free.  They are
+# spelled per compiler family.  MESTRA_FP_FLAGS is the one that
+# matters for conformance: section 27 fixes the summation order of the
+# affine callable and the corpus compares float64 results bit for bit,
+# so no multiply and add may be fused into a single rounding step.
+# GCC and clang are told so with -ffp-contract=off; MSVC does not
+# contract under /fp:precise (its default since Visual Studio 2022),
+# and src/affine.cpp says it again with a pragma for each of them.
+if(MSVC)
+  set(MESTRA_WARNINGS /W4 /permissive-)
+  set(MESTRA_FP_FLAGS /fp:precise)
+else()
+  set(MESTRA_WARNINGS -Wall -Wextra -Wpedantic -Wshadow -Wconversion
+                      -Wsign-conversion)
+  set(MESTRA_FP_FLAGS -ffp-contract=off)
+endif()
 set(MESTRA_SANITIZER_FLAGS "")
 if(MESTRA_SANITIZE)
   set(MESTRA_SANITIZER_FLAGS
@@ -64,16 +77,13 @@ elseif(TARGET HDF5::HDF5_HL)
   target_link_libraries(mestra PUBLIC HDF5::HDF5_HL)
 endif()
 
-# -ffp-contract=off: section 27 fixes the summation order of the affine
-# callable and the corpus compares float64 results bit for bit, so no
-# multiply and add may be fused into a single rounding step.
 target_compile_options(mestra PRIVATE
-  ${MESTRA_WARNINGS} -ffp-contract=off ${MESTRA_SANITIZER_FLAGS})
+  ${MESTRA_WARNINGS} ${MESTRA_FP_FLAGS} ${MESTRA_SANITIZER_FLAGS})
 
 add_executable(mestra-cli tools/mestra_cli.cpp)
 target_link_libraries(mestra-cli PRIVATE mestra)
 target_compile_options(mestra-cli PRIVATE
-  ${MESTRA_WARNINGS} -ffp-contract=off ${MESTRA_SANITIZER_FLAGS})
+  ${MESTRA_WARNINGS} ${MESTRA_FP_FLAGS} ${MESTRA_SANITIZER_FLAGS})
 
 add_subdirectory(examples)
 
@@ -86,7 +96,7 @@ if(MESTRA_BUILD_TESTS)
   target_include_directories(mestra-unit PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_compile_options(mestra-unit PRIVATE
-    ${MESTRA_WARNINGS} -ffp-contract=off ${MESTRA_SANITIZER_FLAGS})
+    ${MESTRA_WARNINGS} ${MESTRA_FP_FLAGS} ${MESTRA_SANITIZER_FLAGS})
   add_test(NAME unit COMMAND mestra-unit)
 
   find_package(Python3 COMPONENTS Interpreter)

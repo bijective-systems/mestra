@@ -16,16 +16,18 @@
 // Section 27 fixes the summation order, and the corpus compares
 // float64 results bit for bit, so no multiply and add here may be
 // contracted into one rounding step.  The CMake build passes
-// -ffp-contract=off, but a translation unit that says so itself is
-// right however it is compiled: these two pragmas say it to clang and
-// to any compiler that implements the C standard pragma, and the
-// accumulation below is written through a named temporary so that
-// there is no multiply-add expression left for a compiler that
-// honours neither.
+// -ffp-contract=off (or /fp:precise), but a translation unit that says
+// so itself is right however it is compiled: these pragmas say it to
+// clang, to GCC, to MSVC and to any compiler that implements the C
+// standard pragma, and the accumulation below is written through a
+// named temporary so that there is no multiply-add expression left
+// for a compiler that honours none of them.
 #if defined(__clang__)
 #pragma clang fp contract(off)
 #elif defined(__GNUC__)
 #pragma GCC optimize("fp-contract=off")
+#elif defined(_MSC_VER)
+#pragma fp_contract(off)
 #endif
 #if defined(__STDC_VERSION__) || defined(FP_CONTRACT)
 #pragma STDC FP_CONTRACT OFF

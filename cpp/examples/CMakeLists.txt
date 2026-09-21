@@ -19,7 +19,7 @@ foreach(example IN LISTS MESTRA_EXAMPLES)
     ${CMAKE_CURRENT_SOURCE_DIR}/../../docs/examples/${example}/cpp.cpp)
   target_link_libraries(mestra-example-${example} PRIVATE mestra)
   target_compile_options(mestra-example-${example} PRIVATE
-    ${MESTRA_WARNINGS} -ffp-contract=off ${MESTRA_SANITIZER_FLAGS})
+    ${MESTRA_WARNINGS} ${MESTRA_FP_FLAGS} ${MESTRA_SANITIZER_FLAGS})
   set_target_properties(mestra-example-${example} PROPERTIES
     OUTPUT_NAME ${example}
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples)
