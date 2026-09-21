@@ -10,7 +10,7 @@ with the same ids rather than return something.
 Two cases are not committed, because thirty thousand HDF5 groups are
 31 MB apiece. Run
 
-    python vectors/generate.py --hostile-deep
+    python vectors/generate.py --on-demand
 
 before this file, as vectors/README.md says; the tests for those two
 skip with that instruction when they are missing.
@@ -81,7 +81,7 @@ def case_path(name: str) -> str:
 def present(name: str) -> str:
     path = case_path(name)
     if not os.path.exists(path):
-        pytest.skip("run: python vectors/generate.py --hostile-deep")
+        pytest.skip("run: python vectors/generate.py --on-demand")
     return path
 
 

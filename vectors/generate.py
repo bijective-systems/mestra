@@ -12,8 +12,13 @@ not become one.
 Run it with any Python that has h5py and numpy:
 
     python generate.py [output_directory]
+    python generate.py --on-demand
 
 The default output directory is the directory holding this file.
+The first form rewrites every case. The second writes only the three
+files that are too large to commit -- cases/wide_keys and the two
+deep hostile files -- into place, and touches nothing that is
+committed; it is what a checkout needs before running a suite.
 
 Byte reproducibility (section 30) rests on three things and all
 three are honoured here: track_times is off on every dataset,
@@ -611,9 +616,22 @@ def affine_dict(keys=None, outputs=None):
 
 
 def evaluate_affine(entry, keys, values):
-    """Section 27: y = A x + b, reshaped to `shape` in C order."""
+    """Section 27: y = A x + b, reshaped to `shape` in C order.
+
+    Accumulated one key at a time in the declared order, with b added
+    last, as section 27 says and as every implementation does. Not a
+    matrix product: `A @ x` goes to whatever BLAS numpy was built
+    against, which on most machines fuses each multiply and add into
+    one rounding, and the expected values then differ in the last
+    place from the ones the rule gives. Two numpy operations cannot
+    be fused, so this is the rule exactly.
+    """
     x = np.array([values[k] for k in keys], dtype="<f8")
-    y = entry["A"] @ x + entry["b"]
+    a = np.asarray(entry["A"], dtype="<f8")
+    y = np.zeros(a.shape[0], dtype="<f8")
+    for at in range(a.shape[1]):
+        y += a[:, at] * x[at]
+    y += np.asarray(entry["b"], dtype="<f8")
     return y.reshape([int(n) for n in entry["shape"]])
 
 
@@ -2892,7 +2910,7 @@ HOSTILE = {
 HOSTILE_LIBVER = {}
 
 # wide_keys is about seventeen megabytes and is not committed
-# either; --wide produces it. See case_wide_keys.
+# either; --wide produces it, as does --on-demand. See case_wide_keys.
 WIDE = {"wide_keys"}
 
 # The two deep files are 31 MB each and are not committed. They are
@@ -2929,12 +2947,43 @@ def write_case(parent, name, builder, libver=None, data=True):
     return exp
 
 
+def write_on_demand(out):
+    """Write the three files that are not committed, and nothing else.
+
+    Their expected.json is committed like every other one and is not
+    rewritten here, nor is the manifest, nor any committed case.mes:
+    a checkout that runs this stays clean apart from the three files
+    the suites need, and the suites then run against the committed
+    corpus rather than against whatever this machine's libhdf5 and
+    numpy would have written.
+    """
+    for name in sorted(WIDE):
+        d = os.path.join(out, "cases", name)
+        if not os.path.isdir(d):
+            os.makedirs(d)
+        with h5py.File(os.path.join(d, "case.mes"), "w") as f:
+            CASES[name](f)
+        print("cases/%s/case.mes written" % name)
+    for name in sorted(DEEP):
+        d = os.path.join(out, "hostile", name)
+        if not os.path.isdir(d):
+            os.makedirs(d)
+        libver = HOSTILE_LIBVER.get(name)
+        kw = {} if libver is None else {"libver": libver}
+        with h5py.File(os.path.join(d, "case.mes"), "w", **kw) as f:
+            HOSTILE[name](f)
+        print("hostile/%s/case.mes written" % name)
+    return 0
+
+
 def main(argv):
     deep = "--hostile-deep" in argv
     wide = "--wide" in argv
     rest = [a for a in argv[1:] if not a.startswith("--")]
     out = (rest[0] if rest
            else os.path.dirname(os.path.abspath(__file__)))
+    if "--on-demand" in argv:
+        return write_on_demand(out)
     entries = []
     for name in sorted(CASES):
         exp = write_case(os.path.join(out, "cases"), name, CASES[name],

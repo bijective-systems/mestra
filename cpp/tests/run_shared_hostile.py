@@ -13,7 +13,7 @@ refuse with the same identifiers rather than return something.
 Two of the files are generated rather than committed, because they are
 31 MB each. Run this first:
 
-    python3 vectors/generate.py --hostile-deep
+    python3 vectors/generate.py --on-demand
 
 A case whose file is missing is reported and the run fails, rather
 than being passed over quietly.
@@ -60,7 +60,7 @@ def check(cli, directory, name, problems):
     path = os.path.join(case, "case.mes")
     if not os.path.exists(path):
         problems.append("%s: case.mes is not there; run "
-                        "`python vectors/generate.py --hostile-deep`"
+                        "`python vectors/generate.py --on-demand`"
                         % (name,))
         return
 

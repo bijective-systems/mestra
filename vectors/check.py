@@ -15,13 +15,15 @@ ones the file's own dimension scales give it, which is the check that
 catches a reader taking a dimension name from the NAME attribute
 instead of the link name.
 
-The hostile subset of section 30 is compared by bytes, except for
-the two deep files, which are not committed: they are generated into
-place if missing and compared structurally, because two people's
-copies come from two libhdf5 versions. Nothing here opens a hostile
-file with a netCDF reader, and every walk is depth capped and
-resolves dimension scales by address, which is what section 29 and
-section 21 require of a reader facing a file it did not write.
+The hostile subset of section 30 is compared the same way, bytes
+first and structure when the bytes differ, which is what makes the
+comparison hold across libhdf5 versions; the two deep files, which
+are not committed, are generated into place if missing. Nothing here
+opens a hostile file with a netCDF reader, and every walk is depth
+capped, follows hard links only, reads no dataset past a size cap
+and takes a read the library refuses as a fact about the file rather
+than a failure of the check, which is what section 29 and section 21
+require of a reader facing a file it did not write.
 
 One line per case; the exit status is non-zero if anything differs
 or fails to open.
@@ -77,14 +79,18 @@ def attr_signature(obj, name):
 
 
 def filters(dset):
+    """The dataset's filter pipeline in order, each filter as its id,
+    its flags and its parameters. Section 30 says the same filters
+    with the same parameters, and that includes a filter this library
+    has never heard of, which the named properties of h5py would pass
+    over in silence."""
+    dcpl = dset.id.get_create_plist()
     out = []
-    if dset.shuffle:
-        out.append("shuffle")
-    if dset.compression is not None:
-        out.append("%s:%s" % (dset.compression, dset.compression_opts))
-    if dset.fletcher32:
-        out.append("fletcher32")
-    return ",".join(out)
+    for i in range(dcpl.get_nfilters()):
+        code, flags, values, _name = dcpl.get_filter(i)
+        out.append("%d/%d(%s)" % (code, flags,
+                                  ",".join(str(v) for v in values)))
+    return ";".join(out)
 
 
 MAX_DEPTH = 64
@@ -136,7 +142,15 @@ def walk(f):
             continue
         for name in sorted(g):
             path = prefix + "/" + name
-            if not isinstance(g.get(name, getlink=True), h5py.HardLink):
+            link = g.get(name, getlink=True)
+            if isinstance(link, h5py.SoftLink):
+                paths[path] = "a soft link to %s" % link.path
+                continue
+            if isinstance(link, h5py.ExternalLink):
+                paths[path] = "an external link to %s in %s" % (
+                    link.path, link.filename)
+                continue
+            if not isinstance(link, h5py.HardLink):
                 paths[path] = "a link that is not a hard link"
                 continue
             obj = g[name]
@@ -171,6 +185,35 @@ def bits_equal(a, b):
         return np.array_equal(a.view("u%d" % a.dtype.itemsize),
                               b.view("u%d" % b.dtype.itemsize))
     return np.array_equal(a, b)
+
+
+# A dataset larger than this is not read for the comparison; its
+# allocated storage is compared instead.  The largest golden file holds
+# sixteen megabytes in all, and the hostile subset declares a dataset
+# of ten to the twelfth elements that nothing must try to read.
+MAX_READ_BYTES = 256 * 1024 * 1024
+
+
+def contents(dset):
+    """What a dataset holds, as something two files can be compared
+    on: the values when they can be read, the allocated storage when
+    the dataset is too large to read, and the library's refusal when
+    it will not read them (an unknown filter, say), since two files
+    that refuse the same way are the same file."""
+    if dset.size * dset.dtype.itemsize > MAX_READ_BYTES:
+        return ("storage", dset.id.get_storage_size())
+    try:
+        return ("values", dset[()])
+    except Exception as exc:
+        return ("refused", type(exc).__name__)
+
+
+def same_contents(a, b):
+    if a[0] != b[0]:
+        return False
+    if a[0] == "values":
+        return bits_equal(a[1], b[1])
+    return a[1] == b[1]
 
 
 def structural_diff(path_a, path_b, chain=None):
@@ -229,7 +272,7 @@ def structural_diff(path_a, path_b, chain=None):
                     out.append("%s: %s is %r and %r"
                                % (p, what, va, vb))
             if oa.shape == ob.shape and oa.dtype == ob.dtype:
-                if not bits_equal(oa[()], ob[()]):
+                if not same_contents(contents(oa), contents(ob)):
                     out.append("%s: contents differ" % p)
     return out
 
@@ -504,11 +547,16 @@ def main(argv):
             elif ba == bb:
                 how = "bytes equal (%d kB)" % (len(ba) // 1024)
             else:
-                how = "bytes differ"
-                notes.append(
-                    "%d of %d bytes differ"
-                    % (sum(1 for x, y in zip(ba, bb) if x != y),
-                       max(len(ba), len(bb))))
+                # As for a case: the bytes are the first comparison
+                # and structural equality the normative one, since
+                # the library that wrote the committed file and the
+                # one running here need not lay a header out alike.
+                diffs = structural_diff(a, b)
+                if diffs:
+                    notes.extend(diffs[:5])
+                    how = "%d structural differences" % len(diffs)
+                else:
+                    how = "structurally equal, bytes differ"
             exp = json.loads(ja.decode("utf-8"))
             for field, want in (("allow_extra", True),
                                 ("timeout_seconds", 10)):

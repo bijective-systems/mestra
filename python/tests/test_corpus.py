@@ -23,7 +23,7 @@ def test_the_corpus_is_where_it_should_be():
     `affine_band` and `warn_w16` are files a reader accepts and
     `err_e12_band` and `err_e12_callable` are not. `wide_keys` is
     generated on demand, as vectors/README.md says:
-    `python vectors/generate.py --wide`."""
+    `python vectors/generate.py --on-demand`."""
     assert len(CASES) == 80
     assert len(VALID) == 36
     assert len(WITH_CODEC) == 7

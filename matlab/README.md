@@ -16,7 +16,7 @@ Install
 That is the whole installation: base MATLAB, no toolbox. Three corpus
 files are too large to commit and are made once, before the first run:
 
-    python vectors/generate.py --hostile-deep --wide
+    python vectors/generate.py --on-demand
 
 Then the suite, corpus and all:
 

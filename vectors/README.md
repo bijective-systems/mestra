@@ -73,9 +73,9 @@ Regenerating and checking
 -------------------------
 
     python generate.py                   # rewrite every case
-    python generate.py --wide --hostile-deep   # and the three large
-                                         # files, which are not
-                                         # committed
+    python generate.py --on-demand       # write only the three
+                                         # large files, which are
+                                         # not committed
     python check.py                      # compare the committed
                                          # corpus with a fresh run,
                                          # one line per case
@@ -249,7 +249,7 @@ costs a seventh of that, but it writes four timestamps into the root
 object header, and a file that records when it was written is not
 byte reproducible. So they are generated on demand instead:
 
-    python generate.py --hostile-deep
+    python generate.py --on-demand
 
 Their expected.json is committed like every other one, so an
 implementation knows they exist and knows to generate them first.

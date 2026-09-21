@@ -19,7 +19,7 @@ classdef HostileSubsetTest < matlab.unittest.TestCase
 %   Two of the fifteen files are thirty-one megabytes of nested groups
 %   and are generated rather than committed.  Run
 %
-%       python vectors/generate.py --hostile-deep
+%       python vectors/generate.py --on-demand
 %
 %   before this suite; without them those two cases are skipped and
 %   say so, rather than failing for a reason that is not the reader's.
@@ -96,7 +96,7 @@ classdef HostileSubsetTest < matlab.unittest.TestCase
             path = HostileSubsetTest.caseFile(subsetCase);
             testCase.assumeEqual(exist(path, 'file'), 2, ...
                 sprintf(['%s is generated on demand; run ' ...
-                         'vectors/generate.py --hostile-deep'], subsetCase));
+                         'vectors/generate.py --on-demand'], subsetCase));
             e = HostileSubsetTest.expected(subsetCase);
             required = HostileSubsetTest.asCellstr(e.required_errors);
 

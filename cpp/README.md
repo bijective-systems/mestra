@@ -14,7 +14,7 @@ That gives `libmestra`, `mestra-cli` and the seven examples in
 `cpp/build`; `mestra-cli` with no argument says what it does. The tests
 need a Python 3 with `h5py` too, and three corpus files too big to commit:
 
-    python vectors/generate.py --hostile-deep --wide     # once
+    python vectors/generate.py --on-demand     # once
     cmake -S cpp -B cpp/build -DHDF5_ROOT="$HDF5_ROOT" \
           -DPython3_EXECUTABLE="$(which python3)"
     ctest --test-dir cpp/build --output-on-failure

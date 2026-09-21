@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,12 +8,13 @@ version = "0.1.0"
 description = "A container for simulation and surrogate data: reader, writer, validator and post-processing for the mestra format."
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "Apache-2.0"}
+authors = [{name = "Bijective Systems"}]
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 keywords = ["simulation", "surrogate", "hdf5", "netcdf", "dataset"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Topic :: Scientific/Engineering",
 ]
@@ -21,6 +22,13 @@ dependencies = [
     "numpy>=1.24",
     "h5py>=3.7",
 ]
+
+[project.urls]
+Homepage = "https://github.com/bijective-systems/mestra"
+Repository = "https://github.com/bijective-systems/mestra"
+Specification = "https://github.com/bijective-systems/mestra/blob/main/SPEC.md"
+Guide = "https://github.com/bijective-systems/mestra/blob/main/docs/guide.md"
+Issues = "https://github.com/bijective-systems/mestra/issues"
 
 [project.optional-dependencies]
 # Only the checks and the adapters need these; the package itself
@@ -62,7 +70,10 @@ ignore = [
 "tests/*" = ["E501"]
 
 [tool.mypy]
-python_version = "3.10"
+# No python_version: mypy checks under the interpreter that runs it.
+# A pinned target parses every installed stub with that version's
+# grammar, and numpy's stubs use the syntax of the oldest Python numpy
+# itself still supports, which is newer than this package's floor.
 files = ["mestra"]
 ignore_missing_imports = true
 warn_unused_ignores = true

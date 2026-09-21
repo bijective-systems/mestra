@@ -2,8 +2,11 @@
 """Run the C++ port of each worked example and compare what it prints
 to the "Expected output" block of the README beside it.
 
-    python3 run_examples.py --bin-dir ../build/examples \\
+    python3 run_examples.py --bin ../build/examples/* \\
                             --examples ../../docs/examples
+
+Each binary is named after its example's directory, and is given by
+path because where a generator puts it is the generator's business.
 
 The README is the contract: it states the toy data and the output, in
 one place, for all four languages.  So this script reads the block out
@@ -85,7 +88,8 @@ def expected_for(name, block):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--bin-dir", required=True)
+    p.add_argument("--bin", required=True, nargs="+",
+                   help="the example programs, one per example")
     p.add_argument("--examples", required=True)
     args = p.parse_args()
 
@@ -93,6 +97,11 @@ def main():
                    if os.path.isfile(os.path.join(args.examples, d, "cpp.cpp")))
     if not names:
         raise SystemExit("no examples found under " + args.examples)
+    binaries = {os.path.splitext(os.path.basename(b))[0]: b
+                for b in args.bin}
+    missing = [n for n in names if n not in binaries]
+    if missing:
+        raise SystemExit("no program was given for: " + ", ".join(missing))
 
     failures = 0
     for name in names:
@@ -101,7 +110,7 @@ def main():
             block = expected_block(f.read())
         want = expected_for(name, block)
 
-        binary = os.path.join(args.bin_dir, name)
+        binary = binaries[name]
         arguments = [os.path.abspath(os.path.join(directory, a))
                      for a in ARGUMENTS.get(name, [])]
         work = tempfile.mkdtemp(prefix="mestra-example-")

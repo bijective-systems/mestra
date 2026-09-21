@@ -4,8 +4,9 @@ mestra for Python
 Install
 -------
 
-    pip install -e python/
+    pip install mestra
 
+or, from a checkout of the repository, `pip install -e python/`.
 Runtime dependencies are numpy and h5py, and nothing else; netCDF4,
 h5netcdf and xarray are optional, used by the cross-reader checks and
 by one adapter. The suite needs pytest, which the `dev` extra
@@ -18,7 +19,7 @@ Three golden files are too large to commit. Write them once before
 the suite, as `../vectors/README.md` says; a test that wants one
 skips without it rather than failing.
 
-    python vectors/generate.py --wide --hostile-deep
+    python vectors/generate.py --on-demand
 
 
 The ten-line example

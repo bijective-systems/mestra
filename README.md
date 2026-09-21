@@ -17,7 +17,7 @@ What a file holds:
 
 Install:
 
-    python   pip install -e python/
+    python   pip install mestra   (or pip install -e python/ from a checkout)
     matlab   addpath('<this repository>/matlab')
     c++      cmake -S cpp -B cpp/build -DHDF5_ROOT="$HDF5_ROOT"
              cmake --build cpp/build -j
