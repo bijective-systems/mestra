@@ -88,6 +88,8 @@ draw, so one seed names one split in every language. Python and Julia
 carry both. `compute_weights`, `integrate` and `field_statistics` are
 here for the opposite reason: a weight array is computed from
 connectivity and never imported, which is a rule and not a convenience.
+So is `prediction`: one record for a stored slot and for a served one
+is the contract of SPEC.md section 10, not analysis.
 
 
 Where to go next

@@ -194,9 +194,10 @@ end
 const KEY_ATTRS = Set(["role", "units", "lower", "upper", "category",
                        "trajectory_group", "parent"])
 const SCALAR_ATTRS = Set(["units", "source", "output", "statistic", "of",
-                          "quantile"])
+                          "quantile", "level", "method"])
 const ARRAY_ATTRS = Set(["role", "varies", "units", "components", "source",
-                         "output", "statistic", "of", "quantile", "category",
+                         "output", "statistic", "of", "quantile", "level",
+                         "method", "category",
                          "recomputed", "derived_from", "recipe", "reference"])
 const SUPPORT_ATTRS = Set(["kind", "n_nodes", "n_cells", "support_id"])
 const CALLABLE_ATTRS = Set(["type", "repr"])
@@ -429,12 +430,12 @@ end
 function attr_kind(name::AbstractString)
     name in ("aligned", "recomputed") && return :bool
     name in ("n_nodes", "n_cells", "components") && return :int
-    name in ("lower", "upper", "quantile") && return :float
+    name in ("lower", "upper", "quantile", "level") && return :float
     name in ("format", "writer", "created", "generalisation_group", "role",
              "units", "category", "trajectory_group", "parent", "varies",
              "source", "output", "statistic", "of", "derived_from",
              "recipe", "reference", "kind", "support_id", "type",
-             "repr") && return :string
+             "repr", "method") && return :string
     return nothing
 end
 
@@ -915,6 +916,7 @@ function check_scalars!(v::Validator)
                 guard!(v, path) do
                     x = vec(safe_read(obj; max_elements = v.max_elements))
                     report_nonfinite!(v, path, x, true)
+                    report_negative_band!(v, path, x, true, a)
                 end
             end
         end
@@ -953,17 +955,40 @@ function check_source!(v::Validator, path, obj, a)
     return v
 end
 
-"""E12: a statistic and what it is a statistic of."""
+"""E12: a statistic with what it needs (section 9), and on a slot a
+callable serves, one a callable produces (section 10)."""
 function check_statistic!(v::Validator, path, a)
     haskey(a, "statistic") || return v
     st = a["statistic"].value
     st isa AbstractString || return v
+    served = haskey(a, "source") && a["source"].value isa AbstractString &&
+             startswith(a["source"].value, "callable:")
     if st == "quantile" && !haskey(a, "quantile")
         report!(v, "E12", path, "a quantile statistic with no `quantile`")
     end
     if !(st in ("value", "draw")) && !haskey(a, "of")
         report!(v, "E12", path,
                 "a statistic of `$(st)` does not say what it is of")
+    end
+    if served && st in ("std", "quantile", "draw")
+        report!(v, "E12", path,
+                "a callable returns a mean and at most a band (section " *
+                "10), so a slot it serves is value, mean or band, not $(st)")
+    end
+    if st == "band" && !served
+        if !haskey(a, "level")
+            report!(v, "E12", path,
+                    "a band states the coverage it claims with `level`")
+        else
+            level = a["level"].value
+            if level isa AbstractFloat && !(0 < level < 1)
+                report!(v, "E12", path,
+                        "`level` is a coverage fraction in (0, 1), and " *
+                        "this is $(level)")
+            end
+        end
+        haskey(a, "method") || report!(v, "E12", path,
+            "a band says how it was made with `method`")
     end
     return v
 end
@@ -1364,9 +1389,9 @@ function check_array_shape!(v::Validator, spath, d, a, role, loc, sname,
     if (role == "field" || role == "derived") && ti.class === :float &&
        ti.size == 8 && !v.structural
         guard!(v, spath) do
-            report_nonfinite!(v, spath,
-                              safe_read(d; max_elements = v.max_elements),
-                              lead == "row")
+            x = safe_read(d; max_elements = v.max_elements)
+            report_nonfinite!(v, spath, x, lead == "row")
+            report_negative_band!(v, spath, x, lead == "row", a)
         end
     end
     return v
@@ -1391,6 +1416,31 @@ function report_nonfinite!(v::Validator, path, a::AbstractArray,
     nval == 0 && return v
     report!(v, "W03", path, "a non-finite value, which is how this " *
             "format spells missing floating-point data" *
+            (leads_with_row ? rows_tail(rows, nrow) :
+             "; $(nval) value" * (nval == 1 ? "" : "s")))
+    return v
+end
+
+"""W16 over a band, reported once: a band is a half-width and is never
+negative (section 9).  Reported the way W03 is."""
+function report_negative_band!(v::Validator, path, a::AbstractArray,
+                               leads_with_row::Bool, attrs)
+    (haskey(attrs, "statistic") && attrs["statistic"].value == "band") ||
+        return v
+    isempty(a) && return v
+    axis = ndims(a)
+    rows = Int[]
+    nrow, nval = 0, 0
+    for r in axes(a, axis)
+        c = count(x -> x < 0, selectdim(a, axis, r))
+        c == 0 && continue
+        nval += c
+        nrow += 1
+        length(rows) < 3 && push!(rows, r - 1)
+    end
+    nval == 0 && return v
+    report!(v, "W16", path, "a value below zero in a band, which is a " *
+            "half-width and is never negative" *
             (leads_with_row ? rows_tail(rows, nrow) :
              "; $(nval) value" * (nval == 1 ? "" : "s")))
     return v

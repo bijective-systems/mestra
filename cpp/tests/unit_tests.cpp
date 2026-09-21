@@ -178,6 +178,20 @@ void codec_values() {
   check::is_true("keys are dumped in byte order", at_alpha < at_beta);
 }
 
+// True when the body raised anything at all, for the refusals that
+// no rule of section 14 covers: a cell type nobody can measure, a
+// weight array that is not in the file.
+bool threw(const std::function<void()>& body,
+           std::string* message = nullptr) {
+  try {
+    body();
+  } catch (const std::exception& e) {
+    if (message != nullptr) *message = e.what();
+    return true;
+  }
+  return false;
+}
+
 void affine_worked_example() {
   // Section 27, the worked example: two keys in the order mach,
   // alpha; one scalar slot cl and one node-array slot pressure.
@@ -203,19 +217,22 @@ void affine_worked_example() {
   table.add_column("alpha", {4.0});
   const mestra::Outputs out = model.call(table);
 
-  check::equal("cl is 1.45 exactly", out.at("cl").f64.at(0), 1.45);
+  check::equal("cl is 1.45 exactly", out.at("cl").mean.f64.at(0), 1.45);
   const std::vector<double> want{0.5, 1.1, 3.7, 4.3, 6.9, 7.5};
   for (std::size_t i = 0; i < want.size(); ++i) {
     std::ostringstream what;
     what << "pressure node " << i;
-    check::equal(what.str(), out.at("pressure").f64.at(i), want[i]);
+    check::equal(what.str(), out.at("pressure").mean.f64.at(i), want[i]);
   }
   check::equal("cl comes back as (1)",
-               out.at("cl").shape.size(), std::size_t(1));
+               out.at("cl").mean.shape.size(), std::size_t(1));
   check::equal("pressure comes back as (1, 6, 1)",
-               out.at("pressure").shape.size(), std::size_t(3));
+               out.at("pressure").mean.shape.size(), std::size_t(3));
   check::equal("pressure names its node axis",
-               out.at("pressure").dims.at(1), std::string("node"));
+               out.at("pressure").mean.dims.at(1), std::string("node"));
+  check::is_true("an output with no band has no uncertainty",
+                 !out.at("cl").has_uncertainty() &&
+                     !out.at("cl").level.has_value());
 
   // The dictionary round-trips through to_dict and from_dict.
   const mestra::Dict d = model.to_dict();
@@ -248,6 +265,69 @@ void affine_worked_example() {
     missing = true;
   }
   check::is_true("a missing key column is an error at call time", missing);
+}
+
+// Section 27 with a band, and the record of section 10.
+void affine_band() {
+  mestra::AffineOutput cl;
+  cl.A = {2.0, 0.1};
+  cl.b = {0.05};
+  cl.shape = {};
+  cl.uncertainty = std::vector<double>{0.02};
+  cl.level = 0.95;
+  cl.method = "constant band";
+  mestra::AffineOutput pressure;
+  pressure.A = {1.0, 0.0, 2.0, 0.0};
+  pressure.b = {0.0, 0.1};
+  pressure.shape = {2, 1};
+  pressure.uncertainty = std::vector<double>{0.5, 0.6};
+  pressure.level = 0.68;
+  pressure.method = "constant band";
+  std::map<std::string, mestra::AffineOutput, mestra::BytesLess> outputs;
+  outputs["cl"] = cl;
+  outputs["pressure"] = pressure;
+  const mestra::Affine model({"mach", "alpha"}, outputs);
+
+  mestra::KeysTable table;
+  table.add_column("mach", {0.5, 0.6});
+  table.add_column("alpha", {4.0, 5.0});
+  const mestra::Outputs out = model.call(table);
+  check::is_true("cl carries a band", out.at("cl").has_uncertainty());
+  check::equal("the same in every row", out.at("cl").uncertainty->f64.at(1),
+               0.02);
+  check::equal("with its level", out.at("cl").level.value_or(0.0), 0.95);
+  check::equal("and its method", out.at("cl").method.value_or(""),
+               std::string("constant band"));
+  check::equal("an array band has the mean's shape",
+               out.at("pressure").uncertainty->shape.size(), std::size_t(3));
+  check::equal("row 1, node 1", out.at("pressure").uncertainty->f64.at(3),
+               0.6);
+  check::equal("and the mean is unchanged", out.at("cl").mean.f64.at(0),
+               1.45);
+
+  const mestra::Dict d = model.to_dict();
+  check::is_true("the band round-trips through the dictionary",
+                 mestra::Affine::from_dict(d).to_dict() == d);
+  check::is_true("and the dictionary holds the level",
+                 d.at("outputs").as_dict().at("cl").as_dict().has("level"));
+
+  mestra::AffineOutput half = cl;
+  half.method.reset();
+  std::map<std::string, mestra::AffineOutput, mestra::BytesLess> bad;
+  bad["cl"] = half;
+  check::is_true("a band missing its method is refused",
+                 threw([&bad] { mestra::Affine({"mach", "alpha"}, bad); }));
+
+  mestra::Prediction p = out.at("cl");
+  p.level = 1.96;
+  check::is_true("level is a coverage in (0, 1), not a sigma multiple",
+                 threw([&p] { p.check(); }));
+  p.level = 0.95;
+  p.uncertainty->f64[0] = -0.1;
+  check::is_true("a band is never negative", threw([&p] { p.check(); }));
+  p.uncertainty.reset();
+  check::is_true("level and method go with an uncertainty",
+                 threw([&p] { p.check(); }));
 }
 
 // Usability, checked rather than asserted: build the file of
@@ -381,20 +461,6 @@ std::string rule_of(const std::function<void()>& body,
     return "(not a mestra::Error)";
   }
   return std::string();
-}
-
-// True when the body raised anything at all, for the refusals that
-// no rule of section 14 covers: a cell type nobody can measure, a
-// weight array that is not in the file.
-bool threw(const std::function<void()>& body,
-           std::string* message = nullptr) {
-  try {
-    body();
-  } catch (const std::exception& e) {
-    if (message != nullptr) *message = e.what();
-    return true;
-  }
-  return false;
 }
 
 // A unit square of two triangles, with a field of 1 everywhere.
@@ -821,6 +887,82 @@ void conventions_post() {
                  }));
 }
 
+// One question of a stored slot and of a served one, the same record
+// (section 10).
+void prediction_view() {
+  mestra::Dataset d = square_dataset();
+  mestra::Support* s = d.support("s0");
+  mestra::ArraySlot& band = mestra::add_node_array(
+      *s, "pressure_band", {0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8}, "Pa",
+      {"row", "node"});
+  band.statistic = "band";
+  band.of = "pressure";
+  band.level = 0.95;
+  band.method = "a constant for the test";
+  const mestra::Prediction stored = mestra::prediction(d, "pressure");
+  check::equal("the mean is the slot's data", stored.mean.f64.at(4), 2.0);
+  check::is_true("the band comes with it", stored.has_uncertainty());
+  check::equal("row 1, node 3", stored.uncertainty->f64.at(7), 0.8);
+  check::equal("with its level", stored.level.value_or(0.0), 0.95);
+  check::is_true("a band slot is not a prediction; name the base slot",
+                 threw([&d] { mestra::prediction(d, "pressure_band"); }));
+  mestra::KeysTable table;
+  table.add_column("mach", {0.5});
+  check::is_true("stored data has values on its own rows only",
+                 threw([&d, &table] {
+                   mestra::prediction(d, "pressure", &table);
+                 }));
+  d.add_scalar("cl", {0.25, 0.55}, "1");
+  const mestra::Prediction plain = mestra::prediction(d, "cl");
+  check::is_true("a scalar with no band has none",
+                 !plain.has_uncertainty() && plain.mean.f64.size() == 2);
+
+  // The same question of a served slot: the callable's own record.
+  mestra::Dataset m;
+  m.writer = "mestra unit tests";
+  m.created = "2026-09-20T00:00:00Z";
+  mestra::Key& mach = m.add_key("mach", {}, "condition", "1");
+  mach.lower = 0.1;
+  mach.upper = 0.9;
+  mestra::AffineOutput cl;
+  cl.A = {2.0};
+  cl.b = {0.05};
+  cl.shape = {};
+  cl.uncertainty = std::vector<double>{0.02};
+  cl.level = 0.95;
+  cl.method = "constant band";
+  std::map<std::string, mestra::AffineOutput, mestra::BytesLess> outputs;
+  outputs["cl"] = cl;
+  m.add_callable("m1", mestra::Affine({"mach"}, outputs));
+  mestra::add_callable_scalar(m, "cl", "1", "m1", "cl");
+  check::is_true("a file with no rows needs a keys table",
+                 threw([&m] { mestra::prediction(m, "cl"); }));
+  const mestra::Prediction served = mestra::prediction(m, "cl", &table);
+  check::equal("the mean", served.mean.f64.at(0), 1.05);
+  check::equal("the band", served.uncertainty->f64.at(0), 0.02);
+  check::equal("its level", served.level.value_or(0.0), 0.95);
+
+  // Evaluated, a band slot takes the uncertainty with its level.
+  mestra::Scalar& cl_band = mestra::add_callable_scalar(m, "cl_band", "1",
+                                                        "m1", "cl");
+  cl_band.statistic = "band";
+  cl_band.of = "cl";
+  const mestra::Dataset out = mestra::evaluate(m, table);
+  const mestra::Scalar* got = out.scalar("cl_band");
+  check::is_true("the band slot holds the uncertainty",
+                 got != nullptr && got->values.at(0) == 0.02);
+  check::is_true("and carries the level and the method",
+                 got != nullptr && got->level.value_or(0.0) == 0.95 &&
+                     got->method.value_or("") == "constant band");
+  const std::string path = "mestra_unit_band.mes";
+  std::remove(path.c_str());
+  mestra::write(out, path);
+  const mestra::Report report = mestra::validate(path);
+  check::is_true("and the file validates clean", report.ok() &&
+                                                     report.warnings.empty());
+  std::remove(path.c_str());
+}
+
 void conventions_callables() {
   // Conventions section 1: add_callable(id, callable), and then a
   // callable slot with the array builders' argument order, the values
@@ -995,12 +1137,14 @@ int main() {
   units_parser();
   codec_values();
   affine_worked_example();
+  affine_band();
   build_from_vectors();
   conventions_builders();
   conventions_dims();
   conventions_write();
   conventions_weights();
   conventions_post();
+  prediction_view();
   conventions_callables();
   hardened_value_types();
   bytes_order();

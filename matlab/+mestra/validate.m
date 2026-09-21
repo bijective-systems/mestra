@@ -723,7 +723,8 @@ function checkOneScalar(ctx, g, name, path)
     end
     checkAttrEncodings(ctx, oid, path);
     checkKnownAttrs(ctx, oid, path, ...
-        {'units', 'source', 'output', 'statistic', 'of', 'quantile'});
+        {'units', 'source', 'output', 'statistic', 'of', 'quantile', ...
+         'level', 'method'});
     if ~H5.hasAttr(oid, 'units')
         ctx.rep.add('E11', path, 'a scalar needs units');
     else
@@ -767,6 +768,16 @@ function checkOneScalar(ctx, g, name, path)
                     '%s hold a non-finite value (%s)', ...
                     mestra.internal.Report.someRows(bad, numel(v)), ...
                     mestra.internal.Report.whichRows(bad));
+            end
+            if isBand(oid)
+                neg = find(v < 0) - 1;
+                if ~isempty(neg)
+                    ctx.rep.add('W16', path, ...
+                        ['%s hold a value below zero in a band, which ' ...
+                         'is a half-width and is never negative (%s)'], ...
+                        mestra.internal.Report.someRows(neg, numel(v)), ...
+                        mestra.internal.Report.whichRows(neg));
+                end
             end
         end
     catch err
@@ -1069,7 +1080,8 @@ function checkSlot(ctx, parent, name, path, location, nNodes, nCells, ...
     checkAttrEncodings(ctx, oid, path);
     checkKnownAttrs(ctx, oid, path, ...
         {'role', 'varies', 'units', 'components', 'source', 'output', ...
-         'statistic', 'of', 'quantile', 'category', 'recomputed', ...
+         'statistic', 'of', 'quantile', 'level', 'method', 'category', ...
+         'recomputed', ...
          'derived_from', 'recipe', 'reference'});
 
     role = strAttr(oid, 'role');
@@ -1201,6 +1213,13 @@ function checkSlot(ctx, parent, name, path, location, nNodes, nCells, ...
                     rep.add('W03', path, '%s', ...
                             nonFinitePhrase(bad, varies, info.dims));
                 end
+                if isBand(oid)
+                    neg = find(double(values(:)) < 0);
+                    if ~isempty(neg)
+                        rep.add('W16', path, '%s', ...
+                                negativeBandPhrase(neg, varies, info.dims));
+                    end
+                end
             end
         catch err
             rep.add('E41', path, 'the values would not read: %s', ...
@@ -1320,9 +1339,16 @@ function checkSource(ctx, oid, path, isGroup)
 end
 
 function checkStatistic(ctx, oid, path)
+%checkStatistic  E12: a statistic with what it needs (section 9), and
+%   on a slot a callable serves, one a callable produces (section 10).
     H5 = mestra.internal.H5;
     if ~H5.hasAttr(oid, 'statistic'), return, end
     statistic = strAttr(oid, 'statistic');
+    served = false;
+    if H5.hasAttr(oid, 'source')
+        source = strAttr(oid, 'source');
+        served = numel(source) > 9 && strncmp(source, 'callable:', 9);
+    end
     if strcmp(statistic, 'quantile') && ~H5.hasAttr(oid, 'quantile')
         ctx.rep.add('E12', path, ...
             'the statistic is quantile and no quantile is given');
@@ -1331,6 +1357,37 @@ function checkStatistic(ctx, oid, path)
         ctx.rep.add('E12', path, ...
             'the statistic is %s and does not say what it is of', statistic);
     end
+    if served && any(strcmp(statistic, {'std', 'quantile', 'draw'}))
+        ctx.rep.add('E12', path, ...
+            ['a callable returns a mean and at most a band (section ' ...
+             '10), so a slot it serves is value, mean or band, not %s'], ...
+            statistic);
+    end
+    if strcmp(statistic, 'band') && ~served
+        if ~H5.hasAttr(oid, 'level')
+            ctx.rep.add('E12', path, ...
+                'a band states the coverage it claims with level');
+        else
+            level = numAttr(oid, 'level');
+            if isnumeric(level) && isscalar(level) && ...
+                    ~(level > 0 && level < 1)
+                ctx.rep.add('E12', path, ...
+                    ['level is a coverage fraction in (0, 1), and this ' ...
+                     'is %g'], level);
+            end
+        end
+        if ~H5.hasAttr(oid, 'method')
+            ctx.rep.add('E12', path, ...
+                'a band says how it was made with method');
+        end
+    end
+end
+
+function tf = isBand(oid)
+%isBand  True when the slot's statistic is band (section 9).
+    H5 = mestra.internal.H5;
+    tf = H5.hasAttr(oid, 'statistic') && ...
+         strcmp(strAttr(oid, 'statistic'), 'band');
 end
 
 function checkAttrEncodings(ctx, oid, path)
@@ -1492,6 +1549,25 @@ function s = nonFinitePhrase(bad, varies, dims)
     else
         s = sprintf(['%d value(s) are non-finite; this array does not ' ...
                      'vary along rows, so there is no row to name'], n);
+    end
+end
+
+function s = negativeBandPhrase(neg, varies, dims)
+%negativeBandPhrase  W16 for an array, once, with the count and the
+%   first three rows when the array has rows to name.
+    n = numel(neg);
+    if strcmp(varies, 'row') && numel(dims) >= 1 && dims(1) > 0
+        block = max(1, prod(double(dims(2:end))));
+        rows = unique(floor((double(neg(:)') - 1) / block));
+        s = sprintf(['%s hold a value below zero in a band, which is a ' ...
+                     'half-width and is never negative (%s), %d ' ...
+                     'value(s) in all'], ...
+                    mestra.internal.Report.someRows(rows, dims(1)), ...
+                    mestra.internal.Report.whichRows(rows), n);
+    else
+        s = sprintf(['%d value(s) are below zero in a band, which is a ' ...
+                     'half-width; this array does not vary along rows, ' ...
+                     'so there is no row to name'], n);
     end
 end
 

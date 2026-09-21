@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -14,18 +15,25 @@
 
 namespace mestra {
 
-// One output slot: y = A x + b, reshaped to `shape` in C order.
+// One output: y = A x + b, reshaped to `shape` in C order, and, when
+// the output carries a band, a constant `uncertainty` the same in
+// every row with its `level` and `method`: all three or none.
 struct AffineOutput {
   std::vector<double> A;             // (n_out_flat, n_keys), C order
   std::vector<double> b;             // (n_out_flat)
   std::vector<std::int64_t> shape;   // the slot's dimensions after row
                                      // ([] for a scalar slot)
+  std::optional<std::vector<double>> uncertainty;   // (n_out_flat)
+  std::optional<double> level;
+  std::optional<std::string> method;
   std::size_t out_flat() const;      // product of `shape`, 1 when empty
+  bool has_band() const { return uncertainty.has_value(); }
 };
 
 // The callable.  Its dictionary is exactly {keys, outputs}; a reader
 // refuses an `affine` dictionary with any other key, and a writer must
-// not add to it.
+// not add to it.  The constructor refuses an output whose band is
+// missing one of its three parts.
 class Affine : public Callable {
  public:
   Affine() = default;

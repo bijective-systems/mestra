@@ -259,6 +259,38 @@ def test_a_second_key_of_a_role_that_allows_one():
     assert caught.value.rule == "E03"
 
 
+def test_a_band_states_its_level_and_method():
+    """E12 at build time: a stored band carries level in (0, 1) and a
+    method; a slot a callable serves is value, mean or band."""
+    ds = mestra.Dataset(writer="t")
+    ds.add_key("mach", [0.4, 0.8], role="condition", units="1")
+    ds.add_scalar("cl", [0.25, 0.55], units="1")
+    for rule, kwargs in [
+            ("E12", {}),
+            ("E12", {"level": 1.96, "method": "m"}),
+            ("E12", {"level": 0.95}),
+            ("E12", {"level": 0.95, "method": "m"})]:
+        with pytest.raises(MestraError) as caught:
+            ds.add_scalar("cl_band", [0.1, 0.1], units="1",
+                          statistic="band", **kwargs)
+        assert caught.value.rule == rule
+    ds.add_scalar("cl_band", [0.1, 0.1], units="1", statistic="band",
+                  of="cl", level=0.95, method="m")
+    with pytest.raises(MestraError) as caught:      # level without a band
+        ds.add_scalar("cl_mean", [0.1, 0.1], units="1", level=0.95)
+    assert caught.value.rule == "E12"
+    ds.add_callable("m1", mestra.Affine(
+        ["mach"], {"cl": {"A": [[2.0]], "b": [0.05], "shape": []}}))
+    with pytest.raises(MestraError) as caught:
+        ds.add_callable_slot("cl_draws", units="1", callable="m1",
+                             output="cl", statistic="draw")
+    assert caught.value.rule == "E12"
+    served = ds.add_callable_slot("cl_served_band", units="1",
+                                  callable="m1", output="cl",
+                                  statistic="band", of="cl")
+    assert served.level is None      # written at evaluation, not before
+
+
 def test_a_derived_array_carries_what_section_3_requires():
     ds = mestra.Dataset(writer="t")
     support = ds.add_support("s0", coordinates=XY, cells=CELLS)

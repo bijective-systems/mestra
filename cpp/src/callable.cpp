@@ -58,11 +58,38 @@ void KeysTable::add_text_column(const std::string& name,
   text.back() = std::move(values);
 }
 
+void Prediction::check(const std::string& where) const {
+  const std::string at = where.empty() ? std::string() : where + ": ";
+  if (!uncertainty.has_value()) {
+    if (level.has_value() || method.has_value()) {
+      throw Error("", at + "level and method go with an uncertainty; a "
+                           "prediction without one has neither (section 10)");
+    }
+    return;
+  }
+  if (uncertainty->shape != mean.shape) {
+    throw Error("", at + "a band has the shape of its mean (section 10)");
+  }
+  if (!level.has_value() || !(*level > 0.0 && *level < 1.0)) {
+    throw Error("", at + "a band states the coverage it claims as level in "
+                         "(0, 1); a 1.96-sigma Gaussian band is 0.95");
+  }
+  if (!method.has_value() || method->empty()) {
+    throw Error("", at + "a band says how it was made; give method one "
+                         "sentence");
+  }
+  for (const double v : uncertainty->f64) {
+    if (v < 0.0) {
+      throw Error("", at + "a band is a half-width and is never negative");
+    }
+  }
+}
+
 bool Outputs::has(const std::string& output) const {
   return by_output.find(output) != by_output.end();
 }
 
-const Array& Outputs::at(const std::string& output) const {
+const Prediction& Outputs::at(const std::string& output) const {
   const auto it = by_output.find(output);
   if (it == by_output.end()) {
     throw Error("", "this callable has no output \"" + output + "\"");
@@ -70,8 +97,8 @@ const Array& Outputs::at(const std::string& output) const {
   return it->second;
 }
 
-void Outputs::set(const std::string& output, Array a) {
-  by_output[output] = std::move(a);
+void Outputs::set(const std::string& output, Prediction p) {
+  by_output[output] = std::move(p);
 }
 
 namespace {

@@ -488,6 +488,8 @@ classdef Dataset < handle
             p.addParameter('Statistic', '');
             p.addParameter('Of', '');
             p.addParameter('Quantile', []);
+            p.addParameter('Level', []);
+            p.addParameter('Method', '');
             p.addParameter('Chunk', []);
             p.addParameter('Filters', []);
             [pos, rest] = mestra.internal.Args.positional(varargin, ...
@@ -514,6 +516,8 @@ classdef Dataset < handle
             rec(1).statistic = r.Statistic;
             rec(1).of = r.Of;
             rec(1).quantile = r.Quantile;
+            rec(1).level = r.Level;
+            rec(1).method = char(r.Method);
             rec(1).chunk = r.Chunk;
             rec(1).filters = mestra.Dataset.filterMatrix(r.Filters);
             rec(1).dtype = 'float64';
@@ -684,6 +688,8 @@ classdef Dataset < handle
             p.addParameter('Statistic', '');
             p.addParameter('Of', '');
             p.addParameter('Quantile', []);
+            p.addParameter('Level', []);
+            p.addParameter('Method', '');
             [pos, rest] = mestra.internal.Args.positional(varargin, ...
                 {{'', @mestra.internal.Args.isText}, ...
                  {'', @mestra.internal.Args.isText}, ...
@@ -707,7 +713,8 @@ classdef Dataset < handle
                                 'Source', ['callable:' id], ...
                                 'Output', output, 'Category', r.Category, ...
                                 'Statistic', r.Statistic, 'Of', r.Of, ...
-                                'Quantile', r.Quantile);
+                                'Quantile', r.Quantile, ...
+                                'Level', r.Level, 'Method', r.Method);
             i = obj.supportIndex(supportName);
             if strcmp(r.Location, 'cell')
                 obj.supports(i).cellArrays = mestra.Dataset.append( ...
@@ -827,6 +834,8 @@ classdef Dataset < handle
             p.addParameter('Statistic', '');
             p.addParameter('Of', '');
             p.addParameter('Quantile', []);
+            p.addParameter('Level', []);
+            p.addParameter('Method', '');
             p.addParameter('Category', '');
             p.addParameter('Recomputed', []);
             p.addParameter('DerivedFrom', '');
@@ -883,6 +892,8 @@ classdef Dataset < handle
             slot(1).statistic = r.Statistic;
             slot(1).of = r.Of;
             slot(1).quantile = r.Quantile;
+            slot(1).level = r.Level;
+            slot(1).method = char(r.Method);
             slot(1).category = r.Category;
             slot(1).recomputed = r.Recomputed;
             slot(1).derivedFrom = r.DerivedFrom;
@@ -1056,6 +1067,7 @@ classdef Dataset < handle
         function s = emptyScalar()
             s = struct('name', {}, 'units', {}, 'source', {}, 'output', {}, ...
                        'statistic', {}, 'of', {}, 'quantile', {}, ...
+                       'level', {}, 'method', {}, ...
                        'values', {}, 'dtype', {}, 'dims', {}, 'chunk', {}, ...
                        'filters', {});
         end
@@ -1076,6 +1088,7 @@ classdef Dataset < handle
             s = struct('name', {}, 'role', {}, 'varies', {}, 'units', {}, ...
                        'components', {}, 'source', {}, 'output', {}, ...
                        'statistic', {}, 'of', {}, 'quantile', {}, ...
+                       'level', {}, 'method', {}, ...
                        'category', {}, 'recomputed', {}, 'derivedFrom', {}, ...
                        'recipe', {}, 'reference', {}, 'values', {}, ...
                        'dims', {}, 'shape', {}, 'dtype', {}, ...

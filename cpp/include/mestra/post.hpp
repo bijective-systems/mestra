@@ -12,9 +12,26 @@
 #include <string>
 #include <vector>
 
+#include "mestra/callable.hpp"
 #include "mestra/dataset.hpp"
 
 namespace mestra {
+
+// One slot as a prediction (section 10): its mean with its band,
+// whether the slot holds data or a callable serves it, so that a tool
+// asks one question of either and gets the same record.
+//
+// `slot` names a scalar, or an array as `integrate` spells it, whose
+// statistic is `value` or `mean`, or none.  For a stored slot the mean
+// is its data and the band is the `band` slot at the same location
+// that names it with `of`, if there is one; `keys` must then be null,
+// because stored data has values on its own rows only.  For a slot a
+// callable serves, the callable is called on `keys`, or on the file's
+// own key columns when `keys` is null, and its record for the slot's
+// output is returned as it is.  A band slot, or a std, quantile or
+// draw slot, is refused: name the base slot.
+Prediction prediction(const Dataset& d, const std::string& slot,
+                      const KeysTable* keys = nullptr);
 
 // What `integrate` may be told.
 struct IntegrateOptions {

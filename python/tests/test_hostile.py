@@ -357,7 +357,7 @@ def test_the_affine_order_is_not_numpy_s_to_choose():
         keys = list(table)
         model = mestra.Affine(keys, {"y": {"A": matrix, "b": offset,
                                            "shape": [n_out]}})
-        got = model(table)["y"]
+        got = model(table)["y"].mean
         for row in range(rows):
             for out in range(n_out):
                 total = 0.0

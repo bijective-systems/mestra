@@ -336,6 +336,8 @@ class Writer {
       if (s.statistic.has_value()) put(p, "statistic", *s.statistic);
       if (s.of.has_value()) put(p, "of", *s.of);
       if (s.quantile.has_value()) put_real(p, "quantile", *s.quantile);
+      if (s.level.has_value()) put_real(p, "level", *s.level);
+      if (s.method.has_value()) put(p, "method", *s.method);
       put_extra(p, s.extra);
     }
   }
@@ -441,6 +443,8 @@ class Writer {
     if (a.statistic.has_value()) put(p, "statistic", *a.statistic);
     if (a.of.has_value()) put(p, "of", *a.of);
     if (a.quantile.has_value()) put_real(p, "quantile", *a.quantile);
+    if (a.level.has_value()) put_real(p, "level", *a.level);
+    if (a.method.has_value()) put(p, "method", *a.method);
     if (a.category.has_value()) put(p, "category", *a.category);
     if (a.recomputed.has_value()) put_bool(p, "recomputed", *a.recomputed);
     if (a.derived_from.has_value()) put(p, "derived_from", *a.derived_from);

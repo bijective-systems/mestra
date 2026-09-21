@@ -81,7 +81,8 @@ _ROOT_GROUPS = ("keys", "scalars", "categories", "supports",
 _KEY_ATTRS = ("role", "units", "lower", "upper", "category",
               "trajectory_group", "parent")
 _SLOT_ATTRS = ("role", "varies", "units", "components", "source",
-               "output", "statistic", "of", "quantile", "category",
+               "output", "statistic", "of", "quantile", "level", "method",
+               "category",
                "recomputed", "derived_from", "recipe", "reference")
 _SUPPORT_ATTRS = ("kind", "n_nodes", "n_cells", "support_id")
 _SUPPORT_MEMBERS = ("node", "cell", "cell_plus_one", "index", "row",
@@ -449,7 +450,8 @@ def _read_scalars(f: h5py.File, ds: Dataset,
             member.name, units=got.get("units"),
             source=got.get("source", "data"), output=got.get("output"),
             statistic=got.get("statistic"), of=got.get("of"),
-            quantile=got.get("quantile"), extra=got["extra"])
+            quantile=got.get("quantile"), level=got.get("level"),
+            method=got.get("method"), extra=got["extra"])
         if isinstance(member.obj, h5py.Dataset):
             slot.data = _source(f, where, member.obj, lazy)
             slot.storage = _storage(member.obj)
@@ -568,7 +570,8 @@ def _read_array(f: h5py.File, support: Support, name: str, member: Any,
         reference=got.get("reference"), support=support,
         source=got.get("source", "data"), output=got.get("output"),
         statistic=got.get("statistic"), of=got.get("of"),
-        quantile=got.get("quantile"), extra=got["extra"])
+        quantile=got.get("quantile"), level=got.get("level"),
+        method=got.get("method"), extra=got["extra"])
     if isinstance(member, h5py.Dataset):
         slot.data = _source(f, path, member, lazy)
         slot.storage = _storage(member)

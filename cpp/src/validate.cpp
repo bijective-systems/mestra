@@ -56,7 +56,8 @@ Enc expected_encoding(const std::string& name) {
   if (name == "n_nodes" || name == "n_cells" || name == "components") {
     return Enc::Integer;
   }
-  if (name == "lower" || name == "upper" || name == "quantile") {
+  if (name == "lower" || name == "upper" || name == "quantile" ||
+      name == "level") {
     return Enc::Real;
   }
   if (name == "format" || name == "writer" || name == "created" ||
@@ -65,7 +66,8 @@ Enc expected_encoding(const std::string& name) {
       name == "source" || name == "output" || name == "statistic" ||
       name == "of" || name == "kind" || name == "support_id" ||
       name == "varies" || name == "derived_from" || name == "recipe" ||
-      name == "reference" || name == "type" || name == "repr") {
+      name == "reference" || name == "type" || name == "repr" ||
+      name == "method") {
     return Enc::Text;
   }
   return Enc::None;
@@ -197,6 +199,45 @@ class Validator {
   void warn(const std::string& id, const std::string& where,
             const std::string& message) {
     r_->warnings.push_back({id, where, message});
+  }
+
+  // E12: a statistic with what it needs (section 9), and on a slot a
+  // callable serves, one a callable produces (section 10).
+  void check_statistic(const std::string& path,
+                       const std::vector<RawAttr>& attrs) {
+    const std::string statistic = text_of(attrs, "statistic");
+    if (statistic.empty()) return;
+    const std::string source = text_of(attrs, "source");
+    const bool served = source.compare(0, 9, "callable:") == 0;
+    if (statistic == "quantile" && find(attrs, "quantile") == nullptr) {
+      error("E12", path, "a quantile statistic with no `quantile`");
+    }
+    if (statistic != "value" && statistic != "draw" &&
+        find(attrs, "of") == nullptr) {
+      error("E12", path, "a statistic other than value or draw with no `of`");
+    }
+    if (served && (statistic == "std" || statistic == "quantile" ||
+                   statistic == "draw")) {
+      error("E12", path,
+            "a callable returns a mean and at most a band (section 10), so "
+            "a slot it serves is value, mean or band, not " + statistic);
+    }
+    if (statistic == "band" && !served) {
+      const RawAttr* level = find(attrs, "level");
+      if (level == nullptr) {
+        error("E12", path, "a band states the coverage it claims with `level`");
+      } else if (level->value.kind() == AttrValue::Kind::Float) {
+        const double v = level->value.as_float();
+        if (!(v > 0.0 && v < 1.0)) {
+          error("E12", path,
+                "`level` is a coverage fraction in (0, 1), and this is " +
+                    internal::format_f64(v));
+        }
+      }
+      if (find(attrs, "method") == nullptr) {
+        error("E12", path, "a band says how it was made with `method`");
+      }
+    }
   }
 
   File& f_;
@@ -1178,16 +1219,7 @@ void Validator::scalars() {
       }
     }
 
-    const std::string statistic = text_of(attrs, "statistic");
-    if (!statistic.empty()) {
-      if (statistic == "quantile" && find(attrs, "quantile") == nullptr) {
-        error("E12", p, "a quantile statistic with no `quantile`");
-      }
-      if (statistic != "value" && statistic != "draw" &&
-          find(attrs, "of") == nullptr) {
-        error("E12", p, "a statistic other than value or draw with no `of`");
-      }
-    }
+    check_statistic(p, attrs);
 
     if (!m.is_dataset) return;
     const DsetInfo info = f_.dataset_info(p);
@@ -1223,6 +1255,17 @@ void Validator::scalars() {
              missing.message("non-finite value(s) in a scalar, which is "
                              "how this format spells missing "
                              "floating-point data"));
+      }
+      if (text_of(attrs, "statistic") == "band") {
+        PerRow negative;
+        for (std::size_t i = 0; i < values.size(); ++i) {
+          if (values[i] < 0.0) negative.hit(i);
+        }
+        if (negative.any()) {
+          warn("W16", p,
+               negative.message("value(s) below zero in a band, which is a "
+                                "half-width and is never negative"));
+        }
       }
     }
     });
@@ -1590,16 +1633,7 @@ void Validator::slot(const std::string& path,
     }
   }
 
-  const std::string statistic = text_of(attrs, "statistic");
-  if (!statistic.empty()) {
-    if (statistic == "quantile" && find(attrs, "quantile") == nullptr) {
-      error("E12", path, "a quantile statistic with no `quantile`");
-    }
-    if (statistic != "value" && statistic != "draw" &&
-        find(attrs, "of") == nullptr) {
-      error("E12", path, "a statistic other than value or draw with no `of`");
-    }
-  }
+  check_statistic(path, attrs);
 
   bool has_source = false;
   const std::string source = text_of(attrs, "source", &has_source);
@@ -1759,6 +1793,17 @@ void Validator::slot(const std::string& path,
            missing.message("non-finite value(s) in a " + role +
                            ", which is how this format spells missing "
                            "floating-point data"));
+    }
+    if (text_of(attrs, "statistic") == "band") {
+      PerRow negative(row_leading ? "row" : "index");
+      for (std::size_t i = 0; i < values.size(); ++i) {
+        if (values[i] < 0.0) negative.hit(row_leading ? i / per_row : i);
+      }
+      if (negative.any()) {
+        warn("W16", path,
+             negative.message("value(s) below zero in a band, which is a "
+                              "half-width and is never negative"));
+      }
     }
   }
 

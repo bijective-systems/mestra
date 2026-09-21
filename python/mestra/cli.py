@@ -47,7 +47,8 @@ LIBRARY = """the library, for everything this command does not do:
     mestra.evaluate       a callable file on a keys table, giving a
                           file of data
     mestra.compute_weights, mestra.support_ids
-    mestra.post           field_statistics, integrate, time_series,
+    mestra.post           prediction, field_statistics, integrate,
+                          time_series,
                           grouped_split, split_leaks
     mestra.limits         what this reader refuses to go past, and why
 """
@@ -227,6 +228,10 @@ def _slot_detail(slot: Any) -> str:
         out.append("statistic %s" % slot.statistic)
     if slot.of:
         out.append("of %s" % slot.of)
+    if slot.level is not None:
+        out.append("level %s" % slot.level)
+    if slot.method:
+        out.append("method %r" % slot.method)
     return "  ".join(out)
 
 

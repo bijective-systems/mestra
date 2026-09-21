@@ -99,9 +99,51 @@ def test_the_keys_keep_their_roles_and_bounds():
     assert out.keys["alpha"].units == "degree"
 
 
+def test_a_band_slot_takes_the_uncertainty_and_its_level(tmp_path):
+    """Section 10: which part of the record fills a slot is its
+    statistic, and evaluation writes level and method on the band."""
+    with mestra.read(corpus.case_path("affine_band")) as ds:
+        out = mestra.evaluate(ds, {"mach": [0.1, 0.9],
+                                   "alpha": [-2.0, 10.0]})
+    band = out.scalars["cl_band"]
+    assert band.source == "data" and band.statistic == "band"
+    assert band.of == "cl" and band.level == 0.95
+    assert band.method == "constant band"
+    assert band.read().values.tolist() == [0.02, 0.02]
+    pressure_band = out.supports["s0"].node_arrays["pressure_band"]
+    assert pressure_band.level == 0.68
+    assert pressure_band.read().at(row=1, node=5, component=0) == 0.30
+    assert out.scalars["cl"].level is None
+    path = str(tmp_path / "banded.mes")
+    mestra.write(out, path)
+    report = mestra.validate(path)
+    assert report.error_ids == [] and report.warning_ids == []
+    with mestra.read(path) as back:
+        assert back.scalars["cl_band"].level == 0.95
+        assert back.scalars["cl_band"].method == "constant band"
+
+
+def test_a_band_slot_needs_a_record_with_a_band():
+    """A band slot served by an output that has no uncertainty cannot
+    be filled: the file would hold a band with no level."""
+    ds = mestra.Dataset(writer="t")
+    ds.add_key("mach", [], role="condition", units="1", lower=0.1,
+               upper=0.9)
+    ds.add_callable("m1", mestra.Affine(
+        ["mach"], {"cl": {"A": [[2.0]], "b": [0.05], "shape": []}}))
+    ds.add_callable_slot("cl", units="1", callable="m1")
+    ds.add_callable_slot("cl_band", units="1", callable="m1", output="cl",
+                         statistic="band", of="cl")
+    with pytest.raises(MestraError) as caught:
+        mestra.evaluate(ds, {"mach": [0.5]})
+    assert caught.value.rule == "E12"
+    assert "cl_band" in str(caught.value)
+
+
 @pytest.mark.parametrize("name", ["affine_zero_rows",
                                   "affine_with_rows",
-                                  "callable_two_slots"])
+                                  "callable_two_slots",
+                                  "affine_band"])
 def test_an_evaluated_file_has_no_callables_group_at_all(tmp_path, name):
     """Section 7 of docs/api-conventions.md.
 

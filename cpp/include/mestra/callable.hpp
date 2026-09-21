@@ -9,6 +9,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -39,16 +40,34 @@ struct KeysTable {
                        std::vector<std::string> values);
 };
 
-// What a callable returns: one array per output name, shaped as the
-// slot would be stored, that is (row, [draw], node | cell, component)
-// for an array and (row) for a scalar, with the dimension names filled
-// in.
+// What a callable returns for one output (section 10).  `mean` is the
+// point prediction, shaped as the slot would be stored, that is (row,
+// node | cell, component) for an array and (row) for a scalar, with
+// the dimension names filled in.  `uncertainty` is optional: a band
+// (section 9), the half-width of the interval around the mean at
+// coverage `level`, of the same shape and never negative, made as
+// `method` says.  The three go together; `check` refuses a record
+// that has some of them.  How the band was computed is the model's
+// business; what it claims is on the record.
+struct Prediction {
+  Array mean;
+  std::optional<Array> uncertainty;
+  std::optional<double> level;
+  std::optional<std::string> method;
+
+  bool has_uncertainty() const { return uncertainty.has_value(); }
+  // Throws Error when the record is not well formed.  `where` names
+  // the output in the message.
+  void check(const std::string& where = std::string()) const;
+};
+
+// What a callable returns: one prediction per output name.
 struct Outputs {
-  std::map<std::string, Array, BytesLess> by_output;
+  std::map<std::string, Prediction, BytesLess> by_output;
 
   bool has(const std::string& output) const;
-  const Array& at(const std::string& output) const;
-  void set(const std::string& output, Array a);
+  const Prediction& at(const std::string& output) const;
+  void set(const std::string& output, Prediction p);
 };
 
 // The four things and nothing more.
@@ -56,7 +75,7 @@ class Callable {
  public:
   virtual ~Callable() = default;
 
-  // Keys in, values out.
+  // Keys in, predictions out.
   virtual Outputs call(const KeysTable& keys) const = 0;
   // A nested dictionary that fully represents the callable.
   virtual Dict to_dict() const = 0;

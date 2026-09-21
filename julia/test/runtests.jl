@@ -54,6 +54,7 @@ function probe_value(ds::Mestra.Dataset, p)
         end
         haskey(p, "component") && return v[idx[:node], idx[:component]]
         haskey(p, "node") && return v[idx[:node]]
+        haskey(p, "index") && return v[Int(p["index"]) + 1]
         return v[]
     elseif parts[1] == "supports"
         sup = ds.supports[Mestra.support_by_name(ds, parts[2])]
@@ -137,6 +138,16 @@ function tagged_ok(got, want)
 end
 
 # ---------------------------------------------------------- the tests
+
+function refusal(f)
+    try
+        f()
+        return nothing
+    catch e
+        e isa Mestra.MestraError || rethrow()
+        return e
+    end
+end
 
 @testset "Mestra" begin
 
@@ -350,19 +361,150 @@ end
     @test c.keys == ["mach", "alpha"]
     @test sprint(show, c) == "affine(mach, alpha -> cl, pressure)"
     out = c(Dict("mach" => [0.5], "alpha" => [4.0]))
-    @test bitequal(out["cl"][1], 1.45)
+    @test bitequal(out["cl"].mean[1], 1.45)
+    @test !Mestra.has_uncertainty(out["cl"])
     want = [0.5, 1.1, 3.7, 4.3, 6.9, 7.5]
-    got = vec(out["pressure"])
+    got = vec(out["pressure"].mean)
     @test all(bitequal(a, b) for (a, b) in zip(got, want))
     # b added last, no fused multiply-add: accumulating b first differs
     # in the last place
-    @test bitequal(out["cl"][1], 2.0 * 0.5 + 0.1 * 4.0 + 0.05)
+    @test bitequal(out["cl"].mean[1], 2.0 * 0.5 + 0.1 * 4.0 + 0.05)
     # the other two accepted keys tables of section 26
     out2 = c((mach = [0.5], alpha = [4.0]))
-    @test bitequal(out2["cl"][1], 1.45)
+    @test bitequal(out2["cl"].mean[1], 1.45)
     out3 = c(([4.0 0.5], ["alpha", "mach"]))
-    @test bitequal(out3["cl"][1], 1.45)
+    @test bitequal(out3["cl"].mean[1], 1.45)
     @test_throws Mestra.MestraError c(Dict("mach" => [0.5]))
+end
+
+@testset "a prediction is a mean and at most a band (section 10)" begin
+    plain = Mestra.Prediction([1.0, 2.0])
+    @test plain.uncertainty === nothing && plain.level === nothing
+    banded = Mestra.Prediction([1.0, 2.0]; uncertainty = [0.1, 0.2],
+                               level = 0.95, method = "m")
+    @test banded.level == 0.95 && Mestra.has_uncertainty(banded)
+    @test_throws Mestra.MestraError Mestra.Prediction(
+        [1.0, 2.0]; uncertainty = [0.1, 0.2], method = "m")
+    @test_throws Mestra.MestraError Mestra.Prediction(
+        [1.0, 2.0]; uncertainty = [0.1, 0.2], level = 1.96, method = "m")
+    @test_throws Mestra.MestraError Mestra.Prediction(
+        [1.0, 2.0]; uncertainty = [0.1], level = 0.95, method = "m")
+    @test_throws Mestra.MestraError Mestra.Prediction(
+        [1.0, 2.0]; uncertainty = [-0.1, 0.2], level = 0.95, method = "m")
+    @test_throws Mestra.MestraError Mestra.Prediction([1.0, 2.0]; level = 0.95)
+
+    # section 27: a constant band on an affine output, the same in
+    # every row, all three of uncertainty, level and method or none
+    c = Mestra.affine(["mach"], Dict(
+        "cl" => (A = [2.0], b = [0.05], shape = Int64[],
+                 uncertainty = [0.02], level = 0.95, method = "constant band"),
+        "p" => (A = reshape([1.0, 2.0], 2, 1), b = [0.0, 0.1],
+                shape = Int64[2, 1], uncertainty = [0.5, 0.6], level = 0.68,
+                method = "constant band")))
+    out = c(Dict("mach" => [0.5, 0.7]))
+    @test out["cl"].uncertainty == [0.02, 0.02]
+    @test out["cl"].level == 0.95 && out["cl"].method == "constant band"
+    @test size(out["p"].uncertainty) == (1, 2, 2)
+    @test out["p"].uncertainty[1, 2, 2] == 0.6
+    @test bitequal(out["cl"].mean[1], 1.05)
+    back = Mestra.from_dict(Mestra.Affine, Mestra.to_dict(c))
+    @test Mestra.to_dict(back)["outputs"]["cl"]["level"] == 0.95
+    @test Mestra.to_dict(back)["outputs"]["p"]["method"] == "constant band"
+    @test_throws Mestra.MestraError Mestra.affine(["mach"], Dict(
+        "cl" => (A = [2.0], b = [0.05], shape = Int64[], level = 0.95)))
+end
+
+@testset "a band slot takes the uncertainty and its level (section 10)" begin
+    ds = Mestra.read(case_file("affine_band"))
+    out = Mestra.evaluate(ds, Dict("mach" => [0.1, 0.9],
+                                   "alpha" => [-2.0, 10.0]))
+    band = out.scalars["cl_band"]
+    @test band.source == "data" && band.statistic == "band"
+    @test band.level == 0.95 && band.method == "constant band"
+    @test Mestra.values(out, band) == [0.02, 0.02]
+    pb = out["pressure_band"]
+    @test pb.level == 0.68
+    v = Mestra.permute(Mestra.values(out, pb), (:row, :node, :component))
+    @test v[2, 6, 1] == 0.3
+    @test out.scalars["cl"].level === nothing
+    path = joinpath(SCRATCH, "banded.mes")
+    Mestra.write(out, path)
+    r = Mestra.validate(path)
+    @test r.errors == String[] && r.warnings == String[]
+    back = Mestra.read(path)
+    @test back.scalars["cl_band"].level == 0.95
+    @test back.scalars["cl_band"].method == "constant band"
+
+    # a band slot served by an output with no uncertainty cannot be
+    # filled: the file would hold a band with no level
+    m = Mestra.Dataset()
+    Mestra.add_key!(m, "mach", Float64[]; role = :condition, units = "1",
+                    bounds = (0.1, 0.9))
+    Mestra.add_callable!(m, "m1", Mestra.affine(["mach"], Dict(
+        "cl" => (A = [2.0], b = [0.05], shape = Int64[]))))
+    Mestra.add_callable_scalar!(m, "cl"; units = "1", callable = "m1",
+                                output = "cl")
+    Mestra.add_callable_scalar!(m, "cl_band"; units = "1", callable = "m1",
+                                output = "cl", statistic = "band", of = "cl")
+    e = refusal(() -> Mestra.evaluate(m, Dict("mach" => [0.5])))
+    @test e !== nothing && e.rule == "E12"
+end
+
+@testset "prediction: one question of a stored slot and of a served one" begin
+    ds = Mestra.read(case_file("band_stored"))
+    r = Mestra.prediction(ds, ds["pressure"])
+    @test size(r.mean) == (1, 6, 2)
+    @test r.uncertainty[1, 4, 2] == 0.8
+    @test r.level == 0.95
+    @test startswith(r.method, "half-width of a 95 % interval")
+    @test_throws Mestra.MestraError Mestra.prediction(ds, ds["pressure_band"])
+    @test_throws Mestra.MestraError Mestra.prediction(
+        ds, ds["pressure"]; keys = Dict("mach" => [0.5]))
+    two = Mestra.read(case_file("mesh_two_rows"))
+    plain = Mestra.prediction(two, two.scalars["cl"])
+    @test plain.mean == [0.25, 0.55] && plain.uncertainty === nothing
+    m = Mestra.read(case_file("affine_band"))
+    served = Mestra.prediction(m, m.scalars["cl"];
+                               keys = Dict("mach" => [0.5], "alpha" => [4.0]))
+    @test bitequal(served.mean[1], 1.45)
+    @test served.uncertainty == [0.02] && served.level == 0.95
+    @test_throws Mestra.MestraError Mestra.prediction(m, m.scalars["cl"])
+    rows = Mestra.read(case_file("affine_with_rows"))
+    @test size(Mestra.prediction(rows, rows["pressure"]).mean) == (1, 6, 2)
+    @test size(Mestra.prediction(rows, "pressure").mean) == (1, 6, 2)
+    draws = Mestra.read(case_file("draws_and_summaries"))
+    @test_throws Mestra.MestraError Mestra.prediction(draws, "pressure_std")
+end
+
+@testset "a band states its level and method at build time (E12)" begin
+    ds = Mestra.Dataset()
+    Mestra.add_key!(ds, "mach", [0.4, 0.8]; role = :condition, units = "1")
+    Mestra.add_scalar!(ds, "cl", [0.25, 0.55]; units = "1")
+    e = refusal(() -> Mestra.add_scalar!(ds, "cl_band", [0.1, 0.1];
+                                         units = "1", statistic = "band"))
+    @test e !== nothing && e.rule == "E12"
+    e = refusal(() -> Mestra.add_scalar!(ds, "cl_band", [0.1, 0.1];
+                                         units = "1", statistic = "band",
+                                         of = "cl", level = 1.96,
+                                         method = "m"))
+    @test e !== nothing && e.rule == "E12"
+    e = refusal(() -> Mestra.add_scalar!(ds, "cl_mean", [0.1, 0.1];
+                                         units = "1", level = 0.95))
+    @test e !== nothing && e.rule == "E12"
+    Mestra.add_scalar!(ds, "cl_band", [0.1, 0.1]; units = "1",
+                       statistic = "band", of = "cl", level = 0.95,
+                       method = "m")
+    @test ds.scalars["cl_band"].level == 0.95
+    Mestra.add_callable!(ds, "m1", Mestra.affine(["mach"], Dict(
+        "cl" => (A = [2.0], b = [0.05], shape = Int64[]))))
+    e = refusal(() -> Mestra.add_callable_scalar!(
+        ds, "cl_draws"; units = "1", callable = "m1", output = "cl",
+        statistic = "draw"))
+    @test e !== nothing && e.rule == "E12"
+    s = Mestra.add_callable_scalar!(ds, "cl_served"; units = "1",
+                                    callable = "m1", output = "cl",
+                                    statistic = "band", of = "cl")
+    @test s.level === nothing
 end
 
 @testset "evaluate produces a dataset that can be written" begin
@@ -507,15 +649,6 @@ function six_node_dataset()
 end
 
 """The MestraError a call raises, or nothing."""
-function refusal(f)
-    try
-        f()
-        return nothing
-    catch e
-        e isa Mestra.MestraError || rethrow()
-        return e
-    end
-end
 
 @testset "the builder follows dims, and refuses what disagrees" begin
     ds, s = six_node_dataset()
@@ -1680,7 +1813,7 @@ end
     @test d["outputs"]["cl"]["shape"] == Int64[]
     @test eltype(d["outputs"]["cl"]["shape"]) === Int64
     out = Mestra.callable(two, "m1")(Dict("mach" => [0.5], "alpha" => [4.0]))
-    @test bitequal(out["cl"][1], 1.45)
+    @test bitequal(out["cl"].mean[1], 1.45)
 end
 
 # -------------------------------------------------- docs/examples

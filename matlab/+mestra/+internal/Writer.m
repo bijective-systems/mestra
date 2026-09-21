@@ -464,6 +464,12 @@ classdef Writer
             if ~isempty(slot.quantile)
                 H5.writeNumAttr(oid, 'quantile', slot.quantile, 'float64');
             end
+            if isfield(slot, 'level') && ~isempty(slot.level)
+                H5.writeNumAttr(oid, 'level', slot.level, 'float64');
+            end
+            if isfield(slot, 'method') && ~isempty(slot.method)
+                H5.writeStrAttr(oid, 'method', slot.method);
+            end
             if isArray
                 if ~isempty(slot.category)
                     H5.writeStrAttr(oid, 'category', slot.category);

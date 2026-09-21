@@ -34,7 +34,10 @@ Where everything is:
                      from the connectivity, and support_ids beside it
     Callable         the four-method protocol, with Affine as the one
                      type this package defines, and register_callable
-    mestra.post      field_statistics, integrate, time_series,
+    Prediction       what a callable returns per output: a mean and,
+                     when it has one, a band with its level and method
+    mestra.post      prediction, field_statistics, integrate,
+                     time_series,
                      grouped_split, split_leaks
     mestra.units     parse, is_parseable, same_dimensions
     mestra.limits    what this reader refuses to go past, and why
@@ -52,6 +55,7 @@ from .callables import (
     Affine,
     Callable,
     OpaqueCallable,
+    Prediction,
     callable_from_dict,
     callable_types,
     keys_table,
@@ -72,6 +76,7 @@ from .model import (
     Storage,
     Support,
 )
+from .post import prediction
 from .reader import read, support_ids
 from .validator import Report, validate
 from .weights import compute_weights
@@ -94,6 +99,7 @@ __all__ = [
     "MestraError",
     "NamedArray",
     "OpaqueCallable",
+    "Prediction",
     "Report",
     "ScalarSlot",
     "Slot",
@@ -107,6 +113,7 @@ __all__ = [
     "encode_dict",
     "evaluate",
     "keys_table",
+    "prediction",
     "read",
     "register_callable",
     "support_digest",

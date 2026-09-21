@@ -142,10 +142,64 @@ def test_the_worked_example_of_section_27():
                       "b": [0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
                       "shape": [6, 1]}})
     out = model({"mach": [0.5], "alpha": [4.0]})
-    assert corpus.fnum(out["cl"][0]) == "1.44999999999999996e+00"
-    assert out["pressure"].shape == (1, 6, 1)
-    assert out["pressure"][0, :, 0].tolist() == [0.5, 1.1, 3.7, 4.3,
-                                                 6.9, 7.5]
+    assert corpus.fnum(out["cl"].mean[0]) == "1.44999999999999996e+00"
+    assert out["pressure"].mean.shape == (1, 6, 1)
+    assert out["pressure"].mean[0, :, 0].tolist() == [0.5, 1.1, 3.7, 4.3,
+                                                      6.9, 7.5]
+    assert not out["cl"].has_uncertainty
+    assert out["pressure"].uncertainty is None
+
+
+def test_a_prediction_is_a_mean_and_at_most_a_band():
+    """Section 10: the record, and what it refuses."""
+    mean = np.array([1.0, 2.0])
+    plain = mestra.Prediction(mean)
+    assert plain.uncertainty is None and plain.level is None
+    banded = mestra.Prediction(mean, [0.1, 0.2], level=0.95,
+                               method="constant band")
+    assert banded.uncertainty.tolist() == [0.1, 0.2]
+    assert banded.level == 0.95
+    with pytest.raises(MestraError):            # a band needs a level
+        mestra.Prediction(mean, [0.1, 0.2], method="m")
+    with pytest.raises(MestraError):            # in (0, 1), not sigma
+        mestra.Prediction(mean, [0.1, 0.2], level=1.96, method="m")
+    with pytest.raises(MestraError):            # and a method
+        mestra.Prediction(mean, [0.1, 0.2], level=0.95)
+    with pytest.raises(MestraError):            # of the mean's shape
+        mestra.Prediction(mean, [0.1], level=0.95, method="m")
+    with pytest.raises(MestraError):            # never negative
+        mestra.Prediction(mean, [-0.1, 0.2], level=0.95, method="m")
+    with pytest.raises(MestraError):            # level without a band
+        mestra.Prediction(mean, level=0.95)
+
+
+def test_an_affine_output_may_carry_a_constant_band():
+    """Section 27: uncertainty, level and method, all three or none,
+    and the band is the same in every row."""
+    model = mestra.Affine(
+        ["mach"],
+        {"cl": {"A": [[2.0]], "b": [0.05], "shape": [],
+                "uncertainty": [0.02], "level": 0.95,
+                "method": "constant band"},
+         "p": {"A": [[1.0], [2.0]], "b": [0.0, 0.1], "shape": [2, 1],
+               "uncertainty": [0.5, 0.6], "level": 0.68,
+               "method": "constant band"}})
+    out = model({"mach": [0.5, 0.7]})
+    assert out["cl"].uncertainty.tolist() == [0.02, 0.02]
+    assert out["cl"].level == 0.95 and out["cl"].method == "constant band"
+    assert out["p"].uncertainty.shape == (2, 2, 1)
+    assert out["p"].uncertainty[1, :, 0].tolist() == [0.5, 0.6]
+    assert out["p"].level == 0.68
+    back = mestra.Affine.from_dict(model.to_dict())
+    assert back.to_dict()["outputs"]["cl"]["level"] == 0.95
+    assert back.to_dict()["outputs"]["p"]["method"] == "constant band"
+    with pytest.raises(MestraError):            # one of three is not
+        mestra.Affine(["mach"], {"cl": {"A": [[2.0]], "b": [0.05],
+                                        "shape": [], "level": 0.95}})
+    with pytest.raises(MestraError):            # the band's length
+        mestra.Affine(["mach"], {"cl": {"A": [[2.0]], "b": [0.05],
+                                        "shape": [], "uncertainty": [1, 2],
+                                        "level": 0.95, "method": "m"}})
 
 
 def test_a_two_dimensional_keys_table():
@@ -155,7 +209,8 @@ def test_a_two_dimensional_keys_table():
                                   "shape": []}})
     table = mestra.keys_table(np.array([[0.5, 4.0]]),
                               ["mach", "alpha"])
-    assert corpus.fnum(model(table)["cl"][0]) == "1.44999999999999996e+00"
+    assert corpus.fnum(model(table)["cl"].mean[0]) == \
+        "1.44999999999999996e+00"
 
 
 def test_a_missing_column_is_an_error():
@@ -193,11 +248,11 @@ class Constant(mestra.Callable):
         self.value = float(value)
         self.width = int(width)
 
-    def __call__(self, keys: Any) -> dict[str, np.ndarray]:
+    def __call__(self, keys: Any) -> dict[str, mestra.Prediction]:
         rows = mestra.keys_table(keys)
         length = len(next(iter(rows.values())))
-        return {"pressure": np.full((length, self.width, 1),
-                                    self.value)}
+        return {"pressure": mestra.Prediction(
+            np.full((length, self.width, 1), self.value))}
 
     def to_dict(self) -> dict[str, Any]:
         return {"value": self.value, "width": self.width}

@@ -52,7 +52,7 @@ const KEY_ROLES = (:design, :condition, :time, :categorical, :group,
                    :split, :id, :status)
 const ARRAY_ROLES = (:coordinates, :field, :label, :weight, :normal,
                      :derived)
-const STATISTICS = ("value", "mean", "std", "quantile", "draw")
+const STATISTICS = ("value", "mean", "band", "std", "quantile", "draw")
 const SPLIT_CATEGORIES = ("train", "validation", "test", "holdout")
 
 """
@@ -107,6 +107,8 @@ mutable struct Slot
     statistic::Union{String,Nothing}
     of::Union{String,Nothing}
     quantile::Union{Float64,Nothing}
+    level::Union{Float64,Nothing}     # on a band: its coverage
+    method::Union{String,Nothing}     # on a band: how it was made
     category::Union{String,Nothing}
     recomputed::Union{Bool,Nothing}
     derived_from::Union{String,Nothing}
@@ -124,13 +126,15 @@ end
 function Slot(name, location; support = nothing, source = "data",
               output = nothing, role = nothing, varies = nothing,
               units = nothing, components = nothing, statistic = nothing,
-              of = nothing, quantile = nothing, category = nothing,
+              of = nothing, quantile = nothing, level = nothing,
+              method = nothing, category = nothing,
               recomputed = nothing, derived_from = nothing, recipe = nothing,
               reference = nothing, ldims = Symbol[], dshape = Int[],
               eltype = Float64, chunk = nothing, deflate = nothing,
               shuffle = false, data = nothing, path = "")
     Slot(String(name), path, location, support, source, output, role,
-         varies, units, components, statistic, of, quantile, category,
+         varies, units, components, statistic, of, quantile, level, method,
+         category,
          recomputed, derived_from, recipe, reference, Symbol[ldims...],
          Int[dshape...], eltype, chunk, deflate, shuffle, data)
 end

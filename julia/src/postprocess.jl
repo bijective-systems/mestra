@@ -14,6 +14,89 @@
 say."""
 varies_of(s::Slot) = s.varies === nothing ? "none" : s.varies
 
+# ------------------------------------------------------- prediction
+
+"""
+    prediction(ds, slot; keys = nothing) -> Prediction
+
+One slot as a prediction (section 10): its mean with its band, whether
+the slot holds data or a callable serves it, so that a tool asks one
+question of either and gets the same record.
+
+`slot` is a `Slot` or its name, with a statistic of `value` or `mean`
+or none.  For a stored slot the mean is its data and the band is the
+`band` slot at the same location that names it with `of`, if there is
+one; `keys` must then be omitted, because stored data has values on
+its own rows only.  For a slot a callable serves, the callable is
+called on `keys`, or on the file's own key columns when `keys` is
+omitted, and its record for the slot's output is returned as it is.  A
+band slot, or a std, quantile or draw slot, is refused: name the base
+slot.
+"""
+function prediction(ds::Dataset, s::Slot; keys = nothing)
+    st = something(s.statistic, "value")
+    st == "band" && throw(MestraError(nothing,
+        "$(s.name) is the band of $(something(s.of, "?")); name the base " *
+        "slot and the band comes with it"))
+    st in ("value", "mean") || throw(MestraError(nothing,
+        "$(s.name) holds the $(st) of $(something(s.of, "?")), which is " *
+        "stored data about stored data and not a prediction; name the " *
+        "base slot"))
+    if is_callable_slot(s)
+        id = callable_id(s)
+        haskey(ds.callables, id) || throw(MestraError("E14", s.path,
+            "no callable with id `$(id)`"))
+        if keys === nothing
+            ds.nrows == 0 && throw(MestraError(nothing,
+                "this file has no rows to evaluate $(s.name) on; pass " *
+                "`keys` with one column per key"))
+            keys = Dict{String,AbstractVector}(
+                name => collect(values(ds, ds.keys[name]))
+                for name in key_order(ds))
+        end
+        outputs = build_callable(ds.callables[id])(normalise_keys(keys))
+        name = something(s.output, s.name)
+        haskey(outputs, name) || throw(MestraError(nothing,
+            "callable `$(id)` produces no output called `$(name)`"))
+        record = outputs[name]
+        record isa Prediction || throw(MestraError(nothing,
+            "callable `$(id)` returned something that is not a " *
+            "Prediction for output `$(name)` (section 10)"))
+        return record
+    end
+    keys === nothing || throw(MestraError(nothing,
+        "$(s.name) holds stored data, which has values on its own rows " *
+        "only; omit `keys`, or name a slot a callable serves"))
+    mean = collect(values(ds, s).data)
+    band = band_of(ds, s)
+    band === nothing && return Prediction(mean)
+    return Prediction(mean; uncertainty = collect(values(ds, band).data),
+                      level = band.level, method = band.method)
+end
+
+prediction(ds::Dataset, name::AbstractString; kwargs...) =
+    prediction(ds, ds[name]; kwargs...)
+
+"""The stored band slot at the same location as `base` that names it."""
+function band_of(ds::Dataset, base::Slot)
+    if base.location === :scalar
+        candidates = Base.values(ds.scalars)
+    else
+        sup = nothing
+        for x in ds.supports
+            x.name == base.support && (sup = x)
+        end
+        sup === nothing && return nothing
+        candidates = Base.values(base.location === :cell ? sup.cell_arrays :
+                                 sup.node_arrays)
+    end
+    for c in candidates
+        c.statistic == "band" && c.of == base.name && !is_callable_slot(c) &&
+            return c
+    end
+    return nothing
+end
+
 """How many rows a slot has an instance for: its own rows when it
 varies along `row`, one when it varies along nothing, and the file's
 rows when it varies along a group, since each row then picks the

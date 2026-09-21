@@ -115,11 +115,12 @@ summary the format does not name is a derived array with a recipe.
 The parameters that change the numbers (draw count, seed, batch size)
 are recorded with the result.
 
-A callable's contract is its named outputs and nothing more. The
-slot's `statistic` and `of` say what an output means, so a producer
-may serve none of value, mean, std, quantile and draw, some of them,
-or all five, and the format never needs to know how any of them were
-made.
+A callable's contract is one record per output and nothing more: a
+mean and, when the model has one, a band with its level and its
+method. The format never needs to know how the band was made, and a
+tool that shows a stored mean with its band shows a callable's the
+same way. Draws, standard deviations and quantiles are stored data
+about stored data; a callable serves none of them.
 
 
 The public/private boundary

@@ -47,7 +47,9 @@ message is Python's for E04.
 
 Callables: `add_callable(id, callable)` then `add_callable_slot(...)`
 with the same argument order as the array builders plus `callable`
-and `output`.
+and `output`. A band slot, stored or served, is the same builder
+with `statistic="band"` and `of`; a stored one also takes `level` and
+`method`, and is refused without them (E12).
 
 
 2. Writing and reading
@@ -106,7 +108,8 @@ indices in its message. Each finding is printed as
 language print exactly that. `info` prints, for every key: name, role,
 units, bounds, category, trajectory group, parent; for every support:
 kind, counts, id; for every slot: shape with named axes, units,
-source, and for callable slots the callable id and output.
+source, for callable slots the callable id and output, and for a band
+its level and method.
 
 
 6. Messages
@@ -165,3 +168,28 @@ bytes a reader cannot describe, would make every writer responsible
 for a shape no rule constrains; the one thing that is not allowed is
 dropping it in silence. An unknown *group* is untouched under W11
 and section 28, which is unchanged.
+
+
+8. Predictions
+--------------
+
+A callable returns one record per output, a `Prediction` with the
+fields `mean`, `uncertainty`, `level` and `method` (SPEC section 10).
+Python, C++ and Julia spell it as a type of that name; MATLAB, which
+cannot hold a class and a function of one name in one package, spells
+it as a struct with those fields, built by
+`mestra.Callable.prediction`. Building one refuses a band without its
+level in (0, 1) or its method, of another shape than the mean, or
+negative anywhere, so a malformed record never reaches a file.
+
+`prediction(dataset, slot, keys)` is the one question a viewer asks:
+for a stored slot the mean is its data and the band is the band slot
+at the same location that names it with `of`, and `keys` is refused;
+for a served slot the callable is called on `keys`, or on the file's
+own rows when `keys` is omitted, and its record is returned as it is.
+A band slot, or a std, quantile or draw slot, is refused: name the
+base slot. Evaluation follows the same rule in every language: a slot
+whose statistic is `value` or `mean`, or none, takes the mean; a
+`band` slot takes the uncertainty and is given the record's level and
+method; a band slot whose output has no uncertainty is refused with
+E12.
