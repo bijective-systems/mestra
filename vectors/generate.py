@@ -611,9 +611,22 @@ def affine_dict(keys=None, outputs=None):
 
 
 def evaluate_affine(entry, keys, values):
-    """Section 27: y = A x + b, reshaped to `shape` in C order."""
+    """Section 27: y = A x + b, reshaped to `shape` in C order.
+
+    Accumulated one key at a time in the declared order, with b added
+    last, as section 27 says and as every implementation does. Not a
+    matrix product: `A @ x` goes to whatever BLAS numpy was built
+    against, which on most machines fuses each multiply and add into
+    one rounding, and the expected values then differ in the last
+    place from the ones the rule gives. Two numpy operations cannot
+    be fused, so this is the rule exactly.
+    """
     x = np.array([values[k] for k in keys], dtype="<f8")
-    y = entry["A"] @ x + entry["b"]
+    a = np.asarray(entry["A"], dtype="<f8")
+    y = np.zeros(a.shape[0], dtype="<f8")
+    for at in range(a.shape[1]):
+        y += a[:, at] * x[at]
+    y += np.asarray(entry["b"], dtype="<f8")
     return y.reshape([int(n) for n in entry["shape"]])
 
 
