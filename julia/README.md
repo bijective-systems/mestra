@@ -18,7 +18,7 @@ the worked examples. Three corpus files are generated rather than
 committed, because of their size; write them once, before the suite
 runs and never while it is running:
 
-    python vectors/generate.py --wide --hostile-deep
+    python vectors/generate.py --on-demand
 
 
 The ten-line example

@@ -41,7 +41,7 @@ def case_names() -> list[str]:
 #: The cases vectors/README.md generates on demand rather than
 #: commits, because of their size. Their expected.json is committed
 #: like every other one, so the manifest lists them either way.
-ON_DEMAND = {"wide_keys": "--wide"}
+ON_DEMAND = {"wide_keys": "--on-demand"}
 
 
 def case_path(name: str) -> str:

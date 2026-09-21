@@ -96,8 +96,8 @@ if(MESTRA_BUILD_TESTS)
     # probe, every codec round trip, every worked evaluation, a lazy
     # row read, and read-write-compare for the cases that validate.
     # Three corpus files are generated rather than committed, because
-    # of their size; run `python vectors/generate.py --hostile-deep
-    # --wide` once before ctest, and not again while a test is reading
+    # of their size; run `python vectors/generate.py --on-demand`
+    # once before ctest, and not again while a test is reading
     # vectors/.
     add_test(NAME corpus COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_corpus.py

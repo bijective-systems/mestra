@@ -1652,7 +1652,7 @@ end
     absent = setdiff(cases, present)
     isempty(absent) || @info(
         "the deep files of the shared subset are generated on demand, " *
-        "not committed; run `python vectors/generate.py --hostile-deep` " *
+        "not committed; run `python vectors/generate.py --on-demand` " *
         "to include them", absent)
     files = [joinpath(dir, c, "case.mes") for c in present]
     okrun, got = drive_hostile(files; tag = "shared")

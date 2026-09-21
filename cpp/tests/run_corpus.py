@@ -479,7 +479,7 @@ COST_SLOT = "/scalars/s2100"
 def cost_line(tool, directory):
     mes = os.path.join(directory, COST_CASE, "case.mes")
     if not os.path.exists(mes):
-        return "%s: not generated (vectors/generate.py --wide)" % COST_CASE
+        return "%s: not generated (vectors/generate.py --on-demand)" % COST_CASE
     seconds = {}
     for line in tool.run("cost", mes, COST_SLOT).splitlines():
         parts = line.split()

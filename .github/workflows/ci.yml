@@ -60,10 +60,13 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install h5py numpy netCDF4 h5netcdf
 
-      - name: Generate the three files that are not committed
-        run: python vectors/generate.py --hostile-deep --wide
-
-      - name: Check the corpus against a fresh run
+      - name: Check the committed corpus against a fresh run
+        # check.py regenerates every case into a temporary directory
+        # and compares it with the committed copy, and writes the three
+        # files that are not committed into place itself.  Nothing
+        # regenerates the tree in place first: that would replace the
+        # committed corpus with this runner's, and the comparison would
+        # then be the generator against itself.
         run: python vectors/check.py
 
   # ------------------------------------------------------------------
@@ -92,10 +95,12 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e "./python[dev]"
 
-      - name: Generate the three files that are not committed
+      - name: Write the three files that are not committed
         # A test that wants one of these skips without it rather than
-        # failing, so generating them is what makes the run complete.
-        run: python vectors/generate.py --hostile-deep --wide
+        # failing, so writing them is what makes the run complete.
+        # --on-demand writes only those three; the suite then runs
+        # against the committed corpus, not a regenerated one.
+        run: python vectors/generate.py --on-demand
 
       - name: pytest
         working-directory: python
@@ -158,12 +163,12 @@ jobs:
         # and exports HDF5_ROOT and MESTRA_PYTHON.
         run: python .github/scripts/hdf5_env.py mestra-cpp
 
-      - name: Generate the three files that are not committed
+      - name: Write the three files that are not committed
         # cpp/README.md: once, before ctest, and never while a test is
         # reading vectors/.  `corpus` needs wide_keys and
         # `shared_hostile` needs the two deep files, and both report a
         # missing file as a failure rather than passing over it.
-        run: python vectors/generate.py --hostile-deep --wide
+        run: python vectors/generate.py --on-demand
 
       - name: Configure
         run: |
@@ -273,11 +278,11 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install h5py numpy
 
-      - name: Generate the three files that are not committed
+      - name: Write the three files that are not committed
         # The suite times an open, a validate and one lazy row range on
         # `wide_keys`, and reads the two deep hostile files.  Without
         # them those tests fail on a missing file.
-        run: python vectors/generate.py --hostile-deep --wide
+        run: python vectors/generate.py --on-demand
 
       - uses: julia-actions/setup-julia@fa02766e078afaaf09b14210362cee14137e6a32 # v3.0.2
         with:
@@ -314,8 +319,8 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install h5py numpy
 
-      - name: Generate the three files that are not committed
-        run: python vectors/generate.py --hostile-deep --wide
+      - name: Write the three files that are not committed
+        run: python vectors/generate.py --on-demand
 
       - name: MATLAB
         uses: matlab-actions/setup-matlab@f9e43010f1ae678f7cfa0542fe2a4f60f7d1ad8d # v3.1.0

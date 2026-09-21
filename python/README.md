@@ -19,7 +19,7 @@ Three golden files are too large to commit. Write them once before
 the suite, as `../vectors/README.md` says; a test that wants one
 skips without it rather than failing.
 
-    python vectors/generate.py --wide --hostile-deep
+    python vectors/generate.py --on-demand
 
 
 The ten-line example
