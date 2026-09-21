@@ -1,0 +1,123 @@
+name: publish
+
+# The Python package goes to PyPI when a version tag is pushed.  Nothing
+# else in this repository is published this way: MATLAB, C++ and Julia
+# are installed from the tree, as their READMEs say.
+#
+# Two jobs, because the second one holds a credential and the first one
+# must not.  `build` makes the sdist and the wheel, installs the wheel
+# where the source tree cannot be imported by accident, runs the seven
+# documented examples against it and checks that the tag, pyproject.toml
+# and `mestra.__version__` all name the same version.  `publish` takes
+# the files `build` made and uploads them with an OpenID Connect token,
+# minted for the `pypi` environment; PyPI is configured to trust exactly
+# this repository, this workflow file and that environment, so there is
+# no API token anywhere.  Every action is pinned to a commit, as in
+# ci.yml, and for the same reason.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: build and check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Build the sdist and the wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build python/
+          ls -l python/dist
+
+      - name: Install the wheel on its own
+        # A venv of its own, and every later step runs from a directory
+        # outside the checkout: `import mestra` then resolves to the
+        # wheel and never to python/mestra, which is what these checks
+        # are about.
+        run: |
+          python -m venv "$RUNNER_TEMP/wheel"
+          "$RUNNER_TEMP/wheel/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/wheel/bin/python" -m pip install python/dist/*.whl
+
+      - name: The tag, pyproject.toml and __version__ must agree
+        # A tag names a release, so the package it publishes has to carry
+        # that name.  pyproject.toml is what the wheel's metadata came
+        # from; `mestra.__version__` is set by hand in __init__.py and is
+        # the one that drifts.
+        working-directory: ${{ runner.temp }}
+        run: |
+          "$RUNNER_TEMP/wheel/bin/python" - <<'PY'
+          import importlib.metadata
+          import os
+          import sys
+
+          import mestra
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          wanted = tag[1:] if tag.startswith("v") else tag
+          built = importlib.metadata.version("mestra")
+          print("tag %s -> %s; wheel %s; __version__ %s"
+                % (tag, wanted, built, mestra.__version__))
+          if not wanted == built == mestra.__version__:
+              sys.exit("the tag, pyproject.toml and __version__ disagree")
+          PY
+
+      - name: Run the documented examples against the wheel
+        # docs/examples/<concept>/python.py are the seven examples the
+        # guide is built on; each writes a file into the working
+        # directory and reads it back, so together they exercise write,
+        # read and post-processing from the installed package.  The CLI
+        # entry point is checked on what they wrote.
+        run: |
+          work="$RUNNER_TEMP/examples"
+          mkdir -p "$work"
+          for script in "$GITHUB_WORKSPACE"/docs/examples/*/python.py; do
+            echo "--- $script"
+            (cd "$work" && "$RUNNER_TEMP/wheel/bin/python" "$script")
+          done
+          echo "--- mestra validate"
+          (cd "$work" && "$RUNNER_TEMP/wheel/bin/mestra" validate *.mes)
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: python/dist/
+          if-no-files-found: error
+
+  publish:
+    name: upload to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/mestra/
+    permissions:
+      # The OpenID Connect token is the credential; nothing else is
+      # granted, not even a read of the repository, since this job
+      # only touches what `build` uploaded.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        # Uploads everything under dist/, checks the metadata first, and
+        # attaches a provenance attestation to each file.
