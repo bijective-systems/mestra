@@ -155,7 +155,7 @@ if(MESTRA_BUILD_TESTS)
     # to this API that a document did not follow fails here.
     add_test(NAME examples COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_examples.py
-      --bin-dir ${CMAKE_BINARY_DIR}/examples
+      --bin ${MESTRA_EXAMPLE_BINARIES}
       --examples ${CMAKE_CURRENT_SOURCE_DIR}/../docs/examples)
   endif()
 endif()
