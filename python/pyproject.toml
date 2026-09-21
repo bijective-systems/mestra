@@ -70,7 +70,10 @@ ignore = [
 "tests/*" = ["E501"]
 
 [tool.mypy]
-python_version = "3.10"
+# No python_version: mypy checks under the interpreter that runs it.
+# A pinned target parses every installed stub with that version's
+# grammar, and numpy's stubs use the syntax of the oldest Python numpy
+# itself still supports, which is newer than this package's floor.
 files = ["mestra"]
 ignore_missing_imports = true
 warn_unused_ignores = true
