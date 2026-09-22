@@ -48,6 +48,31 @@ with a `cpp.cpp` beside its `python.py`; `../docs/guide.md` says what
 the concepts mean.
 
 
+Growing a file row by row
+-------------------------
+
+A producer that computes one row at a time keeps one file:
+
+    mestra::Dataset row = one_more_row();       // built like a whole file
+    mestra::append_rows(row, "run.mes");        // the file, one row longer
+
+`append_rows(rows, path)` grows the file at `path` by the rows of a
+dataset of the same structure: the same keys, scalars, supports and
+arrays with the same attributes, and the same values in every array
+that does not vary by row. Category ids are matched by their entry's
+name, so a status table built from the new rows alone maps onto the
+file's; key bounds widen to cover the new values; notes on the appended
+dataset replace the file's; `created`, `writer` and `/private` stay.
+The result is what one write of every row would have produced, in
+content though not in bytes: the chunk shapes are the ones the file was
+created with, and `validate` says so (W12) once they are no longer the
+default for the row count. The file is grown beside itself and moved
+into place only after it validates, so a failure leaves it as it was,
+and any structural difference is refused with the difference named. With
+`AppendOptions::replace_by` naming the id key, a row that shares an
+existing row's id is written over it instead of after the last row.
+
+
 Axis order and permute by name
 ------------------------------
 

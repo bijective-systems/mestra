@@ -52,6 +52,7 @@ add_library(mestra
   src/codec.cpp
   src/read.cpp
   src/write.cpp
+  src/append.cpp
   src/validate.cpp
   src/weights.cpp
   src/post.cpp

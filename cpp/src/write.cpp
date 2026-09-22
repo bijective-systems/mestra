@@ -493,7 +493,11 @@ class Writer {
   File& f_;
 };
 
-void check_names(const Dataset& d) {
+}  // namespace
+
+namespace internal {
+
+void check_dataset_names(const Dataset& d) {
   auto check = [](const std::string& name) {
     if (!internal::legal_netcdf_name(name)) {
       throw Error("E33", "\"" + name + "\" is not a legal netCDF-4 name");
@@ -522,7 +526,7 @@ void check_names(const Dataset& d) {
 // opened, with the rule the validator would give the file, because a
 // writable field that is read only at construction time is a trap
 // (conventions section 1).
-void check_shapes(const Dataset& d) {
+void check_dataset_shapes(const Dataset& d) {
   for (const Support& s : d.supports) {
     std::vector<const ArraySlot*> slots;
     if (s.coordinates.has_value()) slots.push_back(&*s.coordinates);
@@ -568,6 +572,10 @@ void check_shapes(const Dataset& d) {
   }
 }
 
+}  // namespace internal
+
+namespace {
+
 std::string findings_text(const std::string& path, const Report& r) {
   std::string out = "mestra::write refused \"" + path + "\": " +
                     internal::format_i64(
@@ -590,8 +598,8 @@ void write_file(const Dataset& d, const std::string& path) {
 
 void write(const Dataset& d, const std::string& path,
            const WriteOptions& options) {
-  check_names(d);
-  check_shapes(d);
+  internal::check_dataset_names(d);
+  internal::check_dataset_shapes(d);
   if (!options.check) {
     write_file(d, path);
     return;

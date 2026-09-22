@@ -64,6 +64,14 @@ bool support_scale_name(const std::string& name);
 // took its name are not the same thing.
 bool known_dataset_path(const std::string& path, bool is_scale);
 
+// The two refusals every writer makes before opening a file: a name
+// that is not a legal netCDF-4 name or begins with the reserved prefix
+// (E33), and a slot whose `varies` or `components` disagrees with the
+// shape it was built with (E04, E31).  Defined with `write`, used by
+// `append_rows` too.
+void check_dataset_names(const Dataset& d);
+void check_dataset_shapes(const Dataset& d);
+
 }  // namespace internal
 }  // namespace mestra
 

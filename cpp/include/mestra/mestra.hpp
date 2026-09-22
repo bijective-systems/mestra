@@ -2,6 +2,7 @@
 //
 //   mestra::read(path)              a Dataset value type
 //   mestra::write(dataset, path)    a conforming file
+//   mestra::append_rows(rows, path) the same file, grown by rows
 //   mestra::validate(path)          errors and warnings by rule id
 //   mestra::evaluate(dataset, keys) a materialised Dataset
 //   mestra::compute_weights(support, location)   integration weights

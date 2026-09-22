@@ -151,6 +151,8 @@ class File {
  public:
   static File open_read(const std::string& path);
   static File create(const std::string& path);
+  // Opens an existing file for growing it in place (`append_rows`).
+  static File open_write(const std::string& path);
 
   hid_t get() const { return id_.get(); }
 
@@ -250,6 +252,36 @@ class File {
   std::string dataset_path(hid_t object) const;
   void attach_scale(const std::string& dataset, const std::string& scale,
                     unsigned axis);
+
+  // --- growing a file in place (`append_rows`) --------------------------
+  // Every one of these acts on a dataset or an object that already
+  // exists, which is the difference from the writers above.
+
+  // Sets the leading extent of a chunked dataset to `rows`, which may
+  // only grow: an unlimited leading dimension is what section 21 gives
+  // `row`, and nothing else in this format is extended.
+  void extend_rows(const std::string& path, hsize_t rows);
+  // Writes rows [row, row + k) of a dataset, where k is what `data`
+  // holds against the dataset's non-leading extents: the hyperslab a
+  // lazy read of the same rows would select.  The rows must exist
+  // already (`extend_rows` first).  The integer writer converts to the
+  // dataset's own width; the string writer pads to the dataset's own
+  // fixed length and refuses a longer string.
+  void write_f64_rows(const std::string& path, std::size_t row,
+                      const std::vector<double>& data);
+  void write_i64_rows(const std::string& path, std::size_t row,
+                      const std::vector<std::int64_t>& data);
+  void write_string_rows(const std::string& path, std::size_t row,
+                         const std::vector<std::string>& data);
+  // Writes an attribute over one that may already exist.
+  void replace_attr(const std::string& path, const std::string& name,
+                    const AttrValue& value);
+  // Deletes every attribute of an object, for a group whose attributes
+  // are replaced whole (`/notes`).
+  void remove_attributes(const std::string& path);
+  // Grows a dimension scale to `length` and rewrites the NAME section
+  // 21 gives it, which spells the length out.
+  void set_scale_length(const std::string& path, hsize_t length);
 
  private:
   void build_object_index() const;

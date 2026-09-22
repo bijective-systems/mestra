@@ -133,6 +133,51 @@ struct WriteOptions {
 void write(const Dataset& d, const std::string& path,
            const WriteOptions& options = WriteOptions());
 
+// What `append_rows` is allowed to do.
+struct AppendOptions {
+  // A key of role id whose values name the rows.  A row of the
+  // appended dataset whose value equals an existing row's is written
+  // over that row instead of after the last one, so a producer that
+  // computes a row again keeps one row per id.  Empty appends every
+  // row.
+  std::string replace_by;
+  // Validate the grown file before it replaces the original, as
+  // `write` does, and refuse with the findings when it does not
+  // validate.  `check = false` moves it into place anyway.
+  bool check = true;
+};
+
+// Grows the file at `path` by the rows of `rows` without rewriting the
+// rows it already holds: the way a producer that computes one row at a
+// time keeps one file, and the way a file too large to hold in memory
+// is still written.  Returns the file's row count afterwards.
+//
+// `rows` is built with the same builders as a whole file and must have
+// the file's structure: the same keys with the same roles, units,
+// category tables and dtypes; the same scalars; the same supports with
+// the same connectivity and the same arrays with the same attributes;
+// and the same values in every array that does not vary by row.  A
+// category id is mapped by its entry's name, so a table built from the
+// appended rows alone maps onto the file's table; an entry the file's
+// table does not hold is refused.  The file's key bounds widen to cover
+// the new values.  When `rows` carries notes they replace the file's;
+// the file's `format`, `writer`, `created` and its `/private` group
+// stay as they are.  The result is the file one write of every row
+// would have produced, in content though not in bytes: the chunk
+// shapes are the ones the file was created with, and the validator
+// says so (W12) when they are no longer the default for the row count.
+//
+// The file is grown beside itself and moved into place once it is
+// written and validated, so a failure of any kind, a structural
+// difference included, leaves the original as it was.  Throws Error
+// with the first rule identifier and every finding when the grown file
+// does not validate, and Error with an empty rule and the difference
+// when `rows` does not have the file's structure.  An unaligned file
+// (several supports, section 22) is not grown by this version and is
+// refused the same way.
+std::int64_t append_rows(const Dataset& rows, const std::string& path,
+                         const AppendOptions& options = AppendOptions());
+
 // The digest of section 24 for one support of a file, computed from
 // the stored arrays rather than read from the `support_id` attribute.
 std::string support_id_of(const std::string& path,
