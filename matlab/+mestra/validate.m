@@ -893,7 +893,10 @@ function checkOneSupport(ctx, parent, name, index)
     record.cellOffsets = offsets;
     record.cellConnectivity = conn;
     record.coordinates = [];
-    if has('coordinates')
+    % Coordinates a callable serves are a group with no values; a mesh
+    % support's id is computed from its cells alone (section 24).
+    if has('coordinates') && strcmp( ...
+            mestra.internal.H5.childType(sid, 'coordinates'), 'dataset')
         did = H5D.open(sid, 'coordinates');
         info = H5.dsetInfo(did);
         try

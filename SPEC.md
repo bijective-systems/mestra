@@ -1,8 +1,8 @@
 mestra: specification, version 0
 ================================
 
-Date: 2026-09-19, revised 2026-09-21. Status: version 0 is what the
-0.1.0 implementations read and write, and the root attribute `format`
+Date: 2026-09-19, revised 2026-09-22. Status: version 0 is what the
+0.1 implementations read and write, and the root attribute `format`
 names it as "mestra/0". From here a change within version 0 follows
 section 28, and a change that would make a version-0 file mean
 something else is version 1. The spec text is CC-BY-4.0.
@@ -370,6 +370,14 @@ callable is stored once under `/callables/<id>` and may be referenced
 by any number of slots. A slot holding data is a dataset; a slot
 served by a callable is a group with the same attributes and no data
 (section 19).
+
+A support's coordinates are an array slot like any other and may be
+served the same way: the support carries its cells and its node
+count, and its coordinates are a group with the slot's attributes
+and no data until the file is evaluated. That is how a model of the
+geometry itself is stored, beside the fields on it. The coordinates
+of an `axis` support are part of its identity (section 24) and are
+always stored.
 
 A file with callable slots may have zero rows, and may also have rows
 (section 22). With zero rows its key columns
@@ -755,6 +763,13 @@ Roles and rules:
   - `reference` is an attribute of the derived array and not of the
     coordinates, written `row=<i>` or `group:<k>=<category name>`
     (sections 5 and 19).
+  - A mesh support's coordinates may be served by a callable, because
+    section 10 makes every array slot servable and nothing in the
+    support's identity depends on them; an axis support's coordinates
+    are its identity and are stored. The builders spell it as the
+    coordinates builder with the values dropped and the callable and its
+    output added, like every other callable slot (section 10, conventions
+    section 1, `callable_coordinates` in the corpus).
   - E04 also covers a `varies` naming a group key the file does not
     declare (section 14).
   - W08 has a number where it once had a tolerance stated nowhere:

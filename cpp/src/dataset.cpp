@@ -707,6 +707,27 @@ void set_coordinates(Support& s, const std::vector<double>& values,
   s.coordinates = std::move(c);
 }
 
+void set_callable_coordinates(Support& s, const std::string& units,
+                              const Dims& dims,
+                              const std::string& callable_id,
+                              const std::string& output) {
+  const std::string path = "/supports/" + s.name + "/coordinates";
+  if (s.kind != "mesh") {
+    throw Error("E03", path + ": a callable may serve the coordinates of "
+                       "a mesh support; this support is of kind " +
+                       s.kind + ", whose coordinates are stored");
+  }
+  const Resolved r =
+      resolve(path, dims, Location::Node, s.n_nodes, 0, false);
+  ArraySlot c = built_slot("coordinates", Location::Node, r);
+  c.role = "coordinates";
+  c.units = units;
+  c.source = "callable:" + callable_id;
+  c.output = output;
+  c.data = Array();
+  s.coordinates = std::move(c);
+}
+
 namespace {
 
 ArraySlot& add_array(Support& s, Location where, const std::string& name,

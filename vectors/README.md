@@ -22,7 +22,7 @@ somebody's code.
 What is in it
 -------------
 
-80 cases, one directory each, holding exactly the two files section
+81 cases, one directory each, holding exactly the two files section
 30 requires:
 
     cases/<case>/case.mes        the golden file
@@ -40,7 +40,8 @@ sorted by name. The cases fall into five groups:
     toy size: `family_static`, `cascade_varying_geometry`,
     `scalars_only`, `transient_fixed_mesh`, `axis_signature`;
   - the rest of the model: rows together with callable slots, one
-    callable filling two slots, two supports, a row-varying field in
+    callable filling two slots, a callable serving a support's
+    coordinates, two supports, a row-varying field in
     an unaligned file, draws with their summaries, labels with and
     without a category table, a family with time, a derived array,
     a support of kind none, a compressed field, a stored band beside

@@ -170,6 +170,12 @@ Dataset evaluate(const Dataset& d, const KeysTable& keys) {
 
   out.supports = d.supports;
   for (Support& support : out.supports) {
+    if (support.coordinates.has_value() && support.coordinates->is_callable()) {
+      ArraySlot& c = *support.coordinates;
+      const std::string where = "/supports/" + support.name + "/coordinates";
+      const std::string output = c.output.value_or(c.name);
+      materialise(&c, outputs_for(c.callable_id(), output, where), where);
+    }
     for (int which = 0; which < 2; ++which) {
       std::vector<ArraySlot>& slots =
           which == 0 ? support.node_arrays : support.cell_arrays;

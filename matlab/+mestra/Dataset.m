@@ -626,6 +626,78 @@ classdef Dataset < handle
             obj.refreshSupportId(supportName);
         end
 
+        function setCallableCoordinates(obj, supportName, varargin)
+        %setCallableCoordinates  Coordinates a callable serves rather
+        %   than data: setCallableCoordinates(SUPPORT, UNITS, CALLABLE,
+        %   OUTPUT, 'Components', C).
+        %
+        %   setCoordinates with the values left out and the callable
+        %   id and the output name added, the way addCallableSlot is
+        %   addNodeArray without its values (docs/api-conventions.md,
+        %   section 1): a model of the geometry itself.  The support
+        %   was added with its node count (addSupport) and no
+        %   coordinates; the slot has no values, so it must declare
+        %   'Components' (E31).  'Varies' defaults to 'row'.  An axis
+        %   support's coordinates are part of its identity (section
+        %   24) and are always stored.
+        %
+        %       d.addSupport('s0', 'mesh', 6, 'CellTypes', types, ...
+        %                    'CellOffsets', offsets, ...
+        %                    'CellConnectivity', conn);
+        %       d.addCallable('m1', A);
+        %       d.setCallableCoordinates('s0', 'm', 'm1', ...
+        %                                'coordinates', 'Components', 2);
+            p = inputParser();
+            p.addParameter('Units', '');
+            p.addParameter('Callable', '');
+            p.addParameter('Output', 'coordinates');
+            p.addParameter('Components', []);
+            p.addParameter('Varies', 'row');
+            [pos, rest] = mestra.internal.Args.positional(varargin, ...
+                {{'', @mestra.internal.Args.isText}, ...
+                 {'', @mestra.internal.Args.isText}, ...
+                 {'', @mestra.internal.Args.isText}}, ...
+                mestra.internal.Args.parameterNames(p));
+            p.parse(rest{:});
+            r = p.Results;
+            units = mestra.Dataset.oneOf(pos{1}, r.Units, 'Units');
+            id = mestra.Dataset.oneOf(pos{2}, r.Callable, 'Callable');
+            output = r.Output;
+            if ~isempty(pos{3}), output = pos{3}; end
+            i = obj.supportIndex(supportName);
+            path = ['/supports/' supportName '/coordinates'];
+            if ~strcmp(obj.supports(i).kind, 'mesh')
+                error('mestra:E03', ...
+                      ['E03: %s: a callable may serve the coordinates ' ...
+                       'of a mesh support; this support is of kind %s, ' ...
+                       'whose coordinates are stored'], path, ...
+                      obj.supports(i).kind);
+            end
+            if ~isempty(obj.supports(i).coordinates)
+                error('mestra:E03', ...
+                      'E03: %s: this support already has its one coordinates array', ...
+                      path);
+            end
+            if isempty(id)
+                error('mestra:E14', ...
+                      ['E14: %s: a callable slot must name the callable ' ...
+                       'that serves it; give its id as the second ' ...
+                       'argument'], path);
+            end
+            if isempty(r.Components)
+                error('mestra:E31', ...
+                      ['E31: %s: a callable slot stores no values, so it ' ...
+                       'declares its width; pass ''Components'''], path);
+            end
+            slot = obj.makeSlot('coordinates', [], 'coordinates', ...
+                                supportName, 'node', 'Units', units, ...
+                                'Varies', r.Varies, ...
+                                'Components', r.Components, ...
+                                'Source', ['callable:' id], ...
+                                'Output', output);
+            obj.supports(i).coordinates = slot;
+        end
+
         function addNodeArray(obj, supportName, name, values, varargin)
         %addNodeArray  A node array on a support:
         %   addNodeArray(SUPPORT, NAME, VALUES, ROLE, UNITS, 'Dims', ...).

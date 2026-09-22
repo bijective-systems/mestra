@@ -340,6 +340,16 @@ Dataset read_impl(const std::string& path, bool with_data) {
       }
       note_chunk(&d, p, info, c.data.dtype, n_rows);
       s.coordinates = std::move(c);
+    } else if (f.is_group(sp + "/coordinates")) {
+      // Served by a callable: the attributes and no data, like a
+      // served node array (section 19).
+      const std::string p = sp + "/coordinates";
+      const Attrs cat(f, p);
+      ArraySlot c;
+      c.name = "coordinates";
+      c.location = Location::Node;
+      fill_slot_attributes(cat, &c);
+      s.coordinates = std::move(c);
     }
 
     for (const Member& g : f.members(sp)) {

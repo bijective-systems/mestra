@@ -1606,6 +1606,94 @@ def case_callable_two_slots(f):
             TWO_SLOT_AT)])
 
 
+COORD_MODEL_KEYS = ["mach"]
+#: A geometry that stretches along x with mach, x = x0 (1 + mach), and
+#: a pressure on it; the coordinates are the model's output like any
+#: other, so a family of meshes can be a zero-row file (section 10).
+COORD_MODEL = {
+    "coordinates": {
+        "A": np.array([[0.0], [0.0], [1.0], [0.0], [2.0], [0.0],
+                       [0.0], [0.0], [1.0], [0.0], [2.0], [0.0]]),
+        "b": BASE_COORDS.ravel(),
+        "shape": np.array([6, 2], dtype="<i8"),
+    },
+    "pressure": {
+        "A": np.array([[1.0], [2.0], [3.0], [4.0], [5.0], [6.0]]),
+        "b": np.array([0.0, 0.1, 0.2, 0.3, 0.4, 0.5]),
+        "shape": np.array([6, 1], dtype="<i8"),
+    },
+}
+COORD_MODEL_AT = [{"mach": 0.5}, {"mach": 0.8}]
+
+
+def case_callable_coordinates(f):
+    """A support whose coordinates a callable serves: a model of the
+    geometry itself, beside a field on it."""
+    sattr(f, "created", CREATED)
+    sattr(f, "format", "mestra/0")
+    sattr(f, "writer", WRITER)
+    battr(f, "aligned", True)
+
+    scale(f, "row", 0, unlimited=True)
+
+    keys = f.create_group("keys")
+    k = dataset(keys, "mach", np.zeros(0), "<f8",
+                [f["row"]], n_rows=0)
+    sattr(k, "role", "condition")
+    sattr(k, "units", "1")
+    fattr(k, "lower", 0.1)
+    fattr(k, "upper", 0.9)
+
+    f.create_group("scalars")
+    sup = f.create_group("supports").create_group("s0")
+    mesh_cells(sup, N_NODES, CELL_TYPES, CELL_OFFSETS, CELL_CONNECTIVITY)
+    # Section 19: a slot a callable serves is a group with the slot's
+    # attributes and no data, and a support's coordinates are a slot.
+    c = sup.create_group("coordinates")
+    sattr(c, "role", "coordinates")
+    sattr(c, "varies", "row")
+    sattr(c, "units", "m")
+    iattr(c, "components", 2)
+    sattr(c, "source", "callable:m3")
+    sattr(c, "output", "coordinates")
+
+    na = sup.create_group("node_arrays")
+    p = na.create_group("pressure")
+    sattr(p, "role", "field")
+    sattr(p, "varies", "row")
+    sattr(p, "units", "Pa")
+    iattr(p, "components", 1)
+    sattr(p, "source", "callable:m3")
+    sattr(p, "output", "pressure")
+
+    m3 = f.create_group("callables").create_group("m3")
+    sattr(m3, "type", "affine")
+    sattr(m3, "repr", "affine(mach -> coordinates, pressure)")
+    scale_keys = scale(m3, "mestra_keys_d0", len(COORD_MODEL_KEYS))
+    strings(m3, "keys", COORD_MODEL_KEYS, scale_keys)
+    outputs = m3.create_group("outputs")
+    for slot in sorted(COORD_MODEL):
+        gslot = outputs.create_group(slot)
+        for name in ("A", "b", "shape"):
+            codec_array(gslot, name, COORD_MODEL[slot][name])
+
+    return expect(
+        "No rows; one affine callable serves the support's coordinates "
+        "and a node-array slot on them. A geometry is an output like "
+        "any other: the mesh support carries its cells and its node "
+        "count, and its coordinates are a group with the slot's "
+        "attributes and no data until the file is evaluated.",
+        support_ids={"s0": MESH_SID},
+        probes=[probe("/callables/m3/outputs/coordinates/b",
+                      COORD_MODEL["coordinates"]["b"], node=7)],
+        codec={"m3": tagged(affine_dict(COORD_MODEL_KEYS, COORD_MODEL))},
+        evaluation=[affine_evaluation(
+            "m3", COORD_MODEL_KEYS, COORD_MODEL,
+            {"coordinates": "/supports/s0/coordinates",
+             "pressure": "/supports/s0/node_arrays/pressure"},
+            COORD_MODEL_AT)])
+
+
 def case_two_supports_unaligned(f):
     """Two supports, so the file is not aligned."""
     d = two_support_base(f, {"n_rows": 3, "aligned": False,
@@ -2218,6 +2306,7 @@ CASES = {
     # the rest of the model
     "affine_with_rows": case_affine_with_rows,
     "callable_two_slots": case_callable_two_slots,
+    "callable_coordinates": case_callable_coordinates,
     "two_supports_unaligned": case_two_supports_unaligned,
     "draws_and_summaries": case_draws_and_summaries,
     "labels_tables": case_labels_tables,

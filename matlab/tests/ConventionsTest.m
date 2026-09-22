@@ -229,6 +229,78 @@ classdef ConventionsTest < matlab.unittest.TestCase
             testCase.verifyEqual(slot.components, 1);
         end
 
+        function aCallableMayServeAMeshSupportsCoordinates(testCase)
+        %aCallableMayServeAMeshSupportsCoordinates  Section 10: a
+        %   model of the geometry itself.  The support is added with
+        %   its node count and no coordinates, and setCallableCoordinates
+        %   is setCoordinates with the values dropped and the callable
+        %   and its output added.
+            d = mestra.Dataset();
+            d.writer = 'mestra matlab tests';
+            d.created = '2026-09-19T00:00:00Z';
+            d.addKey('mach', [], 'condition', '1', ...
+                     'Lower', 0.1, 'Upper', 0.9);
+            d.addSupport('s0', 'mesh', 6, 'CellTypes', uint8([9 9]), ...
+                         'CellOffsets', int64([0 4 8]), ...
+                         'CellConnectivity', int64([0 1 4 3 1 2 5 4]));
+            % x = x0 (1 + mach): the mesh stretches along x with mach;
+            % A runs over the flattened (node, component) order.
+            base = [0 0; 1 0; 2 0; 0 1; 1 1; 2 1];
+            stretch = zeros(12, 1);
+            stretch(1:2:11) = base(:, 1);
+            b = reshape(base', [], 1);
+            A = mestra.Affine({'mach'}, struct('coordinates', struct( ...
+                    'A', stretch, 'b', b, 'shape', [6 2])));
+            % Which callable fills the slot is required; that it exists
+            % is what write checks, as for every callable slot here.
+            testCase.verifyError( ...
+                @() d.setCallableCoordinates('s0', 'm', '', ...
+                                             'coordinates', 'Components', 2), ...
+                'mestra:E14');
+            testCase.verifyError( ...
+                @() d.setCallableCoordinates('s0', 'm', 'm1', 'coordinates'), ...
+                'mestra:E31');
+            d.addCallable('m1', A);
+            d.setCallableCoordinates('s0', 'm', 'm1', 'coordinates', ...
+                                     'Components', 2);
+            slot = d.support('s0').coordinates;
+            testCase.verifyEqual(slot.source, 'callable:m1');
+            testCase.verifyEqual(slot.output, 'coordinates');
+            testCase.verifyEqual(slot.role, 'coordinates');
+            testCase.verifyEqual(slot.varies, 'row');
+            testCase.verifyError( ...
+                @() d.setCallableCoordinates('s0', 'm', 'm1', ...
+                                             'coordinates', 'Components', 2), ...
+                'mestra:E03');
+
+            out = [tempname() '.mes'];
+            cleanup = onCleanup(@() ConventionsTest.removeIfPresent(out));
+            mestra.write(d, out);
+            r = mestra.validate(out);
+            testCase.verifyEmpty(r.errors);
+            back = mestra.read(out);
+            served = back.support('s0').coordinates;
+            testCase.verifyEqual(served.source, 'callable:m1');
+            testCase.verifyEmpty(served.values);
+            testCase.verifyError( ...
+                @() mestra.computeWeights(back, 's0', 'cell'), ...
+                'mestra:computeWeights');
+            e = mestra.evaluate(back, table(0.5, 'VariableNames', {'mach'}));
+            c = e.support('s0').coordinates;
+            testCase.verifyEqual(c.source, 'data');
+            got = mestra.permute(c.values, c.dims, {'row', 'node', 'component'});
+            testCase.verifyEqual(got(1, 3, 1), 3.0);
+            testCase.verifyEqual(got(1, 6, 2), 1.0);
+
+            % An axis support's coordinates are its identity and are
+            % stored.
+            d.addAxisSupport('t', [0 1 2], 's');
+            testCase.verifyError( ...
+                @() d.setCallableCoordinates('t', 's', 'm1', ...
+                                             'coordinates', 'Components', 1), ...
+                'mestra:E03');
+        end
+
         function aCallableFileCanBeBuiltFromArrays(testCase)
         %aCallableFileCanBeBuiltFromArrays  End to end, on the worked
         %   example of docs/example.md: build a file with no rows and

@@ -19,14 +19,15 @@ VALID = corpus.valid_case_names()
 
 
 def test_the_corpus_is_where_it_should_be():
-    """Eighty cases: the band added five, of which `band_stored`,
+    """Eighty-one cases: the band added five, of which `band_stored`,
     `affine_band` and `warn_w16` are files a reader accepts and
-    `err_e12_band` and `err_e12_callable` are not. `wide_keys` is
-    generated on demand, as vectors/README.md says:
-    `python vectors/generate.py --on-demand`."""
-    assert len(CASES) == 80
-    assert len(VALID) == 36
-    assert len(WITH_CODEC) == 7
+    `err_e12_band` and `err_e12_callable` are not; served coordinates
+    added `callable_coordinates`. `wide_keys` is generated on demand,
+    as vectors/README.md says: `python vectors/generate.py
+    --on-demand`."""
+    assert len(CASES) == 81
+    assert len(VALID) == 37
+    assert len(WITH_CODEC) == 8
 
 
 @pytest.mark.parametrize("name", CASES)
@@ -138,6 +139,8 @@ def _slot_of(ds, path):
     if parts[0] == "scalars":
         return ds.scalars[parts[1]]
     support = ds.supports[parts[1]]
+    if parts[2] == "coordinates":
+        return support.coordinates
     arrays = (support.node_arrays if parts[2] == "node_arrays"
               else support.cell_arrays)
     return arrays[parts[3]]

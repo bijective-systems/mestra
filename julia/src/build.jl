@@ -242,14 +242,32 @@ A mesh support.  `coordinates` is (node, component) by default, and
 :component) for a moving mesh, (:instance, :node, :component) with
 `varies = "group:member"` for a parametric family.  The support id is
 computed from the cells (section 24).
+
+With no `coordinates`, `n_nodes` says how many nodes the cells are on
+and the coordinates come later from `set_callable_coordinates!`; a
+file written before they do is refused with E03.
 """
 function add_mesh_support!(ds::Dataset, name::AbstractString;
-                           coordinates, cell_types, cell_offsets,
+                           coordinates = nothing, cell_types, cell_offsets,
                            cell_connectivity, units::AbstractString = "m",
-                           dims = nothing, varies = nothing)
+                           dims = nothing, varies = nothing,
+                           n_nodes = nothing)
     types = UInt8.(collect(cell_types))
     offsets = Int64.(collect(cell_offsets))
     conn = Int64.(collect(cell_connectivity))
+    if coordinates === nothing
+        n_nodes === nothing && throw(MestraError("E03", "/supports/" * name,
+            "a mesh support has exactly one coordinates array; pass " *
+            "`coordinates`, or `n_nodes` and then set_callable_coordinates! " *
+            "for coordinates a callable serves"))
+        s = Support(name, "mesh"; n_nodes = Int(n_nodes),
+                    n_cells = length(types), cell_types = types,
+                    cell_offsets = offsets, cell_connectivity = conn)
+        push!(ds.supports, s)
+        push!(ds.container_groups, "supports")
+        s.support_id = support_id(s)
+        return s
+    end
     dims === nothing && (dims = ndims(coordinates) == 2 ?
                                 [:node, :component] :
                                 [:row, :node, :component])
@@ -524,6 +542,40 @@ function add_callable_slot!(ds::Dataset, sup::Support, name::AbstractString;
                     (location === :cell ? "cell_arrays/" : "node_arrays/") *
                     String(name))
     (location === :cell ? sup.cell_arrays : sup.node_arrays)[String(name)] = s
+    return s
+end
+
+"""
+    set_callable_coordinates!(ds, sup; units, components, callable, output)
+
+Coordinates a callable serves rather than data: the coordinates of a
+mesh support with the values left out and the callable and its output
+added, the way `add_callable_slot!` is `add_node_array!` without its
+values -- a model of the geometry itself.  `output` defaults to
+`"coordinates"`, `varies` to `"row"`, and `id` is accepted for
+`callable`.  An axis support's coordinates are part of its identity
+(section 24) and are always stored.
+"""
+function set_callable_coordinates!(ds::Dataset, sup::Support;
+                                   units::AbstractString, components::Integer,
+                                   callable = nothing, id = nothing,
+                                   output::AbstractString = "coordinates",
+                                   varies::AbstractString = "row")
+    path = "/supports/$(sup.name)/coordinates"
+    sup.kind == "mesh" || throw(MestraError("E03", path,
+        "a callable may serve the coordinates of a mesh support; this " *
+        "support is of kind $(sup.kind), whose coordinates are stored"))
+    sup.coordinates === nothing || throw(MestraError("E03", path,
+        "this support already has its one coordinates array"))
+    components >= 1 || throw(MestraError("E31", path,
+        "a callable slot stores no values, so it declares its width; " *
+        "pass `components`"))
+    id = callable_name(callable, id, path)
+    s = Slot("coordinates", :node; support = sup.name, role = :coordinates,
+             varies = varies, units = units, components = components,
+             source = "callable:" * String(id), output = String(output),
+             path = path)
+    sup.coordinates = s
     return s
 end
 

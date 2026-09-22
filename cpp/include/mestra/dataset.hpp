@@ -379,6 +379,18 @@ using Dims = std::vector<Dim>;
 void set_coordinates(Support& s, const std::vector<double>& values,
                      const std::string& units, const Dims& dims);
 
+// Coordinates a callable serves rather than data: `set_coordinates`
+// with the values dropped and the callable and its output added, the
+// way `add_callable_node_array` is `add_node_array` -- a model of the
+// geometry itself.  The support was added with its node count, and
+// `dims` still says what the slot's shape will be, so its component
+// axis needs a length.  An axis support's coordinates are part of its
+// identity (section 24) and are always stored.
+void set_callable_coordinates(Support& s, const std::string& units,
+                              const Dims& dims,
+                              const std::string& callable_id,
+                              const std::string& output = "coordinates");
+
 // Add a float64 array: role `field` unless the caller changes it on
 // the slot that comes back.  `values` is the array flattened in the
 // caller's own axis order, which `dims` names.
