@@ -1441,9 +1441,22 @@ void append_rows_grows_a_file() {
   refused("a status the table does not hold",
           [&]() { return family_rows({4}, {"converged", "iteration_limit", "stalled"}); },
           "no entry \"stalled\"");
-  refused("an id longer than the column",
-          [&]() { return family_rows({10}, statuses); },
-          "is longer");
+  // An id longer than the column so far: the column grows to hold it
+  // and every earlier id reads as it was.
+  check::equal("a longer id grows the column",
+               mestra::append_rows(family_rows({10}, statuses), grown, replace),
+               std::int64_t(5));
+  {
+    const mestra::Dataset g = mestra::read(grown);
+    check::equal("the grown column's declared size", g.key("member")->string_size.value_or(0),
+                 std::size_t(9));
+    check::equal("the longer id", g.key("member")->str.at(4), std::string("member_10"));
+    check::equal("an earlier id after the growth", g.key("member")->str.at(0),
+                 std::string("member_0"));
+    check::equal("the grown column keeps its role", g.key("member")->role, std::string("id"));
+    check::equal("the grown file validates", mestra::validate(grown).errors.size(),
+                 std::size_t(0));
+  }
   refused("replace_by naming a key that is not an id",
           [&]() { return family_rows({4}, statuses); },
           "not id",
@@ -1456,7 +1469,7 @@ void append_rows_grows_a_file() {
           },
           "values for 2 rows");
   check::equal("the file is untouched by a refusal",
-               mestra::read_header(grown).n_rows, std::int64_t(4));
+               mestra::read_header(grown).n_rows, std::int64_t(5));
   check::is_true("nothing is left beside the file by a refusal",
                  !std::ifstream(grown + ".mestra-appending").good());
 
