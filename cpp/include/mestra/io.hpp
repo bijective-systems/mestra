@@ -160,7 +160,8 @@ struct AppendOptions {
 // category id is mapped by its entry's name, so a table built from the
 // appended rows alone maps onto the file's table; an entry the file's
 // table does not hold is refused.  The file's key bounds widen to cover
-// the new values.  When `rows` carries notes they replace the file's;
+// the new values, and a string id column grows to hold a longer id.
+// When `rows` carries notes they replace the file's;
 // the file's `format`, `writer`, `created` and its `/private` group
 // stay as they are.  The result is the file one write of every row
 // would have produced, in content though not in bytes: the chunk

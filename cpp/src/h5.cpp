@@ -1070,6 +1070,11 @@ void File::set_scale_length(const std::string& path, hsize_t length) {
        "cannot write the NAME of \"" + path + "\"");
 }
 
+void File::remove_link(const std::string& path) {
+  need(H5Ldelete(id_.get(), path.c_str(), H5P_DEFAULT) >= 0,
+       "cannot remove \"" + path + "\"");
+}
+
 void File::build_object_index() const {
   object_index_built_ = true;
   // One walk, bounded in depth and in count, recording every dataset's

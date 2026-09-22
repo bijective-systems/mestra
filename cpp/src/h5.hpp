@@ -282,6 +282,9 @@ class File {
   // Grows a dimension scale to `length` and rewrites the NAME section
   // 21 gives it, which spells the length out.
   void set_scale_length(const std::string& path, hsize_t length);
+  // Removes the link at `path`, for a dataset that is written again with
+  // another type (a string column that grows).
+  void remove_link(const std::string& path);
 
  private:
   void build_object_index() const;

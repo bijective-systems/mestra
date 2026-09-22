@@ -168,18 +168,42 @@ void compare_keys(const std::string& path, const Dataset& file,
                        " values for " + internal::format_i64(rows.n_rows) +
                        " rows");
     }
-    if (f.dtype == DType::String) {
-      const std::size_t size = f.string_size.value_or(0);
-      for (const std::string& s : r.str) {
-        if (s.size() > size) {
-          refuse(path, where + " holds strings of " +
-                           internal::format_i64(static_cast<std::int64_t>(size)) +
-                           " bytes and " + quoted(s) +
-                           " is longer; a string column grows only by "
-                           "writing the file again");
-        }
-      }
+  }
+}
+
+// A string key column is stored at the length of its longest element
+// (section 19), so a longer id than any before does not fit it.  The
+// column is written again at the new length -- every row read back and
+// put back, the attributes and the row scale restored -- before the new
+// rows go in.  Only the key columns are strings in this format.
+void grow_string_columns(File& f, const std::string& path, const Dataset& file,
+                         const Dataset& rows) {
+  for (const Key& fk : file.keys) {
+    if (fk.dtype != DType::String) continue;
+    const Key& rk = *rows.key(fk.name);
+    std::size_t longest = fk.string_size.value_or(0);
+    for (const std::string& s : rk.str) longest = std::max(longest, s.size());
+    if (longest <= fk.string_size.value_or(0)) continue;
+    const std::string p = "/keys/" + fk.name;
+    const internal::DsetInfo info = f.dataset_info(p);
+    const std::vector<std::string> held = f.read_strings(p);
+    std::vector<hsize_t> chunk = info.chunk;
+    if (chunk.empty()) chunk.push_back(1);
+    f.remove_link(p);
+    f.write_strings(p, longest, {static_cast<hsize_t>(held.size())},
+                    {H5S_UNLIMITED}, chunk, held, internal::pipeline_of(info));
+    f.attach_scale(p, "/row", 0);
+    f.write_attr(p, "role", AttrValue::text(fk.role));
+    if (fk.units.has_value()) f.write_attr(p, "units", AttrValue::text(*fk.units));
+    if (fk.lower.has_value()) f.write_attr(p, "lower", AttrValue::real(*fk.lower));
+    if (fk.upper.has_value()) f.write_attr(p, "upper", AttrValue::real(*fk.upper));
+    if (fk.category.has_value()) f.write_attr(p, "category", AttrValue::text(*fk.category));
+    if (fk.trajectory_group.has_value()) {
+      f.write_attr(p, "trajectory_group", AttrValue::text(*fk.trajectory_group));
     }
+    if (fk.parent.has_value()) f.write_attr(p, "parent", AttrValue::text(*fk.parent));
+    for (const auto& entry : fk.extra) f.write_attr(p, entry.first, entry.second);
+    (void)path;
   }
 }
 
@@ -645,6 +669,7 @@ std::int64_t append_rows(const Dataset& rows, const std::string& path,
   try {
     {
       File f = File::open_write(beside);
+      grow_string_columns(f, path, file, rows);
       if (appended > 0) {
         f.set_scale_length("/row", static_cast<hsize_t>(count));
         for (const RowDataset& d : datasets) {
