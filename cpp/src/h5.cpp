@@ -235,7 +235,13 @@ File File::open_read(const std::string& path) {
 
 File File::create(const std::string& path) {
   File f;
-  f.id_ = Id(H5Fcreate(path.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT,
+  // The root group is created with the file, so the file creation
+  // property list is where its object header is told not to record
+  // the clock: the same dataset written twice must give the same
+  // bytes, which every other object below asks for on its own list.
+  Id fcpl(H5Pcreate(H5P_FILE_CREATE));
+  H5Pset_obj_track_times(fcpl.get(), 0);
+  f.id_ = Id(H5Fcreate(path.c_str(), H5F_ACC_TRUNC, fcpl.get(),
                        H5P_DEFAULT));
   if (!f.id_.valid()) {
     throw Error("", "cannot create \"" + path + "\"");
@@ -666,7 +672,11 @@ std::vector<std::int64_t> File::read_i64_rows(const std::string& path,
 void File::make_group(const std::string& path) {
   if (path == "/" || exists(path)) return;
   make_group(parent_of(path));
-  Id group(H5Gcreate2(id_.get(), path.c_str(), H5P_DEFAULT, H5P_DEFAULT,
+  // No modification times in the group's object header, as on every
+  // dataset: a file's bytes depend on what it holds and not on when.
+  Id gcpl(H5Pcreate(H5P_GROUP_CREATE));
+  H5Pset_obj_track_times(gcpl.get(), 0);
+  Id group(H5Gcreate2(id_.get(), path.c_str(), H5P_DEFAULT, gcpl.get(),
                       H5P_DEFAULT));
   need(group.valid(), "cannot create the group \"" + path + "\"");
 }

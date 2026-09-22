@@ -12,6 +12,7 @@
 // statistics of a field with a missing value in it, and a zero-row
 // callable file written, validated and evaluated, whose evaluated form
 // keeps no callable and no `/callables` group.
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -22,6 +23,7 @@
 #include <utility>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "check.hpp"
@@ -605,9 +607,13 @@ void conventions_write() {
   check::is_true("a built file validates", mestra::validate(path).ok());
 
   // The validating write builds the file beside the name it was given
-  // and moves it into place, so the bytes must not depend on that.
+  // and moves it into place, so the bytes must not depend on that; nor
+  // on the clock, which an object header records unless told not to.
+  // The second write waits for the clock to move on, so that a header
+  // recording it would show.
   const std::string again = "mestra_unit_conventions_again.mes";
   std::remove(again.c_str());
+  std::this_thread::sleep_for(std::chrono::milliseconds(1100));
   mestra::write(d, again);
   {
     std::ifstream first(path.c_str(), std::ios::binary);
