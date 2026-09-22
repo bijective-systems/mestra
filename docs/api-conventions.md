@@ -71,6 +71,24 @@ non-strict read returns the dataset with the refused parts listed. A
 semantic fault (a missing unit, a bad split) never stops a read, so
 that `info` works on the files a user most needs to inspect.
 
+`append_rows(rows, path, replace_by=)` grows a file by the rows of a
+dataset built like a whole file, without rewriting the rows it holds.
+The dataset must have the file's structure: the same keys, scalars,
+supports and arrays with the same attributes, and the same values in
+every array that does not vary by row; a category id is matched by its
+entry's name, so a table built from the new rows alone maps onto the
+file's, and an entry the file's table lacks is refused. Key bounds
+widen to cover the new values, notes on the appended dataset replace
+the file's, and `created`, `writer` and `/private` stay as they are.
+The grown file is validated before it replaces the original, so a
+failure of any kind leaves the original untouched, and it is what one
+write of all the rows would have produced in content though not in
+bytes: the chunk shapes are the ones the file was created with (W12
+once they are no longer the default for the row count). `replace_by`
+names the id key; a row sharing an existing row's id is written over
+that row instead of after the last one. An unaligned file is not grown.
+C++ carries this call; a language that adds it follows the same rules.
+
 
 3. Weights and integration
 --------------------------

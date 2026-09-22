@@ -233,6 +233,15 @@ File File::open_read(const std::string& path) {
   return f;
 }
 
+File File::open_write(const std::string& path) {
+  File f;
+  f.id_ = Id(H5Fopen(path.c_str(), H5F_ACC_RDWR, H5P_DEFAULT));
+  if (!f.id_.valid()) {
+    throw Error("", "cannot open \"" + path + "\" for writing");
+  }
+  return f;
+}
+
 File File::create(const std::string& path) {
   File f;
   // The root group is created with the file, so the file creation
@@ -872,6 +881,193 @@ void File::write_strings(const std::string& path, std::size_t item_size,
                   buffer.data()) >= 0,
          "cannot write \"" + path + "\"");
   }
+}
+
+// --- growing a file in place ------------------------------------------
+
+namespace {
+
+// The rows `data` holds against a dataset's non-leading extents, and the
+// check that it holds whole rows and nothing else.
+std::size_t rows_held(const std::string& path, const DsetInfo& info,
+                      std::size_t elements) {
+  need(info.is_dataset && !info.shape.empty(),
+       "\"" + path + "\" has no rows to write");
+  std::size_t stride = 1;
+  for (std::size_t i = 1; i < info.shape.size(); ++i) {
+    const std::size_t e = static_cast<std::size_t>(info.shape[i]);
+    if (e != 0 && stride > kMaxDatasetElements / e) {
+      throw Error("E41", "\"" + path + "\" declares more elements than this "
+                                        "writer will write");
+    }
+    stride *= e;
+  }
+  if (stride == 0) return 0;
+  if (elements % stride != 0) {
+    throw Error("", "\"" + path + "\" takes " + std::to_string(stride) +
+                        " elements per row and was given " +
+                        std::to_string(elements));
+  }
+  return elements / stride;
+}
+
+// The hyperslab of rows [row, row + count), with a memory space to match.
+void select_row_block(const std::string& path, const DsetInfo& info,
+                      std::size_t row, std::size_t count, Id* space,
+                      Id* mem) {
+  const std::size_t have = static_cast<std::size_t>(info.shape[0]);
+  if (row > have || count > have - row) {
+    throw Error("", "rows " + std::to_string(row) + " to " +
+                        std::to_string(row + count) + " lie outside \"" +
+                        path + "\", which has " + std::to_string(have));
+  }
+  std::vector<hsize_t> start(info.shape.size(), 0);
+  std::vector<hsize_t> block = info.shape;
+  start[0] = static_cast<hsize_t>(row);
+  block[0] = static_cast<hsize_t>(count);
+  H5Sselect_hyperslab(space->get(), H5S_SELECT_SET, start.data(), nullptr,
+                      block.data(), nullptr);
+  *mem = Id(H5Screate_simple(static_cast<int>(block.size()), block.data(),
+                             nullptr));
+}
+
+}  // namespace
+
+void File::extend_rows(const std::string& path, hsize_t rows) {
+  const DsetInfo info = dataset_info(path);
+  need(info.is_dataset && !info.shape.empty(),
+       "\"" + path + "\" has no rows to extend");
+  need(info.chunked && !info.maxshape.empty() &&
+           info.maxshape[0] == H5S_UNLIMITED,
+       "\"" + path + "\" is not unlimited along its leading dimension");
+  need(rows >= info.shape[0], "\"" + path + "\" can only grow");
+  if (rows == info.shape[0]) return;
+  Id dset(H5Dopen2(id_.get(), path.c_str(), H5P_DEFAULT));
+  need(dset.valid(), "cannot open \"" + path + "\"");
+  std::vector<hsize_t> shape = info.shape;
+  shape[0] = rows;
+  need(H5Dset_extent(dset.get(), shape.data()) >= 0,
+       "cannot extend \"" + path + "\"");
+}
+
+void File::write_f64_rows(const std::string& path, std::size_t row,
+                          const std::vector<double>& data) {
+  const DsetInfo info = dataset_info(path);
+  const std::size_t count = rows_held(path, info, data.size());
+  if (count == 0) return;
+  Id dset(H5Dopen2(id_.get(), path.c_str(), H5P_DEFAULT));
+  need(dset.valid(), "cannot open \"" + path + "\"");
+  Id space(H5Dget_space(dset.get()));
+  Id mem;
+  select_row_block(path, info, row, count, &space, &mem);
+  need(H5Dwrite(dset.get(), H5T_NATIVE_DOUBLE, mem.get(), space.get(),
+                H5P_DEFAULT, data.data()) >= 0,
+       "cannot write rows of \"" + path + "\"");
+}
+
+void File::write_i64_rows(const std::string& path, std::size_t row,
+                          const std::vector<std::int64_t>& data) {
+  const DsetInfo info = dataset_info(path);
+  const std::size_t count = rows_held(path, info, data.size());
+  if (count == 0) return;
+  Id dset(H5Dopen2(id_.get(), path.c_str(), H5P_DEFAULT));
+  need(dset.valid(), "cannot open \"" + path + "\"");
+  Id space(H5Dget_space(dset.get()));
+  Id mem;
+  select_row_block(path, info, row, count, &space, &mem);
+  need(H5Dwrite(dset.get(), H5T_NATIVE_INT64, mem.get(), space.get(),
+                H5P_DEFAULT, data.data()) >= 0,
+       "cannot write rows of \"" + path + "\"");
+}
+
+void File::write_string_rows(const std::string& path, std::size_t row,
+                             const std::vector<std::string>& data) {
+  const DsetInfo info = dataset_info(path);
+  const std::size_t count = rows_held(path, info, data.size());
+  if (count == 0) return;
+  need(!info.type.variable_length && info.type.size > 0,
+       "\"" + path + "\" is not a fixed-length string dataset");
+  const std::size_t item = info.type.size;
+  for (const std::string& s : data) {
+    if (s.size() > item) {
+      throw Error("", "\"" + path + "\" holds strings of " +
+                          std::to_string(item) + " bytes and \"" + s +
+                          "\" is longer");
+    }
+  }
+  Id dset(H5Dopen2(id_.get(), path.c_str(), H5P_DEFAULT));
+  need(dset.valid(), "cannot open \"" + path + "\"");
+  Id type(H5Dget_type(dset.get()));
+  Id space(H5Dget_space(dset.get()));
+  Id mem;
+  select_row_block(path, info, row, count, &space, &mem);
+  std::string buffer(item * data.size(), '\0');
+  for (std::size_t i = 0; i < data.size(); ++i) {
+    std::memcpy(&buffer[i * item], data[i].data(), data[i].size());
+  }
+  need(H5Dwrite(dset.get(), type.get(), mem.get(), space.get(), H5P_DEFAULT,
+                buffer.data()) >= 0,
+       "cannot write rows of \"" + path + "\"");
+}
+
+void File::replace_attr(const std::string& path, const std::string& name,
+                        const AttrValue& value) {
+  {
+    Id object = open_object(id_.get(), path);
+    if (H5Aexists(object.get(), name.c_str()) > 0) {
+      need(H5Adelete(object.get(), name.c_str()) >= 0,
+           "cannot replace the attribute \"" + name + "\"");
+    }
+  }
+  write_attr(path, name, value);
+}
+
+void File::remove_attributes(const std::string& path) {
+  Id object = open_object(id_.get(), path);
+  H5O_info2_t info;
+  need(H5Oget_info3(object.get(), &info, H5O_INFO_NUM_ATTRS) >= 0,
+       "cannot count the attributes of \"" + path + "\"");
+  std::vector<std::string> names;
+  for (hsize_t i = 0; i < info.num_attrs; ++i) {
+    // Names are collected first and deleted after, since deleting
+    // while iterating by index would skip every other one.
+    const ssize_t n = H5Aget_name_by_idx(object.get(), ".", H5_INDEX_NAME,
+                                         H5_ITER_INC, i, nullptr, 0,
+                                         H5P_DEFAULT);
+    if (n < 0) continue;
+    std::string name(static_cast<std::size_t>(n) + 1, '\0');
+    H5Aget_name_by_idx(object.get(), ".", H5_INDEX_NAME, H5_ITER_INC, i,
+                       &name[0], name.size(), H5P_DEFAULT);
+    name.resize(static_cast<std::size_t>(n));
+    names.push_back(name);
+  }
+  for (const std::string& name : names) {
+    need(H5Adelete(object.get(), name.c_str()) >= 0,
+         "cannot delete the attribute \"" + name + "\" of \"" + path +
+             "\"");
+  }
+}
+
+void File::set_scale_length(const std::string& path, hsize_t length) {
+  extend_rows(path, length);
+  Id dset(H5Dopen2(id_.get(), path.c_str(), H5P_DEFAULT));
+  need(dset.valid(), "cannot open the dimension scale \"" + path + "\"");
+  // NAME as H5DSset_scale writes it: a NUL-terminated string one byte
+  // longer than the sentence, so that the grown scale carries the same
+  // attribute the writer gave it, with the new length spelled out.
+  const std::string name = scale_name_attribute(length);
+  if (H5Aexists(dset.get(), "NAME") > 0) {
+    need(H5Adelete(dset.get(), "NAME") >= 0,
+         "cannot replace the NAME of \"" + path + "\"");
+  }
+  Id type(H5Tcopy(H5T_C_S1));
+  H5Tset_size(type.get(), name.size() + 1);
+  Id space(H5Screate(H5S_SCALAR));
+  Id attr(H5Acreate2(dset.get(), "NAME", type.get(), space.get(),
+                     H5P_DEFAULT, H5P_DEFAULT));
+  need(attr.valid(), "cannot write the NAME of \"" + path + "\"");
+  need(H5Awrite(attr.get(), type.get(), name.c_str()) >= 0,
+       "cannot write the NAME of \"" + path + "\"");
 }
 
 void File::build_object_index() const {

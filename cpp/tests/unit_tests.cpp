@@ -12,6 +12,7 @@
 // statistics of a field with a missing value in it, and a zero-row
 // callable file written, validated and evaluated, whose evaluated form
 // keeps no callable and no `/callables` group.
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -1226,6 +1227,278 @@ void bytes_order() {
 
 }  // namespace
 
+
+// --- growing a file by rows -----------------------------------------
+//
+// `append_rows` must leave the file one write of every row would have
+// produced.  Checked on a family of rows over the unit square, with a
+// string id key, a status key whose table the rows build in their own
+// order, and a fixed label whose table is built backwards, so that the
+// remapping of category ids by entry name is exercised and not only
+// assumed; then row by row against a whole write of the same rows;
+// then on the corpus file that carries /notes and /private; then on
+// the refusals that keep a grown file honest, each of which must leave
+// the file exactly as it was.
+
+// One family member per entry of `members`: mach and cl from the
+// member number, a pressure field per row, and the fixed square.
+// `status_table` is the table the dataset declares, in that order;
+// `region_backwards` builds the region table the other way round.
+mestra::Dataset family_rows(const std::vector<int>& members,
+                            const std::vector<std::string>& status_table,
+                            bool region_backwards = false) {
+  mestra::Dataset d;
+  d.writer = "mestra unit tests";
+  d.created = "2026-09-22T00:00:00Z";
+  std::vector<double> mach;
+  std::vector<double> cl;
+  std::vector<std::string> ids;
+  std::vector<std::int64_t> status;
+  std::vector<double> pressure;
+  for (const int m : members) {
+    mach.push_back(0.4 + 0.1 * m);
+    cl.push_back(0.1 * m);
+    ids.push_back("member_" + std::to_string(m));
+    const std::string s = m % 2 == 0 ? "converged" : "iteration_limit";
+    const auto it = std::find(status_table.begin(), status_table.end(), s);
+    status.push_back(it - status_table.begin());
+    for (int n = 0; n < 4; ++n) pressure.push_back(100.0 * m + n);
+  }
+  d.add_key("mach", mach, "condition", "1");
+  d.add_category_table("status", status_table);
+  d.add_category_key("status", status, "status", "status");
+  mestra::Key id;
+  id.name = "member";
+  id.role = "id";
+  id.dtype = mestra::DType::String;
+  id.str = ids;
+  d.keys.push_back(id);
+  std::sort(d.keys.begin(), d.keys.end(),
+            [](const mestra::Key& a, const mestra::Key& b) {
+              return mestra::bytes_less(a.name, b.name);
+            });
+  d.add_scalar("cl", cl, "1");
+  if (region_backwards) {
+    d.add_category_table("region", {"outlet", "inlet"});
+  } else {
+    d.add_category_table("region", {"inlet", "outlet"});
+  }
+  mestra::Support& s = d.add_mesh_support("s0", 4, {5, 5}, {0, 3, 6},
+                                          {0, 1, 2, 0, 2, 3});
+  mestra::set_coordinates(s, {0, 0, 1, 0, 1, 1, 0, 1}, "m",
+                          {"node", {"component", 2}});
+  mestra::add_node_array(s, "pressure", pressure, "Pa", {"row", "node"});
+  // Cell 0 is the inlet and cell 1 the outlet whichever way the table
+  // is written.
+  mestra::add_cell_label(s, "region",
+                         region_backwards ? std::vector<std::int64_t>{1, 0}
+                                          : std::vector<std::int64_t>{0, 1},
+                         std::string("region"), {"cell"});
+  d.has_notes = true;
+  d.notes.emplace_back("members", mestra::AttrValue::integer(
+                                      static_cast<std::int64_t>(members.size())));
+  return d;
+}
+
+std::string status_name(const mestra::Dataset& d, std::size_t row) {
+  const mestra::Key* k = d.key("status");
+  const mestra::CategoryTable* t = d.category("status");
+  return t->entries.at(static_cast<std::size_t>(k->i64.at(row)));
+}
+
+void append_rows_grows_a_file() {
+  const std::vector<std::string> statuses{"converged", "iteration_limit"};
+  const std::string whole = "mestra_unit_whole.mes";
+  const std::string grown = "mestra_unit_grown.mes";
+  std::remove(whole.c_str());
+  std::remove(grown.c_str());
+  mestra::write(family_rows({0, 1, 2}, statuses), whole);
+
+  // Row by row: the first row makes the file, the next two grow it,
+  // the third with its tables in another order.
+  mestra::write(family_rows({0}, statuses), grown);
+  check::equal("appending the second member", mestra::append_rows(
+      family_rows({1}, {"iteration_limit", "converged"}), grown),
+      std::int64_t(2));
+  check::equal("appending the third member", mestra::append_rows(
+      family_rows({2}, {"converged"}, true), grown),
+      std::int64_t(3));
+  check::is_true("nothing is left beside the grown file",
+                 !std::ifstream(grown + ".mestra-appending").good());
+
+  const mestra::Report r = mestra::validate(grown);
+  check::equal("the grown file has no errors", r.errors.size(),
+               std::size_t(0));
+  for (const mestra::Finding& f : r.errors) {
+    std::cout << "     " << f.id << " " << f.where << ": " << f.message
+              << "\n";
+  }
+  for (const mestra::Finding& f : r.warnings) {
+    // The chunk shapes are the ones a one-row file was created with,
+    // which the validator says (W12), and one member did not converge
+    // (W02); nothing else may be different.
+    check::is_true("a grown file warns of nothing but its chunk shapes "
+                   "and its statuses: " + f.id,
+                   f.id == "W12" || f.id == "W02");
+  }
+
+  // The grown file holds what the whole write holds, row for row.
+  const mestra::Dataset a = mestra::read(whole);
+  const mestra::Dataset b = mestra::read(grown);
+  check::equal("row count", b.n_rows, a.n_rows);
+  check::is_true("mach column", b.key("mach")->f64 == a.key("mach")->f64);
+  check::equal("mach lower bound widened as the rows came",
+               b.key("mach")->lower.value_or(-1), a.key("mach")->lower.value_or(-2));
+  check::equal("mach upper bound widened as the rows came",
+               b.key("mach")->upper.value_or(-1), a.key("mach")->upper.value_or(-2));
+  check::is_true("member ids", b.key("member")->str == a.key("member")->str);
+  for (std::size_t row = 0; row < 3; ++row) {
+    check::equal("status of row " + std::to_string(row), status_name(b, row),
+                 status_name(a, row));
+  }
+  check::is_true("cl column", b.scalar("cl")->values == a.scalar("cl")->values);
+  const mestra::Support* sa = a.support("s0");
+  const mestra::Support* sb = b.support("s0");
+  check::is_true("pressure rows", sb->node_array("pressure")->data.f64 ==
+                                      sa->node_array("pressure")->data.f64);
+  check::is_true("coordinates untouched",
+                 sb->coordinates->data.f64 == sa->coordinates->data.f64);
+  check::equal("the region label reads the same through its table",
+               b.category("region")->entries.at(static_cast<std::size_t>(
+                   sb->cell_array("region")->data.i64.at(0))),
+               std::string("inlet"));
+  check::equal("the notes are the last rows' notes",
+               mestra::find_attr(b.notes, "members")->as_int(), std::int64_t(1));
+  check::equal("created is the file's own", b.created, a.created);
+  const mestra::Array lazy =
+      mestra::read_slot_rows(grown, "/supports/s0/node_arrays/pressure", 2, 3);
+  check::equal("a lazy read of the appended row", lazy.f64.at(3), 203.0);
+
+  // A row computed again replaces the row that shares its id.
+  mestra::Dataset again = family_rows({1}, statuses);
+  again.scalar("cl")->values = {9.9};
+  mestra::AppendOptions replace;
+  replace.replace_by = "member";
+  check::equal("replacing a row keeps the row count",
+               mestra::append_rows(again, grown, replace), std::int64_t(3));
+  const mestra::Dataset c = mestra::read(grown);
+  check::equal("the replaced row's scalar", c.scalar("cl")->values.at(1), 9.9);
+  check::equal("the other rows' scalars", c.scalar("cl")->values.at(2), 0.2);
+  check::equal("the replaced row's id", c.key("member")->str.at(1),
+               std::string("member_1"));
+  check::equal("a replaced row and a new row in one call",
+               mestra::append_rows(family_rows({1, 3}, statuses), grown, replace),
+               std::int64_t(4));
+
+  // The refusals, each leaving the file as it was.
+  auto refused = [&](const std::string& what,
+                     const std::function<mestra::Dataset()>& make,
+                     const std::string& expected,
+                     const mestra::AppendOptions& options = {}) {
+    std::string message;
+    const std::string rule = rule_of(
+        [&]() { mestra::append_rows(make(), grown, options); }, &message);
+    check::is_true(what + " is refused with the difference named: " + message,
+                   rule.empty() && message.find(expected) != std::string::npos);
+  };
+  refused("a different key",
+          [&]() {
+            mestra::Dataset d = family_rows({4}, statuses);
+            d.key("mach")->name = "alpha";
+            std::sort(d.keys.begin(), d.keys.end(),
+                      [](const mestra::Key& x, const mestra::Key& y) {
+                        return mestra::bytes_less(x.name, y.name);
+                      });
+            return d;
+          },
+          "the keys differ");
+  refused("other units on a key",
+          [&]() {
+            mestra::Dataset d = family_rows({4}, statuses);
+            d.key("mach")->units = "m s-1";
+            return d;
+          },
+          "units");
+  refused("another mesh",
+          [&]() {
+            mestra::Dataset d = family_rows({4}, statuses);
+            d.supports.clear();
+            mestra::Support& s = d.add_mesh_support("s0", 3, {5}, {0, 3}, {0, 1, 2});
+            mestra::set_coordinates(s, {0, 0, 1, 0, 1, 1}, "m",
+                                    {"node", {"component", 2}});
+            mestra::add_node_array(s, "pressure", {1, 2, 3}, "Pa", {"row", "node"});
+            mestra::add_cell_label(s, "region", {0}, std::string("region"), {"cell"});
+            return d;
+          },
+          "n_nodes");
+  refused("a fixed array with other values",
+          [&]() {
+            mestra::Dataset d = family_rows({4}, statuses);
+            d.support("s0")->coordinates->data.f64[0] = 0.5;
+            return d;
+          },
+          "does not vary by row and its values differ");
+  refused("a status the table does not hold",
+          [&]() { return family_rows({4}, {"converged", "iteration_limit", "stalled"}); },
+          "no entry \"stalled\"");
+  refused("an id longer than the column",
+          [&]() { return family_rows({10}, statuses); },
+          "is longer");
+  refused("replace_by naming a key that is not an id",
+          [&]() { return family_rows({4}, statuses); },
+          "not id",
+          [] { mestra::AppendOptions o; o.replace_by = "mach"; return o; }());
+  refused("a row count the arrays do not hold",
+          [&]() {
+            mestra::Dataset d = family_rows({4}, statuses);
+            d.n_rows = 2;
+            return d;
+          },
+          "values for 2 rows");
+  check::equal("the file is untouched by a refusal",
+               mestra::read_header(grown).n_rows, std::int64_t(4));
+  check::is_true("nothing is left beside the file by a refusal",
+                 !std::ifstream(grown + ".mestra-appending").good());
+
+  // A file with /notes and /private, grown: the private group is
+  // carried as it was, the notes are replaced.
+  const std::string kept = "mestra_unit_kept.mes";
+  std::remove(kept.c_str());
+  {
+    std::ifstream in("../../vectors/cases/notes_and_private/case.mes",
+                     std::ios::binary);
+    std::ofstream out(kept, std::ios::binary);
+    out << in.rdbuf();
+  }
+  if (std::ifstream(kept).good() && mestra::read_header(kept).n_rows == 2) {
+    mestra::Dataset more;
+    more.writer = "mestra unit tests";
+    more.created = "2026-09-22T00:00:00Z";
+    more.add_key("mach", {1.2}, "condition", "1");
+    more.add_scalar("cl", {0.7}, "1");
+    more.has_notes = true;
+    more.notes.emplace_back("solver", mestra::AttrValue::text("grown"));
+    check::equal("the corpus file grows", mestra::append_rows(more, kept),
+                 std::int64_t(3));
+    const mestra::Dataset k = mestra::read(kept);
+    check::is_true("the private group survives an append", k.has_private &&
+                                                               !k.private_group.empty());
+    check::equal("the notes are replaced whole", k.notes.size(),
+                 std::size_t(1));
+    check::equal("the appended value", k.scalar("cl")->values.at(2), 0.7);
+    check::is_true("a key without bounds stays without bounds",
+                   !k.key("mach")->upper.has_value());
+    check::equal("the corpus file still validates",
+                 mestra::validate(kept).errors.size(), std::size_t(0));
+  } else {
+    std::cout << "     (the notes_and_private corpus case is not beside the "
+                 "build; the private-group check was skipped)\n";
+  }
+  std::remove(kept.c_str());
+  std::remove(whole.c_str());
+  std::remove(grown.c_str());
+}
+
 int main() {
   sha256_vectors();
   support_id_vectors();
@@ -1244,5 +1517,6 @@ int main() {
   conventions_callable_coordinates();
   hardened_value_types();
   bytes_order();
+  append_rows_grows_a_file();
   return check::finish("mestra unit tests");
 }
