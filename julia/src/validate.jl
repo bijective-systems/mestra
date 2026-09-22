@@ -1096,8 +1096,11 @@ function check_supports!(v::Validator)
             # neither, so an unknown one draws no warning here; what
             # the byte-level rules say about it, they say through
             # `check_every_dataset!` and through nothing else.
+            # `coordinates` is a dataset when stored and a group when a
+            # callable serves it (section 19), so as a group it is known.
             if obj isa HDF5.Group
-                n in ("node_arrays", "cell_arrays") || report!(v, "W11",
+                n in ("node_arrays", "cell_arrays", "coordinates") ||
+                    report!(v, "W11",
                     "$(path)/$(n)", "a group this reader does not know")
             end
         end

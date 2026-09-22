@@ -1060,6 +1060,95 @@ void conventions_callables() {
   std::remove(path.c_str());
 }
 
+void conventions_callable_coordinates() {
+  // Section 10: a mesh support's coordinates are a slot like any
+  // other, so a callable may serve them -- a model of the geometry
+  // itself.  The support is added with its node count, and the
+  // builder is set_coordinates with the values dropped and the
+  // callable and its output added.
+  mestra::Dataset d;
+  d.writer = "mestra unit tests";
+  d.created = "2026-09-19T00:00:00Z";
+  d.add_key("mach", {}, "condition", "1");
+  d.key("mach")->lower = 0.1;
+  d.key("mach")->upper = 0.9;
+  d.add_mesh_support("s0", 6, {9, 9}, {0, 4, 8}, {0, 1, 4, 3, 1, 2, 5, 4});
+  mestra::Support* s = d.support("s0");
+  // x = x0 (1 + mach): the mesh stretches along x with mach; A runs
+  // over the flattened (node, component) order of the output.
+  mestra::AffineOutput xy;
+  xy.A = {0, 0, 1, 0, 2, 0, 0, 0, 1, 0, 2, 0};
+  xy.b = {0, 0, 1, 0, 2, 0, 0, 1, 1, 1, 2, 1};
+  xy.shape = {6, 2};
+  d.add_callable("m1", mestra::Affine({"mach"}, {{"coordinates", xy}}));
+  check::equal("served coordinates need a component length",
+               rule_of([s] {
+                 mestra::set_callable_coordinates(*s, "m",
+                                                  {"row", "node", "component"},
+                                                  "m1");
+               }),
+               std::string("E31"));
+  mestra::set_callable_coordinates(*s, "m", {"row", "node", {"component", 2}},
+                                   "m1");
+  check::is_true("a served coordinates slot names its callable",
+                 s->coordinates.has_value() &&
+                     s->coordinates->source == "callable:m1");
+  check::equal("and its output, coordinates by default",
+               s->coordinates->output.value_or(""),
+               std::string("coordinates"));
+  check::equal("and keeps its role", s->coordinates->role,
+               std::string("coordinates"));
+  check::equal("and takes varies from dims", s->coordinates->varies,
+               std::string("row"));
+
+  const std::string path = "mestra_unit_geometry.mes";
+  std::remove(path.c_str());
+  mestra::write(d, path);
+  check::is_true("a geometry model file validates clean",
+                 mestra::validate(path).ok());
+  const mestra::Dataset back = mestra::read(path);
+  const mestra::Support* got = back.support("s0");
+  check::is_true("and reads back with its coordinates served",
+                 got != nullptr && got->coordinates.has_value() &&
+                     got->coordinates->is_callable());
+  check::equal("a served slot stores no values",
+               got->coordinates->data.f64.size(), std::size_t(0));
+  {
+    // A weight is computed from coordinates, and served ones hold none.
+    mestra::Dataset copy = back;
+    std::string message;
+    rule_of([&copy] {
+      mestra::compute_weights(*copy.support("s0"), mestra::Location::Cell);
+    }, &message);
+    check::is_true("weights refuse a support whose coordinates are served",
+                   message.find("no values") != std::string::npos);
+  }
+
+  mestra::KeysTable table;
+  table.add_column("mach", {0.5});
+  const mestra::Dataset out = mestra::evaluate(back, table);
+  const mestra::ArraySlot& c = *out.support("s0")->coordinates;
+  check::equal("evaluation fills the coordinates", c.source,
+               std::string("data"));
+  check::is_true("as (row, node, component)",
+                 c.data.dims ==
+                     std::vector<std::string>{"row", "node", "component"});
+  check::equal("with the stretched x", c.data.at_f64({0, 2, 0}), 3.0);
+  check::equal("and the unchanged y", c.data.at_f64({0, 5, 1}), 1.0);
+  std::remove(path.c_str());
+
+  // An axis support's coordinates are its identity and are stored.
+  d.add_axis_support("t", {0.0, 1.0, 2.0}, "s");
+  check::equal("an axis support's coordinates are never served",
+               rule_of([&d] {
+                 mestra::set_callable_coordinates(*d.support("t"), "s",
+                                                  {"row", "node",
+                                                   {"component", 1}},
+                                                  "m1");
+               }),
+               std::string("E03"));
+}
+
 // The value types and the hash, at the edges a corpus file never
 // reaches.
 void hardened_value_types() {
@@ -1146,6 +1235,7 @@ int main() {
   conventions_post();
   prediction_view();
   conventions_callables();
+  conventions_callable_coordinates();
   hardened_value_types();
   bytes_order();
   return check::finish("mestra unit tests");

@@ -101,6 +101,9 @@ function coordinate_instances(ds::Dataset, sup::Support)
     c === nothing && throw(MestraError("E03", "/supports/$(sup.name)",
         "this support carries no coordinates, so there is nothing to " *
         "measure"))
+    is_callable_slot(c) && throw(MestraError(nothing, "/supports/$(sup.name)",
+        "the coordinates of this support are served by $(c.source) and " *
+        "hold no values; evaluate the file first"))
     p = permute_to_logical(ds, c)
     a = Array{Float64}(collect(parent(p)))
     first(dimnames(p)) in (:node, :cell) &&

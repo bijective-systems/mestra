@@ -767,6 +767,62 @@ end
     @test bitequal(Mestra.values(out, out.scalars["cl"])[1], 1.45)
 end
 
+@testset "a callable may serve a mesh support's coordinates" begin
+    ds = Mestra.Dataset(writer = "mestra.jl test 0",
+                        created = "2026-09-19T00:00:00Z")
+    Mestra.add_key!(ds, "mach", Float64[]; role = :condition, units = "1",
+                    bounds = (0.1, 0.9))
+    cells = (cell_types = UInt8[9, 9], cell_offsets = Int64[0, 4, 8],
+             cell_connectivity = Int64[0, 1, 4, 3, 1, 2, 5, 4])
+    # No coordinates and no node count: nothing to build a support on.
+    e = refusal(() -> Mestra.add_mesh_support!(ds, "s0"; cells...))
+    @test e !== nothing && e.rule == "E03"
+    s = Mestra.add_mesh_support!(ds, "s0"; n_nodes = 6, cells...)
+    @test s.coordinates === nothing
+    base = [0.0 0.0; 1.0 0.0; 2.0 0.0; 0.0 1.0; 1.0 1.0; 2.0 1.0]
+    # x = x0 (1 + mach): the mesh stretches along x with mach; A is
+    # over the flattened (node, component) order of the output.
+    stretch = zeros(12, 1)
+    stretch[1:2:11, 1] .= base[:, 1]
+    c = Mestra.affine(["mach"], Dict(
+        "coordinates" => (A = stretch, b = vec(permutedims(base)),
+                          shape = Int64[6, 2])))
+    # Which callable fills the slot is required; that it exists is
+    # what `write` checks, as for every callable slot in this language.
+    e = refusal(() -> Mestra.set_callable_coordinates!(ds, s; units = "m",
+                                                       components = 2))
+    @test e !== nothing && e.rule == "E14"
+    Mestra.add_callable!(ds, "m1", c)
+    slot = Mestra.set_callable_coordinates!(ds, s; units = "m",
+                                            components = 2, callable = "m1")
+    @test slot.source == "callable:m1"
+    @test slot.output == "coordinates"
+    @test slot.varies == "row"
+    e = refusal(() -> Mestra.set_callable_coordinates!(ds, s; units = "m",
+                                                       components = 2,
+                                                       callable = "m1"))
+    @test e !== nothing && e.rule == "E03"
+    path = joinpath(SCRATCH, "geometry.mes")
+    Mestra.write(ds, path)
+    @test Mestra.validate(path).errors == String[]
+    back = Mestra.read(path)
+    @test Mestra.is_callable_slot(back.supports[1].coordinates)
+    e = refusal(() -> Mestra.compute_weights(back, "s0", :cell))
+    @test e !== nothing && occursin("evaluate the file first", e.msg)
+    out = Mestra.evaluate(back, Dict("mach" => [0.5]))
+    got = Mestra.values(out, out.supports[1].coordinates)
+    @test !Mestra.is_callable_slot(out.supports[1].coordinates)
+    @test bitequal(Mestra.at(got; row = 1, node = 3, component = 1), 3.0)
+    @test bitequal(Mestra.at(got; row = 1, node = 3, component = 2), 0.0)
+    # An axis support's coordinates are its identity and are stored.
+    t = Mestra.add_axis_support!(ds, "t"; coordinates = [0.0, 1.0, 2.0],
+                                 units = "s")
+    e = refusal(() -> Mestra.set_callable_coordinates!(ds, t; units = "s",
+                                                       components = 1,
+                                                       callable = "m1"))
+    @test e !== nothing && e.rule == "E03"
+end
+
 @testset "notes and private are carried, never interpreted" begin
     ds = Mestra.read(case_file("mesh_two_rows"); lazy = false)
     Mestra.set_notes!(ds, Dict("solver" => "a solver, version 3",

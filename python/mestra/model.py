@@ -606,8 +606,9 @@ class Support:
     `support_id`, and the arrays on it: `coordinates`, which a
     support has exactly one of and is part of what the support is,
     and `node_arrays` and `cell_arrays`, which hold every other one.
-    Its builders are `add_node_array`, `add_cell_array` and
-    `add_callable_slot`.
+    Its builders are `add_node_array`, `add_cell_array`,
+    `add_callable_slot` and, for coordinates a callable serves,
+    `set_callable_coordinates`.
     """
 
     def __init__(self, name: str, kind: str = "mesh", *,
@@ -835,6 +836,53 @@ class Support:
             role=role, varies=varies, components=components,
             callable_id=_callable_id(self.dataset, callable, name),
             output=output, **rest)
+
+    def set_callable_coordinates(self, *, units: str,
+                                 callable: Any = None,
+                                 output: str = "coordinates",
+                                 components: int | None = None,
+                                 varies: str = "row") -> ArraySlot:
+        """Coordinates a callable serves rather than data.
+
+        The one coordinates array of a mesh support, with the values
+        left out and the callable and its output added, the way
+        `add_callable_slot` is `add_node_array` without its values: a
+        model of the geometry itself. Add the support with `n_nodes=`
+        and no `coordinates=`, then call this. `callable` is the id
+        you gave `Dataset.add_callable`, or the object itself; the
+        slot stores no values, so it declares its `components`. An
+        axis support's coordinates are part of its identity (section
+        24) and are always stored.
+        """
+        name = "coordinates"
+        if self.kind != "mesh":
+            raise MestraError(
+                "E03", "a callable may serve the coordinates of a mesh "
+                "support; this support is of kind %s, whose coordinates "
+                "are stored" % self.kind, name)
+        if self.coordinates is not None:
+            raise MestraError(
+                "E03", "this support already has its one coordinates "
+                "array", name)
+        if components is None or int(components) < 1:
+            raise MestraError(
+                "E31", "a callable slot stores no values, so it declares "
+                "its width; pass components=", name)
+        if not units:
+            raise MestraError(
+                "E39", "coordinates carry units; pass units=", name)
+        callable_id = _callable_id(self.dataset, callable, name)
+        if self.dataset is None or \
+                callable_id not in self.dataset.callables:
+            raise MestraError(
+                "E14", "no callable called %r has been added; call "
+                "add_callable first" % callable_id, name)
+        _check_varies(self.dataset, varies, None, name)
+        self.coordinates = ArraySlot(
+            name, "coordinates", varies=varies, components=int(components),
+            location="node", units=units, support=self,
+            source="callable:" + callable_id, output=output)
+        return self.coordinates
 
     def _add(self, into: dict[str, ArraySlot], location: str, name: str,
              values: Any, *, units: str | None,
@@ -1435,10 +1483,20 @@ class Dataset:
                 "= none, because the axis is part of the support's "
                 "identity; pass varies=\"none\", or make the quantity "
                 "that differs between rows a field on the axis", name)
-        if kind in ("mesh", "axis") and coords is None:
+        # A mesh may take its coordinates from a callable instead,
+        # through `Support.set_callable_coordinates`; it then needs
+        # its node count said out loud, and `write` holds it to E03
+        # if the coordinates never arrive.
+        if kind == "axis" and coords is None:
             raise MestraError(
-                "E03", "a %s support has exactly one coordinates "
-                "array; pass coordinates=" % kind, name)
+                "E03", "an axis support has exactly one coordinates "
+                "array, and it is stored; pass coordinates=", name)
+        if kind == "mesh" and coords is None and n_nodes is None:
+            raise MestraError(
+                "E03", "a mesh support has exactly one coordinates "
+                "array; pass coordinates=, or n_nodes= and then "
+                "set_callable_coordinates for coordinates a callable "
+                "serves", name)
         _check_varies(self, varies, coords, name)
         if kind == "mesh" and cells is None:
             raise MestraError(

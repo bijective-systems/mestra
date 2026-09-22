@@ -49,7 +49,13 @@ Callables: `add_callable(id, callable)` then `add_callable_slot(...)`
 with the same argument order as the array builders plus `callable`
 and `output`. A band slot, stored or served, is the same builder
 with `statistic="band"` and `of`; a stored one also takes `level` and
-`method`, and is refused without them (E12).
+`method`, and is refused without them (E12). A mesh support's
+coordinates are served the same way, by the coordinates builder with
+the values dropped and `callable` and `output` added:
+`set_callable_coordinates(support, units, dims | components,
+callable, output)`, spelled to the language's idiom, on a mesh
+support added with its node count and no coordinates. `output`
+defaults to `coordinates`.
 
 
 2. Writing and reading

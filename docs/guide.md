@@ -205,7 +205,10 @@ Any slot may hold stored data or name a *callable* that produces it
 (SPEC section 10). A fitted model is therefore an ordinary file with
 zero rows: its key columns carry only their bounds, which is the
 domain the model is valid over, and its slots carry their units and
-their shape and say `source = callable:m1`.
+their shape and say `source = callable:m1`. A mesh support's
+coordinates are a slot too, so a model of the geometry itself is the
+same kind of file: the support carries its cells and its node count,
+and its coordinates are served, beside the fields on them.
 
 A callable is four things and nothing more: call it with a keys table
 and get one prediction per output back, a mean and, when the model

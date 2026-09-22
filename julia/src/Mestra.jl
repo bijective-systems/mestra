@@ -31,6 +31,7 @@ The public API, each name with a docstring of its own:
                set_generalisation_group!, add_mesh_support!,
                add_axis_support!, add_none_support!, add_node_array!,
                add_cell_array!, add_callable!, add_callable_slot!,
+               set_callable_coordinates!,
                add_callable_scalar!, set_callable!, set_row_support!,
                set_notes!, set_private!
     Weights    compute_weights, compute_weights!

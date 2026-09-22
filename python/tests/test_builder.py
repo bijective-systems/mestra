@@ -541,3 +541,72 @@ def test_the_support_id_is_the_worked_example():
         "57467fe7370808bdb0ad01b95d963f59e8bc6762f90f96049453ae33bb05a54c")
     assert mestra.support_digest(0) == (
         "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc")
+
+
+def test_a_callable_may_serve_a_mesh_supports_coordinates(tmp_path):
+    """Section 10: a model of the geometry itself. The support is
+    added with its node count and no coordinates, and the coordinates
+    builder with the values dropped names the callable."""
+    ds = mestra.Dataset(writer="t")
+    ds.add_key("mach", [], role="condition", units="1", lower=0.1,
+               upper=0.9)
+    with pytest.raises(MestraError) as caught:
+        ds.add_support("s0", cells=CELLS)
+    assert caught.value.rule == "E03"
+    assert "set_callable_coordinates" in caught.value.message
+    support = ds.add_support("s0", cells=CELLS, n_nodes=6)
+    # x = x0 (1 + mach): the mesh stretches along x with mach.
+    stretch = np.zeros((12, 1))
+    stretch[0::2, 0] = XY[:, 0]
+    model = mestra.Affine(["mach"], {
+        "coordinates": {"A": stretch, "b": XY.ravel(), "shape": [6, 2]}})
+    with pytest.raises(MestraError) as caught:
+        support.set_callable_coordinates(units="m", callable="m1",
+                                         components=2)
+    assert caught.value.rule == "E14"
+    ds.add_callable("m1", model)
+    with pytest.raises(MestraError) as caught:
+        support.set_callable_coordinates(units="m", callable="m1")
+    assert caught.value.rule == "E31"
+    slot = support.set_callable_coordinates(units="m", callable=model,
+                                            components=2)
+    assert slot.source == "callable:m1"
+    assert slot.output == "coordinates"
+    assert slot.varies == "row"
+    assert slot.role == "coordinates"
+    with pytest.raises(MestraError) as caught:
+        support.set_callable_coordinates(units="m", callable="m1",
+                                         components=2)
+    assert caught.value.rule == "E03"
+
+    path = str(tmp_path / "geometry.mes")
+    mestra.write(ds, path)
+    assert mestra.validate(path).error_ids == []
+    with mestra.read(path) as back:
+        served = back.supports["s0"].coordinates
+        assert served.is_callable and served.data is None
+        assert served.components == 2
+        with pytest.raises(MestraError) as caught:
+            mestra.compute_weights(back.supports["s0"], "cell")
+        assert "evaluate the file first" in caught.value.message
+        out = mestra.evaluate(back, {"mach": np.array([0.5])})
+    got = out.supports["s0"].coordinates
+    assert not got.is_callable
+    assert got.dims == ("row", "node", "component")
+    want = XY.copy()
+    want[:, 0] *= 1.5
+    np.testing.assert_array_equal(np.asarray(got.read().values)[0], want)
+
+
+def test_an_axis_supports_coordinates_are_never_served():
+    ds = mestra.Dataset(writer="t")
+    ds.add_callable("m1", mestra.Affine(["mach"], {}))
+    with pytest.raises(MestraError) as caught:
+        ds.add_support("t", kind="axis", n_nodes=3, units="s")
+    assert caught.value.rule == "E03"
+    axis = ds.add_support("t", coordinates=[0.0, 1.0, 2.0], units="s")
+    with pytest.raises(MestraError) as caught:
+        axis.set_callable_coordinates(units="s", callable="m1",
+                                      components=1)
+    assert caught.value.rule == "E03"
+    assert "identity" in caught.value.message or "stored" in caught.value.message

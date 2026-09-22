@@ -200,6 +200,11 @@ def _axis_measures(support: Support) -> np.ndarray:
 def _coordinates(support: Support) -> np.ndarray:
     """The node coordinates, as (node, component)."""
     slot = support.coordinates
+    if slot is not None and slot.is_callable:
+        raise MestraError(
+            "", "the coordinates of this support are served by %s and "
+            "hold no values; evaluate the file first" % slot.source,
+            support.name)
     if slot is None or slot.data is None:
         raise MestraError(
             "", "this support carries no coordinates, so it has no "

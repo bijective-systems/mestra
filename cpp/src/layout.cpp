@@ -28,7 +28,8 @@ std::size_t rows_on_support(const Dataset& d, std::size_t index) {
 
 bool needs_local_row(const Dataset& d, const Support& s) {
   if (d.aligned) return false;
-  if (s.coordinates.has_value() && s.coordinates->varies == "row") {
+  if (s.coordinates.has_value() && s.coordinates->varies == "row" &&
+      !s.coordinates->is_callable()) {
     return true;
   }
   for (const ArraySlot& a : s.node_arrays) {
@@ -128,7 +129,9 @@ bool known_root_group(const std::string& name) {
 }
 
 bool known_support_group(const std::string& name) {
-  return one_of(name, {"node_arrays", "cell_arrays"});
+  // `coordinates` is a dataset when stored and a group when a callable
+  // serves it (section 19), so as a group it is known, not W11.
+  return one_of(name, {"node_arrays", "cell_arrays", "coordinates"});
 }
 
 bool root_scale_name(const std::string& name) {
