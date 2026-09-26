@@ -18,6 +18,11 @@ files are too large to commit and are made once, before the first run:
 
     python vectors/generate.py --on-demand
 
+Checked writes require MATLAB's JVM and a filesystem supporting Java's
+atomic move, so a failed replacement cannot delete the old file.
+Non-ASCII fixed strings are explicitly refused by this implementation.
+See [implementation capabilities](../docs/compatibility.md).
+
 Then the suite, corpus and all:
 
     matlab -nodisplay -batch \

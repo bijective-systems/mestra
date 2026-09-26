@@ -4,8 +4,8 @@ name: publish
 # else in this repository is published this way: MATLAB, C++ and Julia
 # are installed from the tree, as their READMEs say.
 #
-# Two jobs, because the second one holds a credential and the first one
-# must not.  `build` makes the sdist and the wheel, installs the wheel
+# Only `publish` holds a credential. `conformance` reuses the full CI
+# matrix at this tag's commit. `build` makes the sdist and the wheel, installs the wheel
 # where the source tree cannot be imported by accident, runs the seven
 # documented examples against it and checks that the tag, pyproject.toml
 # and `mestra.__version__` all name the same version.  `publish` takes
@@ -27,6 +27,9 @@ defaults:
     shell: bash
 
 jobs:
+  conformance:
+    uses: ./.github/workflows/ci.yml
+
   build:
     name: build and check
     runs-on: ubuntu-latest
@@ -101,7 +104,7 @@ jobs:
 
   publish:
     name: upload to PyPI
-    needs: build
+    needs: [build, conformance]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:

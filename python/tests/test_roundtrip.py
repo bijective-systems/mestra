@@ -9,14 +9,62 @@ machine produce the same bytes.
 from __future__ import annotations
 
 import os
+import stat
 
 import pytest
 
 import mestra
+from mestra import writer
 from mestra.model import FileSource
 from tests import corpus
 
 VALID = corpus.valid_case_names()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_replacement_preserves_permissions_and_new_files_use_umask(tmp_path):
+    ds = mestra.read(corpus.case_path("mesh_two_rows"), lazy=False)
+    control = tmp_path / "normal-creation"
+    control.touch()
+    target = tmp_path / "result.mes"
+    mestra.write(ds, str(target))
+    assert stat.S_IMODE(target.stat().st_mode) == stat.S_IMODE(control.stat().st_mode)
+    target.chmod(0o640)
+    mestra.write(ds, str(target))
+    assert stat.S_IMODE(target.stat().st_mode) == 0o640
+    assert not mestra.validate(str(target)).errors
+
+
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("phase", ["write", "replace"])
+def test_failed_replacement_preserves_the_destination(tmp_path, monkeypatch,
+                                                     existing, phase):
+    ds = mestra.read(corpus.case_path("mesh_two_rows"), lazy=False)
+    target = tmp_path / "result.mes"
+    if existing:
+        mestra.write(ds, str(target))
+    before = target.read_bytes() if existing else None
+
+    def interrupted_write(dataset, handle):
+        handle.create_group("unfinished")
+        raise OSError("injected write failure")
+
+    def interrupted_replace(source, destination):
+        # Publication receives a closed, complete Mestra file.
+        assert not mestra.validate(source).errors
+        raise OSError("injected replace failure")
+
+    if phase == "write":
+        monkeypatch.setattr(writer, "_write", interrupted_write)
+    else:
+        monkeypatch.setattr(writer.os, "replace", interrupted_replace)
+    with pytest.raises(OSError, match=f"injected {phase} failure"):
+        mestra.write(ds, str(target))
+    assert (target.read_bytes() if target.exists() else None) == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == (
+        ["result.mes"] if existing else [])
+    if existing:
+        assert not mestra.validate(str(target)).errors
 
 
 def test_write_validates_first_and_refuses_on_an_error(tmp_path):

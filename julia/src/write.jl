@@ -188,32 +188,47 @@ function write(ds::Dataset, path::AbstractString; check::Bool = true)
     # into place once it has validated, so that a refusal leaves
     # whatever was at `path` alone.
     target = String(path)
-    out = check ? target * ".mestra-check" : target
-    src = ds.path !== nothing && any_unread(ds) ?
-          HDF5.h5open(ds.path, "r") : nothing
+    mode = check && isfile(target) ? filemode(target) & 0o7777 : nothing
+    directory = check ? mktempdir(dirname(abspath(target)); prefix = ".mestra-",
+                                   cleanup = false) : nothing
+    out = check ? joinpath(directory, "data.mes") : target
+    src = nothing
     try
+        src = ds.path !== nothing && any_unread(ds) ?
+              HDF5.h5open(ds.path, "r") : nothing
         HDF5.h5open(out, "w"; libver_bounds = WRITER_LIBVER) do f
             write_file(f, ds, src)
         end
-    catch
-        check && rm(out; force = true)
-        rethrow()
+        if src !== nothing
+            close(src)
+            src = nothing
+        end
+        if check
+            r = validate(out)
+            if !isempty(r.errors)
+                bad = [f for f in r.findings if startswith(f.rule, "E")]
+                throw(MestraError(first(bad).rule, target,
+                    "this dataset does not validate, so nothing was written. " *
+                    "Fix what the findings name, or pass `check = false` to " *
+                    "write it anyway:\n" *
+                    join(["  " * sprint(show, f) for f in bad], "\n")))
+            end
+            mode === nothing || chmod(out, mode)
+            publish_file(out, target)
+        end
     finally
         src === nothing || close(src)
+        directory === nothing || rm(directory; recursive = true, force = true)
     end
-    if check
-        r = validate(out)
-        if !isempty(r.errors)
-            bad = [f for f in r.findings if startswith(f.rule, "E")]
-            rm(out; force = true)
-            throw(MestraError(first(bad).rule, target,
-                "this dataset does not validate, so nothing was written. " *
-                "Fix what the findings name, or pass `check = false` to " *
-                "write it anyway:\n" *
-                join(["  " * sprint(show, f) for f in bad], "\n")))
-        end
-        mv(out, target; force = true)
-    end
+    return target
+end
+
+function publish_file(source::AbstractString, target::AbstractString)
+    # Use the same libuv primitive as Base's rename, without mv's
+    # copy/delete fallback (or older Julia rename's fallback). Both paths
+    # are on the same filesystem. A failed rename must leave the target.
+    err = ccall(:jl_fs_rename, Int32, (Cstring, Cstring), source, target)
+    err < 0 && Base.uv_error("rename($(repr(source)), $(repr(target)))", err)
     return target
 end
 

@@ -452,6 +452,33 @@ classdef ConventionsTest < matlab.unittest.TestCase
             testCase.verifyTrue(mestra.validate(out).valid);
         end
 
+        function failedPublicationPreservesExistingBytes(testCase)
+            out = [tempname() '.mes'];
+            cleanup = onCleanup(@() ConventionsTest.removeIfPresent(out));
+            mestra.write(ConventionsTest.twoRows(), out);
+            fid = fopen(out, 'rb'); before = fread(fid, Inf, '*uint8'); fclose(fid);
+            testCase.verifyError(@() mestra.internal.publishFile( ...
+                [out '.missing'], out), 'mestra:write');
+            fid = fopen(out, 'rb'); after = fread(fid, Inf, '*uint8'); fclose(fid);
+            testCase.verifyEqual(after, before);
+            testCase.verifyTrue(mestra.validate(out).valid);
+            % Successful replacement of an existing file uses the same path.
+            mestra.write(ConventionsTest.twoRows(), out);
+            testCase.verifyTrue(mestra.validate(out).valid);
+        end
+
+        function failedWriteDoesNotMoveIntoADirectory(testCase)
+            folder = tempname(); mkdir(folder);
+            cleanup = onCleanup(@() rmdir(folder, 's'));
+            out = fullfile(folder, 'target.mes'); mkdir(out);
+            testCase.verifyError(@() mestra.write( ...
+                ConventionsTest.twoRows(), out), 'mestra:write');
+            entries = dir(folder);
+            testCase.verifyEqual({entries(~ismember({entries.name}, {'.', '..'})).name}, ...
+                                 {'target.mes'});
+            testCase.verifyTrue(isfolder(out));
+        end
+
         function everythingTheBuilderMakesValidatesClean(testCase)
         %everythingTheBuilderMakesValidatesClean  Including the chunk
         %   shape, which is M4: the writer picks the default of

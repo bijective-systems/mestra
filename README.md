@@ -45,11 +45,17 @@ The same thing on a mesh, with three members and a label, runnable:
 concept, `SPEC.md` is the reference, and each of `python/`, `matlab/`,
 `cpp/` and `julia/` has a README for that interface.
 
-Status: **specification version 0 with four conforming
-implementations** (Python, MATLAB, C++, Julia), a 75-case conformance
-corpus, and a hostile-file subset. The name is written `mestra`, lower
-case, everywhere. No implementation is the reference: the spec and the
-corpus are.
+Status: **specification version 0**, with Python, MATLAB, C++ and Julia
+implementations checked against a 75-case conformance corpus and a
+hostile-file subset. MATLAB supports ASCII strings only; see the
+[capability table](docs/compatibility.md) for implementation limits and
+the distinction between reading a model file and executing its callable.
+The name is written `mestra`, lower case, everywhere. No implementation
+is the reference: the spec and the corpus are.
 
 Licence: code under Apache-2.0 (see LICENSE); specification text under
 CC-BY-4.0. Copyright (c) 2026 Bijective Systems.
+
+[Contributing and changing the format](CONTRIBUTING.md) describes the
+compatibility rules. [Releasing](docs/releasing.md) describes the checks
+required for a release and for updating downstream consumers.

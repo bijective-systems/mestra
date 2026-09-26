@@ -65,6 +65,13 @@ defaults to `coordinates`.
 the findings, unless the caller passes `check=false`. A file written
 by any implementation validates clean in every implementation.
 
+A checked write stages beside the destination, closes the file and
+publishes it only on success. A prepublication failure preserves an
+existing destination. There is no delete-then-copy fallback. This is
+single-writer replacement, not concurrent-update coordination or a
+power-loss durability promise. See `compatibility.md` for platform and
+implementation requirements.
+
 `read(path)` is strict by default and refuses a file that breaks a
 structural rule (E01, E16, E19, E25, E26, E29, E30, E40, E41); a
 non-strict read returns the dataset with the refused parts listed. A

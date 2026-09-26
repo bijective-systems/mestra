@@ -59,11 +59,12 @@ add a third way to say "these cells belong together".
 Connectivity never varies
 -------------------------
 
-Same connectivity is the correspondence invariant the whole suite is
-built on: node k in every row is the same node. The file states it
-structurally (one support) and the validator checks it; a content hash
-gives each support an identity so the same check is cheap across
-files. Rows with different
+An aligned producer establishes that node k in every row has the same
+meaning. One support states the shared connectivity structurally, and
+the validator checks that structure; a content hash gives each support
+an identity so its structure can be checked cheaply across files. The
+hash excludes changing mesh coordinates and cannot prove semantic node
+correspondence between unrelated producers. Rows with different
 connectivity are on different supports. The file allows several
 supports so it can hold benchmark data with varying meshes; the
 alignment claim is then false and the tools say so.
