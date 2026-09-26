@@ -26,7 +26,11 @@ default for every object.
 
 from __future__ import annotations
 
+import os
+import stat
+import tempfile
 from collections.abc import Iterable, Sequence
+from pathlib import Path
 from typing import Any
 
 import h5py
@@ -73,6 +77,11 @@ def write(dataset: Dataset, path: str, check: bool = True) -> None:
     A dataset that was read from a file with parts this reader could
     not copy is refused rather than written short: rewriting it
     would drop them silently.
+
+    The file is built beside the destination, closed, then atomically
+    replaced. An exception before replacement leaves an existing file
+    untouched. This is not a power-loss durability guarantee. Concurrent
+    writers need caller coordination; the last successful replace wins.
     """
     # A lazy read leaves a callable's dictionary in the file until
     # something asks for it (section 7 of the conventions), and
@@ -97,8 +106,22 @@ def write(dataset: Dataset, path: str, check: bool = True) -> None:
             "them" % ", ".join(sorted(dataset.lossy)[:4]), str(path))
     if check:
         _refuse_what_the_validator_would(dataset, str(path))
-    with h5py.File(path, "w") as f:
-        _write(dataset, f)
+    target = Path(path)
+    try:
+        mode = stat.S_IMODE(target.stat().st_mode)
+    except FileNotFoundError:
+        mode = None
+    # A private staging directory gives HDF5 a fresh filename, so new
+    # files retain its usual umask-based permissions rather than mkstemp's
+    # fixed 0600. Existing files retain their permission bits on replacement.
+    with tempfile.TemporaryDirectory(prefix=f".{target.name}.mestra-",
+                                      dir=target.parent) as directory:
+        staged = Path(directory) / "data.mes"
+        with h5py.File(staged, "w") as f:
+            _write(dataset, f)
+        if mode is not None:
+            staged.chmod(mode)
+        os.replace(staged, target)
 
 
 def _refuse_what_the_validator_would(dataset: Dataset,
@@ -475,5 +498,3 @@ def _repr_line(obj: Any) -> str | None:
         return None
     line = repr(obj)
     return line if "\n" not in line else None
-
-

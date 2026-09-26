@@ -1335,8 +1335,41 @@ end
     @test Mestra.write(ds, bad; check = false) == bad
     broken = Mestra.validate(bad)
     @test !isempty(broken.errors) && e.rule in broken.errors
-    # a file that was already there is left alone by a refusal
+    # Try the refused write against the existing file as well.
+    before = Base.read(good)
+    @test refusal(() -> Mestra.write(ds, good)) !== nothing
+    @test Base.read(good) == before
     @test Mestra.validate(good).errors == String[]
+end
+
+@testset "failed publication preserves the destination" begin
+    mktempdir() do directory
+        ds, _ = six_node_dataset()
+        target = joinpath(directory, "result.mes")
+        Mestra.write(ds, target)
+        before = Base.read(target)
+        @test_throws Base.IOError Mestra.publish_file(target * ".missing", target)
+        @test Base.read(target) == before
+        Mestra.write(ds, target)
+        @test Mestra.validate(target).errors == String[]
+        @test readdir(directory) == ["result.mes"]
+        if !Sys.iswindows()
+            control = joinpath(directory, "normal-creation")
+            touch(control)
+            @test filemode(target) == filemode(control)
+            rm(control)
+            chmod(target, 0o640)
+            Mestra.write(ds, target)
+            @test filemode(target) & 0o777 == 0o640
+        end
+
+        # Never remove a directory or move the staged file inside it.
+        blocked = joinpath(directory, "directory.mes")
+        mkdir(blocked)
+        @test_throws Base.IOError Mestra.write(ds, blocked)
+        @test isdir(blocked) && isempty(readdir(blocked))
+        @test Set(readdir(directory)) == Set(["result.mes", "directory.mes"])
+    end
 end
 
 @testset "one finding per rule per object, and a report to read" begin

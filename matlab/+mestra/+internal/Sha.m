@@ -2,8 +2,9 @@ classdef Sha
 %Sha  SHA-256, written out in MATLAB.
 %
 %   The digest is written here rather than taken from Java so that the
-%   package needs nothing outside base MATLAB and behaves the same
-%   whether or not a virtual machine is loaded.  Every step is done on
+%   hashing needs nothing outside base MATLAB and behaves the same
+%   whether or not a virtual machine is loaded. Checked file replacement
+%   uses the JVM separately. Every step here is done on
 %   doubles and reduced modulo 2^32, because MATLAB's integer types
 %   saturate instead of wrapping.
 %

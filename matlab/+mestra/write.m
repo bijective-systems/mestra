@@ -48,6 +48,10 @@ function write(dataset, path, varargin)
 %   nothing.
 %
 %   The file is created fresh; an existing file at PATH is replaced.
+%   Checked publication uses Java's atomic move. It requires MATLAB's
+%   JVM and a filesystem supporting atomic replacement; otherwise it
+%   fails without deleting the previous file. There is no copy/delete
+%   fallback and no power-loss durability guarantee.
 %
 %   STRINGS ARE ASCII HERE.  The format puts every string in a
 %   fixed-length UTF-8 field and counts the size in bytes, and
@@ -98,15 +102,7 @@ function write(dataset, path, varargin)
                '''Check'', false to write it anyway'], bad{1}, path, ...
               mestra.report(r, 'String', true));
     end
-    if exist(path, 'file') == 2
-        delete(path);
-    end
-    [ok, msg] = movefile(tmp, path, 'f');
-    clear cleanup
-    if ~ok
-        error('mestra:write', 'the file could not be put at %s: %s', ...
-              path, msg);
-    end
+    mestra.internal.publishFile(tmp, path);
 end
 
 function removeIfPresent(path)
